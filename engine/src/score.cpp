@@ -48,6 +48,13 @@ int components_for_tiers(int tiers, bool threat_tier) {
   return kScoreKeys;
 }
 
+int mech_grid_rate(const Board& before, const ScoreOptions& options) {
+  if (!options.mech_exchange()) return -1;
+  int rate = options.mech_grid;
+  if (options.mech_grid_turns) rate = std::min(rate, std::max(0, before.total_turns - before.turn));
+  return rate;
+}
+
 std::string Score::describe(bool threat_tier) const {
   std::ostringstream out;
   bool first = true;
@@ -105,6 +112,9 @@ Score score_turn(const Board& before, const Board& after, const TurnContext* ctx
   }
   if (options.objectives_first && options.tier_on()) {
     s[ScoreKey::Threat] += kObjectivesFirstWeight * s[ScoreKey::ObjectiveProgress];
+  }
+  if (const int rate = mech_grid_rate(before, options); rate >= 0) {
+    s[ScoreKey::GridLost] = mech_grid_slot(rate, s[ScoreKey::GridLost], s[ScoreKey::MechsLost], after.grid_power);
   }
   return s;
 }

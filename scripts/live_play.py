@@ -283,11 +283,14 @@ class Engine:
         return reply
 
     def solve(self, path: Path, time_limit: float, max_time: float = 0, min_tiers: int = 0,
-              threat_tier: bool = False, threat_kills: bool = False, objectives_first: bool = False) -> dict:
+              threat_tier: bool = False, threat_kills: bool = False, objectives_first: bool = False,
+              mech_grid: int = -1, mech_grid_turns: bool = False) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
         min_tiers score tiers are proven, up to max_time. threat_tier: rank by
-        the next-turn threat tier (SolveOptions::threat_tier)."""
+        the next-turn threat tier (SolveOptions::threat_tier). mech_grid >= 0:
+        a mech is worth up to that much grid (SolveOptions::mech_grid; capped
+        by the mission's turns left with mech_grid_turns)."""
         req = {"cmd": "solve", "state": str(path), "time_limit": time_limit, "threads": self.threads}
         if min_tiers > 0 and max_time > time_limit:
             req.update(max_time=max_time, min_tiers=min_tiers)
@@ -297,6 +300,10 @@ class Engine:
             req["threat_kills"] = True
         if objectives_first:
             req["objectives_first"] = True
+        if mech_grid is not None and mech_grid >= 0:
+            req["mech_grid"] = mech_grid
+            if mech_grid_turns:
+                req["mech_grid_turns"] = True
         return self.request(req)
 
     def predict(self, path: Path, plan: list) -> dict:
@@ -961,6 +968,9 @@ def plan_summary(pred: dict) -> str:
     if pred.get("extended"):
         proof += ", extended past the base time"
     secs = (pred.get("stats") or {}).get("time_s", 0)
+    rate = pred.get("mech_grid_rate")
+    if rate is not None and rate >= 0:
+        tiers += f" (mech exchange: grid slot = 2 x grid + {2 * rate + 1} x mechs)"
     return f"{proof} ({secs:.1f}s); worst case {tiers}"
 
 
@@ -1053,6 +1063,8 @@ def play_turn(ctx) -> list:
         if patches:
             run.save_state(st, label + "_raw")
         extra = {k: True for k in ("threat_tier", "threat_kills", "objectives_first") if getattr(args, k, False)}
+        if getattr(args, "mech_grid", -1) is not None and getattr(args, "mech_grid", -1) >= 0:
+            extra.update(mech_grid=args.mech_grid, mech_grid_turns=bool(getattr(args, "mech_grid_turns", False)))
         pred = engine.solve(path, args.time, max_time=args.max_time, min_tiers=args.min_tiers, **extra)
         run.save_json(prediction_path(path).name, pred)
         run.event("solve", {"state": path.name, "plan": pred.get("plan"), "proven": pred.get("proven_optimal"),
@@ -1493,6 +1505,11 @@ def build_parser() -> argparse.ArgumentParser:
     engine.add_argument("--objectives-first", action="store_true",
                         help="experimental: with --threat-tier / --threat-kills, objective progress ranks above "
                              "the threat in that tier")
+    engine.add_argument("--mech-grid", type=int, default=-1, metavar="N",
+                        help="experimental: a mech lost is worth more than N grid power (less than N+1): plans may "
+                             "give up to N grid to keep a mech, never the last grid (default -1: off)")
+    engine.add_argument("--mech-grid-turns", action="store_true",
+                        help="experimental: with --mech-grid, cap N by the mission's turns left after this one")
     engine.add_argument("--threads", type=int, default=8)
     engine.add_argument("--game", help="game install for the engine (default: ITB_GAME_DIR / build default)")
     engine.add_argument("--max-resolves", type=int, default=3, help="re-solves per turn before giving up")

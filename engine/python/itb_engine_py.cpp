@@ -608,6 +608,8 @@ class PyEngine {
     so.threat_tier = opt.value("threat_tier", so.threat_tier);
     so.threat_kills = opt.value("threat_kills", so.threat_kills);
     so.objectives_first = opt.value("objectives_first", so.objectives_first);
+    so.mech_grid = opt.value("mech_grid", so.mech_grid);
+    so.mech_grid_turns = opt.value("mech_grid_turns", so.mech_grid_turns);
     so.beam_width = opt.value("beam_width", so.beam_width);
     so.extra_death_seeds = opt.value("extra_death_seeds", so.extra_death_seeds);
     so.max_chance_leaves = opt.value("max_chance_leaves", so.max_chance_leaves);
@@ -651,7 +653,7 @@ PYBIND11_MODULE(itb_engine, m) {
            "Load a bridge state (JSON text): the board as the engine sees it, plus loader warnings.")
       .def("solve", &PyEngine::solve, py::arg("bridge_json"), py::arg("options_json") = "{}",
            "Perfect-turn search. Options: time_limit, max_time, min_tiers, node_limit, threads, beam_width, "
-           "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), "
+           "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), mech_grid (default -1: off), mech_grid_turns, "
            "simulate (default true).")
       .def("simulate", &PyEngine::simulate_plan, py::arg("bridge_json"), py::arg("plan_json"),
            py::call_guard<py::gil_scoped_release>(),

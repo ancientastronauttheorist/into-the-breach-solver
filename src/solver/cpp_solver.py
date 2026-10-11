@@ -78,9 +78,18 @@ def _tier_options() -> dict:
         return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
     opts = {}
     for env, key in (("ITB_THREAT_TIER", "threat_tier"), ("ITB_THREAT_KILLS", "threat_kills"),
-                     ("ITB_OBJECTIVES_FIRST", "objectives_first")):
+                     ("ITB_OBJECTIVES_FIRST", "objectives_first"), ("ITB_MECH_GRID_TURNS", "mech_grid_turns")):
         if on(env):
             opts[key] = True
+    # ITB_MECH_GRID=N (N >= 0): a mech is worth up to N grid (SolveOptions::mech_grid).
+    try:
+        mech_grid = int(os.environ.get("ITB_MECH_GRID", "-1"))
+    except ValueError:
+        mech_grid = -1
+    if mech_grid >= 0:
+        opts["mech_grid"] = mech_grid
+    else:
+        opts.pop("mech_grid_turns", None)
     return opts
 
 
