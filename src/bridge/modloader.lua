@@ -2008,6 +2008,12 @@ function ITBX.tiles_ext(state)
         local ok_c, custom = pcall(function() return Board:GetCustomTile(pt) end)
         if ok_c then
             if type(custom) == "string" and custom ~= "" then tile.custom_tile = custom end
+            -- The live belt sprite (Env_Belt:MarkBoard) replaces the save
+            -- scan's conveyor, which reads every region's map in the save:
+            -- phantom belts and wrong directions on islands with another
+            -- belt map (live m34, 2026-10-11).
+            local belt = type(custom) == "string" and custom:match("^conveyor(%d)%.png$")
+            tile.conveyor = belt and tonumber(belt) or nil
         else
             ITBX.note_error("tile.GetCustomTile", custom)
         end
