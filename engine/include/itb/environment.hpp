@@ -136,6 +136,7 @@ enum class PhaseEventType : uint8_t {
   SpawnBlocked,    // the spawn at `point` was blocked (by `uid`, -1: terrain)
   SpawnDropped,    // the spawn at `point` was removed (tile became water/chasm)
   Thawed,          // Mission_Reactivation thawed `uid`
+  TempUnitDied,    // "Temp Units Die": temporary unit `uid` (Lua TempUnit) was killed (detail: type)
 };
 
 const char* to_string(PhaseEventType t);

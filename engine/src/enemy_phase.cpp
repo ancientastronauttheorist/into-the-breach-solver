@@ -33,6 +33,7 @@ const char* to_string(PhaseEventType t) {
     case PhaseEventType::SpawnBlocked: return "spawn blocked";
     case PhaseEventType::SpawnDropped: return "spawn dropped";
     case PhaseEventType::Thawed: return "thawed";
+    case PhaseEventType::TempUnitDied: return "temp unit died";
   }
   return "?";
 }
@@ -406,6 +407,32 @@ PhaseResult Engine::end_turn(Board& board, const TurnContext& tc) {
   }
   board.spawn_points = kept;
   drop_spawns(nullptr);
+
+  // ---- "Temp Units Die" (Board::KillTempUnits @009460b0). Board::SpawnQueued
+  // arms it at the start of state 2 (so not when the mission ended above);
+  // UpdateStackedEffects runs it on the first idle frame once the spawn cursor
+  // is done, before AI planning. If any listed pawn's type has Lua
+  // TempUnit = true (Board::IsTempUnit), a 1 s delay is added; then every such
+  // pawn still alive gets Pawn::Kill in list order, whatever its team: an
+  // ordinary death (death effect, ACID pool, Explodes and Corpse as for any
+  // pawn; the shipped one, DeployUnit_Bomby, has none of them). It is not a
+  // Vek kill and gives no XP (the pawn is player-team).
+  auto temp_unit = [this](const Pawn& p) {
+    const PawnDef* def = impl_->data.pawn(p.type);
+    return def && def->temp_unit;
+  };
+  if (std::any_of(board.pawns().begin(), board.pawns().end(), temp_unit)) {
+    absorb(out, r.apply([&]() {
+      r.add_delay(1.0f);
+      for (Pawn& p : board.pawns()) {
+        if (!temp_unit(p) || !p.alive()) continue;
+        out.events.push_back(
+            PhaseEvent{PhaseEventType::TempUnitDied, p.pos, p.uid, 0, std::string(symbol_name(p.type))});
+        kill_pawn(board, p, ctx.rules);
+      }
+    }));
+    burrow_away();
+  }
   absorb(out, diag);
   ctx.frame_hook = nullptr;
   return out;

@@ -16,6 +16,7 @@
 #include "itb/engine.hpp"
 #include "itb/game_data.hpp"
 #include "itb/recording.hpp"
+#include "itb/score.hpp"
 #include "itb/tile_rules.hpp"
 
 using namespace itb;
@@ -1603,4 +1604,126 @@ TEST_CASE("the Psion Abomination: +1 HP while it lives, gone when it dies, a Sol
   CHECK(dead(c, boss2));
   CHECK(hp_of(c, w) == 1);
   CHECK(P(c, w).max_hp == 4);
+}
+
+// ---- "Temp Units Die" (Board::KillTempUnits) ----------------------------------------
+
+namespace {
+
+int event_index(const PhaseResult& r, PhaseEventType type) {
+  for (size_t i = 0; i < r.events.size(); ++i) {
+    if (r.events[i].type == type) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+}  // namespace
+
+TEST_CASE("temp units die after the spawns, as a plain death") {
+  NEED_ENGINE();
+  REQUIRE(E.data().pawn("DeployUnit_Bomby") != nullptr);
+  CHECK(E.data().pawn("DeployUnit_Bomby")->temp_unit);
+  CHECK_FALSE(E.data().pawn("PunchMech")->temp_unit);
+  Board b;
+  const int32_t m = mech(b, {3, 3});
+  const int32_t bomb = place(b, "DeployUnit_Bomby", {3, 4});
+  const int32_t v = place(b, "Scorpion1", {5, 4});
+  const Board before = b;
+  const PhaseResult r = E.end_turn(b, context());
+  CHECK(dead(b, bomb));
+  CHECK(r.count(PhaseEventType::TempUnitDied) == 1);
+  // No self-destruct: the neighbours are untouched, and no corpse is left.
+  CHECK(hp_of(b, m) == 3);
+  CHECK(hp_of(b, v) == 3);
+  const Pawn* left = b.find_pawn(bomb);
+  CHECK((left == nullptr || !is_corpse(b, *left)));
+  CHECK_FALSE(b.tile({3, 4}).acid);
+  // Not a mech loss, not a Vek kill.
+  const Score s = score_turn(before, b);
+  CHECK(s[ScoreKey::MechsLost] == 0);
+  CHECK(s[ScoreKey::MechHpLost] == 0);
+  CHECK(s[ScoreKey::VekKilled] == 0);
+}
+
+TEST_CASE("temp units die after the Vek attacks and the spawn bumps") {
+  NEED_ENGINE();
+  Board b;
+  mech(b, {6, 6});
+  // A 2-HP bomb on a spawn tile: the blocked emerge hits it first (2 -> 1),
+  // then it dies as a temp unit.
+  const int32_t bomb = place(b, "DeployUnit_Bomby", {3, 3});
+  hp(b, bomb, 2, 2);
+  b.spawn_points = {{3, 3}};
+  // A second bomb a Hornet kills with its queued sting: no temp-unit death.
+  const int32_t stung = place(b, "DeployUnit_Bomby", {1, 2});
+  const int32_t h = place(b, "Hornet1", {1, 1});
+  queue(b, h, {1, 2});
+  TurnContext ctx = context();
+  ctx.spawn_types = {"Scorpion1"};
+  const PhaseResult r = E.end_turn(b, ctx);
+  CHECK(fired(r).count(h) == 1);
+  CHECK(dead(b, bomb));
+  CHECK(dead(b, stung));
+  CHECK(r.count(PhaseEventType::TempUnitDied) == 1);
+  const int blocked = event_index(r, PhaseEventType::SpawnBlocked);
+  const int died = event_index(r, PhaseEventType::TempUnitDied);
+  REQUIRE(blocked >= 0);
+  REQUIRE(died >= 0);
+  CHECK(r.events[static_cast<size_t>(blocked)].uid == bomb);
+  CHECK(died > blocked);
+  CHECK(r.events[static_cast<size_t>(died)].uid == bomb);
+  CHECK(b.spawn_points == std::vector<Point>{{3, 3}});
+}
+
+TEST_CASE("temp units: any team; an ACID one leaves its pool") {
+  NEED_ENGINE();
+  Board b;
+  mech(b, {6, 6});
+  const int32_t bomb = place(b, "DeployUnit_Bomby", {2, 2});
+  P(b, bomb).acid = true;
+  const int32_t enemy_bomb = place(b, "DeployUnit_Bomby", {4, 4});
+  P(b, enemy_bomb).team = Team::Enemy;
+  const PhaseResult r = E.end_turn(b, context());
+  CHECK(dead(b, bomb));
+  CHECK(dead(b, enemy_bomb));
+  CHECK(r.count(PhaseEventType::TempUnitDied) == 2);
+  CHECK(b.tile({2, 2}).acid);
+  CHECK_FALSE(b.tile({4, 4}).acid);
+}
+
+TEST_CASE("temp units survive the final enemy phase: the mission ends first") {
+  NEED_ENGINE();
+  Board b;
+  b.turn = 4;
+  b.total_turns = 4;
+  mech(b, {6, 6});
+  const int32_t bomb = place(b, "DeployUnit_Bomby", {2, 2});
+  const PhaseResult r = E.end_turn(b, context());
+  CHECK(r.mission_ended);
+  CHECK_FALSE(dead(b, bomb));
+  CHECK(r.count(PhaseEventType::TempUnitDied) == 0);
+}
+
+TEST_CASE("live: an unused walking bomb is gone after the enemy phase (2026-10-11 m71)") {
+  NEED_ENGINE();
+  // Mission_Artillery turn 3, End Turn: the plan left DeployUnit_Bomby #2323
+  // at (7,4) next to PulseMech #2 at (7,3). The game's turn 4 board has no
+  // bomb and every player unit at its HP (no self-destruct).
+  const Recording before = live_fixture("live_bomb_t3_end_turn.json");
+  const Recording after = live_fixture("live_bomb_t4_after_enemy.json");
+  const int32_t bomb = 2323;
+  REQUIRE(before.board.find_pawn(bomb) != nullptr);
+  REQUIRE(before.board.find_pawn(bomb)->alive());
+  CHECK(after.board.find_pawn(bomb) == nullptr);
+  Board b = before.board;
+  const PhaseResult r = E.end_turn(b, turn_context(before, Visibility::Full));
+  CHECK(r.count(PhaseEventType::TempUnitDied) == 1);
+  CHECK(dead(b, bomb));
+  for (const Pawn& p : before.board.pawns()) {
+    if (p.uid == bomb || !p.alive() || p.team != Team::Player) continue;
+    CAPTURE(p.uid);
+    const Pawn* game = after.board.find_pawn(p.uid);
+    REQUIRE(game != nullptr);
+    CHECK(hp_of(b, p.uid) == game->hp);
+  }
 }

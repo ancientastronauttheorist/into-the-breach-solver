@@ -18,6 +18,10 @@
 //      the mission's NextTurn hooks, then the queued spawns one at a time:
 //      a free tile gets the Vek, a blocked one takes 1 push-mode damage and
 //      keeps its spawn for next turn; spawns on water or chasm are dropped.
+//   6. "Temp Units Die" (Board::KillTempUnits, armed by Board::SpawnQueued,
+//      so not when the mission ended in step 5): every living pawn whose type
+//      has Lua TempUnit = true (the Bombling Mech's walking bomb) is killed,
+//      an ordinary death with its usual death effects, in list order.
 //
 // It stops before AI planning: the result is the board the player's turn was
 // scored against ("this turn's result"). Mission per-frame hooks run at every

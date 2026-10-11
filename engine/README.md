@@ -374,10 +374,25 @@ Done so far (build order from the decompile):
      environment steps, queued shooters (first in list order, re-aimed from
      the current tile, smoke/death/ice/water cancel), then the victory check,
      the mission's enemy NextTurn and the spawn cursor (blocked spawns take a
-     push-mode hit and keep their marker; spawns on water/chasm are dropped).
-     Every step resolves to idle on one frame clock; mission per-frame hooks
-     (UpdateMission) run at every simulated frame. It stops before AI
-     planning. `Engine::play_turn` runs the player's actions first.
+     push-mode hit and keep their marker; spawns on water/chasm are dropped),
+     then "Temp Units Die" (below). Every step resolves to idle on one frame
+     clock; mission per-frame hooks (UpdateMission) run at every simulated
+     frame. It stops before AI planning. `Engine::play_turn` runs the
+     player's actions first.
+   - "Temp Units Die" (`Board::KillTempUnits` @009460b0): once the last
+     spawn attempt has resolved and before the AI plans, every living pawn
+     whose type has Lua `TempUnit = true` is killed (`Pawn::Kill`), in list
+     order and whatever its team, after a 1 s delay. `Board::SpawnQueued`
+     arms it, so it does not happen when the mission ends at the victory
+     check (the final turn). It is an ordinary death, not a removal: death
+     effect, an ACID pool for an ACID pawn, `Explodes` and `Corpse` all apply
+     as for any death. The only shipped temp unit is the Bombling Mech's
+     walking bomb (`DeployUnit_Bomby`: no corpse, no death explosion; its
+     self-destruct is an active skill), so an unused bomb just disappears
+     and its neighbours take nothing (live 2026-10-11, m71). Event
+     `TempUnitDied`. Scoring: the bomb is player-team and not a mech, so its
+     death is neither a mech loss nor a kill; the only tier it touches is
+     position (a living bomb next to an enemy cost -1 there).
    - `PhaseResult`: events, every chance node (Grid Defense, environment
      orders and choices, Lua death-effect randomness, spider eggs, mission
      picks), timing flags, Lua diagnostics, spawns of unknown type, and
