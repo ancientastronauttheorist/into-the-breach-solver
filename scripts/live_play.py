@@ -929,6 +929,22 @@ def ensure_native(ctx) -> None:
 PORTRAIT_XY = [(60, 160), (60, 228), (60, 293)]
 
 
+def unit_uid_map(want: dict, got: dict, known: set) -> dict:
+    """Engine uid -> live uid for the units neither board had at the turn's
+    start (not in `known`) that differ only in uid: matched on type and tile,
+    one to one. Units both boards number alike are left out."""
+    live = [u for u in got["units"] if u["uid"] not in known]
+    out = {}
+    for u in want["units"]:
+        if u["uid"] in known or any(g["uid"] == u["uid"] for g in live):
+            continue
+        same = [g for g in live if g.get("type") == u.get("type") and (g["x"], g["y"]) == (u["x"], u["y"])
+                and g["uid"] not in out.values()]
+        if len(same) == 1:
+            out[u["uid"]] = same[0]["uid"]
+    return out
+
+
 def execute_step(bridge: Bridge, step: dict, state: dict, loadout: dict, click=None) -> str:
     uid = step["uid"]
     if step["sub"] == "move":
@@ -1085,8 +1101,17 @@ def play_turn(ctx) -> list:
 
     executed, plan_id, resolves, i = [], 0, 0, 0
     steps = pred["steps"]
+    # Units the plan creates (a Bombling's bomb, a deployed tank) carry the
+    # engine's own uid; the game numbers them itself (its counter also
+    # counts spawns the engine never sees). Engine uid -> live uid, from
+    # each matching step (unit_uid_map); reset on a re-solve, whose plan
+    # starts from the live uids.
+    uid_map: dict = {}
     while i < len(steps):
         step = steps[i]
+        if step["uid"] in uid_map:
+            step = dict(step, uid=uid_map[step["uid"]])
+            names.setdefault(step["uid"], names.get(steps[i]["uid"], "unit"))
         text = step_text(step, names)
         execute_step(bridge, step, state, ctx.loadout, None if getattr(ctx.args, "no_click", False) else ctx.click)
         if step["sub"] == "move":
@@ -1102,6 +1127,10 @@ def play_turn(ctx) -> list:
         run.save_engine_underground(state, under)
         run.event("step", {"step": text, "state": path.name, "diffs": diffs})
         if not diffs:
+            for engine_uid, live_uid in unit_uid_map(step["board"], live, known).items():
+                uid_map[engine_uid] = live_uid
+                names.setdefault(engine_uid, next((u.get("type", "?") for u in live["units"]
+                                                   if u["uid"] == live_uid), "?"))
             say(f"  step {len(executed)} {text}: matches")
             i += 1
             continue
@@ -1120,6 +1149,7 @@ def play_turn(ctx) -> list:
         if pred.get("refused", -1) >= 0:
             raise Anomaly(f"the engine refused its own plan: {pred.get('refused_reason')}")
         steps, i, plan_id = pred["steps"], 0, plan_id + 1
+        uid_map.clear()
     write_executed_plan(run, start, pred0, executed, resolves > 0)
     if "after_enemy" in pred:
         e = pred["after_enemy"]

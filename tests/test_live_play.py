@@ -1172,3 +1172,14 @@ class DiffBoardsTest(unittest.TestCase):
         got = self.board([self.unit(566, "Digger2", 5, 4, 5), self.unit(577, "Jelly_Health1", 2, 6, 1, leader=1)])
         diffs, _ = lp.diff_boards(want, got, {566}, enemy_phase=True)
         self.assertEqual(len(diffs), 1)
+
+    def test_unit_uid_map_matches_created_units_by_type_and_tile(self):
+        want = self.board([self.unit(1, "BomblingMech", 0, 5, 3, team=1, mech=True),
+                           self.unit(2317, "DeployUnit_Bomby", 5, 5, 1, team=1)])
+        got = self.board([self.unit(1, "BomblingMech", 0, 5, 3, team=1, mech=True),
+                          self.unit(2320, "DeployUnit_Bomby", 5, 5, 1, team=1)])
+        self.assertEqual(lp.unit_uid_map(want, got, {1}), {2317: 2320})
+        # Same uid on both sides, or no unique match: nothing to map.
+        self.assertEqual(lp.unit_uid_map(got, got, {1}), {})
+        got["units"][1]["x"] = 4
+        self.assertEqual(lp.unit_uid_map(want, got, {1}), {})
