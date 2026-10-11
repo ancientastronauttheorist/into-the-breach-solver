@@ -1183,3 +1183,12 @@ class DiffBoardsTest(unittest.TestCase):
         self.assertEqual(lp.unit_uid_map(got, got, {1}), {})
         got["units"][1]["x"] = 4
         self.assertEqual(lp.unit_uid_map(want, got, {1}), {})
+
+    def test_temp_unit_gone_after_enemy_phase_is_a_note(self):
+        want = self.board([self.unit(2323, "DeployUnit_Bomby", 7, 4, 1, team=1)])
+        got = self.board([])
+        diffs, notes = lp.diff_boards(want, got, {2323}, enemy_phase=True)
+        self.assertEqual(diffs, [])
+        self.assertTrue(any("temp unit" in n for n in notes))
+        diffs, _ = lp.diff_boards(want, got, {2323})
+        self.assertEqual(len(diffs), 1)
