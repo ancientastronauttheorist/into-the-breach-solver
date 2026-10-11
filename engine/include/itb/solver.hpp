@@ -82,7 +82,17 @@ struct SolveOptions {
   bool threat_tier = false;
   // Experiment (ScoreOptions::threat_kills): the tier slot holds kills.
   bool threat_kills = false;
+  // ScoreOptions::objectives_first: objective progress first in the tier
+  // slot (with a derived cap, objective_progress_cap).
+  bool objectives_first = false;
   bool tier_on() const { return threat_tier || threat_kills; }
+  ScoreOptions score_options() const {
+    ScoreOptions s;
+    s.threat_tier = threat_tier;
+    s.threat_kills = threat_kills;
+    s.objectives_first = objectives_first;
+    return s;
+  }
   // Repair skill per unit uid (Engine::repair_skill of its pilot). Units not
   // listed use Skill_Repair.
   std::vector<std::pair<int32_t, std::string>> repair_skills;

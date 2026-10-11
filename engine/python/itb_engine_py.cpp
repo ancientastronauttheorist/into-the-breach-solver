@@ -378,7 +378,9 @@ json phase_json(const PhaseResult& pr) {
 // (no Grid Defense resist, first branch, the pawn's own death seed), the
 // outcome the solver's plan follows, and records the board after every move
 // and every action, after the player's turn and after the enemy phase.
-json simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& plan, bool threat = false) {
+json simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& plan,
+              const ScoreOptions& score_options = {}) {
+  const bool threat = score_options.tier_on();
   Board b = l.board;
   const ActionOptions opts = sim_options(l.ctx);
   json steps = json::array();
@@ -442,8 +444,6 @@ json simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
   const PhaseResult pr = engine.end_turn(b, tc);
   out["final_board"] = board_json(b);
   out["enemy_phase"] = phase_json(pr);
-  ScoreOptions score_options;
-  score_options.threat_tier = threat;
   const Score s = score_turn(l.board, b, &tc, &pr, score_options);
   out["score"] = score_json(s, threat);
   out["score_vector"] = score_vector(s, threat);
@@ -542,8 +542,8 @@ class PyEngine {
     const std::optional<Score> s = evaluate_plan(*main_, l.board, l.ctx, plan, so, &why);
     json out{{"ok", s.has_value()}};
     if (s) {
-      out["worst_case"] = score_json(*s, so.threat_tier);
-      out["worst_case_vector"] = score_vector(*s, so.threat_tier);
+      out["worst_case"] = score_json(*s, so.tier_on());
+      out["worst_case_vector"] = score_vector(*s, so.tier_on());
     } else {
       out["refused"] = why;
     }
@@ -580,19 +580,19 @@ class PyEngine {
     json plan = json::array();
     for (const PlayerAction& a : r.best.actions) plan.push_back(action_json(cur, a));
     out["plan"] = plan;
-    out["worst_case"] = score_json(r.best.worst_case, so.threat_tier);
-    out["worst_case_vector"] = score_vector(r.best.worst_case, so.threat_tier);
+    out["worst_case"] = score_json(r.best.worst_case, so.tier_on());
+    out["worst_case_vector"] = score_vector(r.best.worst_case, so.tier_on());
     out["contingent"] = r.best.contingent;
     out["proven_optimal"] = r.proven_optimal;
-    out["upper_bound"] = r.upper_bound ? score_json(*r.upper_bound, so.threat_tier) : json(nullptr);
-    out["upper_bound_vector"] = r.upper_bound ? score_vector(*r.upper_bound, so.threat_tier) : json(nullptr);
+    out["upper_bound"] = r.upper_bound ? score_json(*r.upper_bound, so.tier_on()) : json(nullptr);
+    out["upper_bound_vector"] = r.upper_bound ? score_vector(*r.upper_bound, so.tier_on()) : json(nullptr);
     out["proven_components"] = r.proven_components;
     out["chance_exact"] = r.chance_exact;
     out["timed_out"] = r.timed_out;
     out["extended"] = r.extended;
     out["warnings"] = r.warnings;
     out["stats"] = stats_json(r.stats);
-    if (opt.value("simulate", true)) out["simulation"] = simulate(*main_, l, r.best.actions, so.threat_tier);
+    if (opt.value("simulate", true)) out["simulation"] = simulate(*main_, l, r.best.actions, so.score_options());
     out["elapsed_s"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return out.dump();
   }
@@ -606,6 +606,8 @@ class PyEngine {
     so.max_time_s = opt.value("max_time", so.max_time_s);
     so.min_proven_tiers = opt.value("min_tiers", so.min_proven_tiers);
     so.threat_tier = opt.value("threat_tier", so.threat_tier);
+    so.threat_kills = opt.value("threat_kills", so.threat_kills);
+    so.objectives_first = opt.value("objectives_first", so.objectives_first);
     so.beam_width = opt.value("beam_width", so.beam_width);
     so.extra_death_seeds = opt.value("extra_death_seeds", so.extra_death_seeds);
     so.max_chance_leaves = opt.value("max_chance_leaves", so.max_chance_leaves);
@@ -649,7 +651,7 @@ PYBIND11_MODULE(itb_engine, m) {
            "Load a bridge state (JSON text): the board as the engine sees it, plus loader warnings.")
       .def("solve", &PyEngine::solve, py::arg("bridge_json"), py::arg("options_json") = "{}",
            "Perfect-turn search. Options: time_limit, max_time, min_tiers, node_limit, threads, beam_width, "
-           "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier (default false), "
+           "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), "
            "simulate (default true).")
       .def("simulate", &PyEngine::simulate_plan, py::arg("bridge_json"), py::arg("plan_json"),
            py::call_guard<py::gil_scoped_release>(),

@@ -218,6 +218,7 @@ int run_solve(const SolveToolOptions& opt) {
     so.min_proven_tiers = opt.min_tiers;
     so.threat_tier = opt.threat_tier;
     so.threat_kills = opt.kills_tier;
+    so.objectives_first = opt.objectives_first;
     so.helper_engines = helper_ptrs;
     if (opt.beam >= 0) so.beam_width = opt.beam;
     if (opt.tt_entries > 0) so.tt_max_entries = opt.tt_entries;
@@ -319,6 +320,7 @@ int run_solve(const SolveToolOptions& opt) {
         SolveOptions eo = so;
         eo.threat_tier = true;
         eo.threat_kills = false;
+        eo.objectives_first = false;
         eo.helper_engines.clear();
         if (const auto e = evaluate_plan(*engine, board, ctx, r.best.actions, eo)) j["threat_eval"] = e->v;
       }

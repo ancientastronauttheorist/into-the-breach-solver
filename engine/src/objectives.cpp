@@ -534,6 +534,117 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
   return r;
 }
 
+// Mirrors evaluate_objectives line by line: each line's progress is bounded
+// by what `before` allows (a count only of pawns alive at the start, a
+// counter clamped at its target), never by what the turn does.
+int objective_progress_cap(const Board& before, const TurnContext* ctx) {
+  static const MissionData kNoMission;
+  const MissionData& m = ctx ? ctx->mission : kNoMission;
+  const ObjectiveData& od = m.objectives;
+  const std::string& id = m.mission_id;
+  constexpr int kMany = 1000;  // "any number": toward() clamps at the target
+  int cap = 0;
+  auto alive_count = [&](auto pred) { return count_alive(before, pred); };
+  auto destroy = [&](auto pred) { cap += alive_count(pred) > 0 ? kStar : 0; };
+  auto mission_unit = [](std::string_view type) { return [type](const Pawn& p) { return type_is(p, type); }; };
+  // Team-6 non-mech pawns alive at the start: an upper bound on this turn's
+  // EVENT_ENEMY_KILLED and EVENT_ACID_DESTROYED counts.
+  const int enemies = alive_count([](const Pawn& p) { return p.team == Team::Enemy && !p.mech; });
+
+  int pods = 0;
+  for (int i = 0; i < kTileCount; ++i) pods += before.tile(Point::from_index(i)).pod == PodState::Present ? 1 : 0;
+  cap += pods * kStar;
+
+  const bool kills_known = od.kills_done >= 0 && id != "Mission_AcidTank";
+  const int done = kills_known ? od.kills_done : 0;
+  for (BonusId b : active_bonuses(before, m)) {
+    switch (b) {
+      case BonusId::Block:
+        cap += toward(od.blocked_spawns >= 0 ? od.blocked_spawns : 0, kMany, 3);
+        break;
+      case BonusId::KillFive:
+        cap += toward(done, enemies, od.kill_target > 0 ? od.kill_target : kill_bonus(m.difficulty));
+        break;
+      case BonusId::Debris:
+        cap += alive_count([](const Pawn& p) { return type_is(p, "BonusDebris"); }) * kStar / 2;
+        break;
+      case BonusId::SelfDamage:
+        cap += infected(before) * kStar / 3;
+        break;
+      default:
+        break;  // no progress
+    }
+  }
+
+  if (id == "Mission_Satellite") {
+    cap += alive_count(mission_unit("SatelliteRocket")) * kStar;
+  } else if (id == "Mission_Disposal") {
+    cap += mountains(before) > 0 ? kStar : 0;
+  } else if (id == "Mission_Terraform") {
+    if (od.grass_known && !od.grass.empty()) {
+      int open = 0;
+      for (Point g : od.grass) open += before.tile(g).terrain == Terrain::Sand ? 0 : 1;
+      cap += open * kStar / static_cast<int>(od.grass.size());
+    }
+  } else if (id == "Mission_Force") {
+    cap += toward(od.mountains_done >= 0 ? od.mountains_done : 0, mountains(before),
+                  od.mountain_target > 0 ? od.mountain_target : 2);
+  } else if (id == "Mission_AcidTank") {
+    const int so_far = od.kills_done >= 0 ? od.kills_done : 0;
+    auto units = [](int c) { return c <= 0 ? 0 : kStar + (std::min(c, 4) - 1) * kStar / 3; };
+    cap += units(so_far + enemies) - units(so_far);
+  } else if (id == "Mission_Barrels") {
+    cap += alive_count([](const Pawn& p) { return type_name(p).starts_with("AcidVat"); }) * kStar;
+  } else if (id == "Mission_BoomBots") {
+    const int alive0 = alive_count([](const Pawn& p) { return type_name(p).ends_with("_Boom"); });
+    cap += toward(std::max(0, 4 - alive0), alive0, 4, 2);
+  } else if (id == "Mission_ForestFire") {
+    cap += (8 - std::min(fires(before), 8)) * kStar / 4;
+  } else if (id == "Mission_Repair") {
+    int items = 0;
+    for (int i = 0; i < kTileCount; ++i) {
+      const Tile& t = before.tile(Point::from_index(i));
+      items += t.item != kNoSymbol && symbol_name(t.item) == "Item_Repair_Mine" ? 1 : 0;
+    }
+    cap += toward(od.repairs_done >= 0 ? od.repairs_done : 0, items, od.repair_target > 0 ? od.repair_target : 3);
+  } else if (id == "Mission_FreezeBldg") {
+    const int target = od.freeze_target > 0 ? od.freeze_target : 5;
+    std::vector<Point> tiles = od.freeze_buildings;
+    if (tiles.empty()) {
+      for (int i = 0; i < kTileCount; ++i) {
+        if (before.tile(Point::from_index(i)).is_building()) tiles.push_back(Point::from_index(i));
+      }
+    }
+    int t0 = 0;
+    for (Point t : tiles) t0 += before.tile(t).is_building() && before.tile(t).frozen ? 0 : 1;
+    cap += toward(t0, static_cast<int>(tiles.size()) - t0, target);
+  } else if (id == "Mission_FreezeBots") {
+    // Each bot frozen at the end: the bots alive now (or emerging) not frozen yet.
+    auto bot = [](const Pawn& p) {
+      const std::string_view t = type_name(p);
+      return p.team == Team::Enemy && (t.starts_with("Snowtank") || t.starts_with("Snowlaser") || t.starts_with("Snowart"));
+    };
+    if (alive_count(bot) > 0) {
+      const int loose = alive_count([&](const Pawn& p) { return bot(p) && !p.frozen; });
+      cap += (loose + static_cast<int>(before.spawn_points.size())) * kStar;
+    }
+  } else if (id == "Mission_Hacking") {
+    destroy(mission_unit("Hacked_Building"));
+  } else if (id == "Mission_Shields") {
+    destroy(mission_unit("Shield_Building"));
+  } else if (id == "Mission_AcidStorm") {
+    destroy(mission_unit("Storm_Generator"));
+  } else if (id == "Mission_Dam") {
+    destroy(mission_unit("Dam_Pawn"));
+  } else if (id == "Mission_BlobBoss") {
+    if (alive_count([](const Pawn& p) { return type_name(p).starts_with("BlobBoss"); }) > 0) cap += kStar;
+  } else if (id.starts_with("Mission_") && id.ends_with("Boss")) {
+    const std::string boss = id == "Mission_JellyBoss" ? "Jelly_Boss" : id.substr(8);
+    destroy([boss](const Pawn& p) { return type_name(p).starts_with(boss); });
+  }
+  return cap;
+}
+
 int PositionTerms::total() const {
   return -(3 * mech_fire + 2 * mech_acid + 2 * mech_frozen + mech_smoke + 2 * mech_fragile) -
          (building_threat + unit_threat) + enemy_fire + enemy_frozen;

@@ -95,6 +95,13 @@ struct ObjectiveReport {
 ObjectiveReport evaluate_objectives(const Board& before, const Board& after, const TurnContext* ctx,
                                     const PhaseResult* phase);
 
+// An upper bound on ObjectiveReport::progress() for any turn starting from
+// `before` (any actions, any enemy phase): per objective line, the most its
+// progress can reach given what is on `before` (targets alive, pods, counters
+// so far). Used as the solver's tier cap when objective progress ranks above
+// the threat tier (SolveOptions::objectives_first).
+int objective_progress_cap(const Board& before, const TurnContext* ctx);
+
 // The pawn `p` (from the start of the turn) on `after`, or null if it is gone.
 // Uids of removed pawns can be handed out again within a turn (new pawns take
 // one more than the largest uid still on the board), so a pawn with the same

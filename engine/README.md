@@ -563,6 +563,13 @@ printed scores, JSON score vectors and tier counts (`tier_used`,
 include it (`--min-tiers 5` = grid through threat). `--kills-tier` puts
 the kill count in that slot instead (an experiment: kills above mech HP;
 with `--threat-tier` too, kills - 100 x threats: threats first, then kills).
+`--objectives-first` (`SolveOptions::objectives_first`, itb_live / Python
+`"objectives_first"`, `live_play.py --objectives-first`) ranks objective
+progress above the threat: the slot becomes 16384 x objective progress plus
+the threat part (`kObjectivesFirstWeight`), so a step toward a bonus star is
+never traded for a threat. It stays one tier, so the order is grid,
+buildings, mechs lost, stars failed, [objective progress, threat, (kills)],
+mech HP, ..., and `--min-tiers 6` keeps mech HP proven.
 `itb_inspect --threat-check DIR` checks the proxy against the engine and
 the recorded games and times it (see "Threat tier measurement").
 
@@ -750,7 +757,11 @@ Leech), objective stars lost <= 0, next-turn threat <= 0 (no tighter cap is
 cheaply sound: any enemy may still be killed, pushed, frozen or smoked, and
 spawns blocked), kills and HP removed <= the enemies and
 their HP at the start. Objective progress and position have no derived cap
-(`SolveOptions::tier_caps` can supply them). Grid and building losses are
+(`SolveOptions::tier_caps` can supply them), except with `objectives_first`:
+then `objective_progress_cap` (`objectives.cpp`) bounds every objective line
+by what the root board allows (pods present, targets alive, counters
+clamped at their targets) and caps both the progress and the threat slot
+(0 of 601 recorded turns exceed it; the solver warns if a leaf ever does). Grid and building losses are
 therefore committed once a player action causes them.
 
 **Anytime.** With a time or node budget the result is the best plan found,
@@ -928,6 +939,36 @@ that now ranks below the threat (a dam or vat not hit, fewer bots frozen).
 On 60 evenly spaced Hard boards (other runs alongside): off 111 threats,
 116 kills, mech HP +1; threat tier 75, 126, -26; `--kills-tier` (kills
 above mech HP) 91, 140, -27; both flags (threats, then kills) 72, 140, -39.
+
+Round 2 (`--objectives-first`; 394 Hard boards: the 306 above plus run 4,
+`live/20261011_011242`): off at `--min-tiers 5` against `--threat-tier
+--objectives-first` ("threat") and `--threat-tier --kills-tier
+--objectives-first` ("threats, kills") at `--min-tiers 6` (through mech HP),
+`--time 10 --max-time 60 --threads 4`, the three side by side on a machine
+other jobs kept at load ~30 (absolute times are inflated; compare the arms).
+Repeating the off arm on run 4 gave the same value on 87 of 88 boards.
+
+| Hard (394) | off | threat | threats, kills |
+|---|---|---|---|
+| threats next turn | 738 | 547 | 544 |
+| mech HP | -49 | -246 | -306 |
+| objective progress (stars) | 80.2 | 102.1 | 102.1 |
+| kills / Vek HP | 781 / 2460 | 842 / 2542 | 889 / 2645 |
+| position | -435 | -574 | -585 |
+| proven optimal | 65 | 109 | 127 |
+| proven through the tier slot (5) | - | 187 | 170 |
+| proven through mech HP | 232 | 150 | 149 |
+| mean time, at the 60 s cap | 32.2 s, 163 | 44.2 s, 245 | 45.1 s, 245 |
+
+Objective progress now only rises (38 boards, +21.9 stars, for 56 mech HP
+there; it now also outranks mech HP). Elsewhere 141 mech HP buy 165 fewer
+threats. Higher tiers differ on 7 boards, all unproven in those tiers (budget
+noise, both ways). Run 4 (88): threats 157 -> 127 / 126, mech HP -14 -> -62 /
+-68, progress +5.5 / +6.5 stars, kills +15 / +22, proven through mech HP 48
+-> 29 / 30. Its 7 turns unproven even in grid at 120 s live stay unproven in
+grid in every arm, with the same grid result; the tier changes 2 of them
+below grid (m04 turn 1: one threat fewer, one kill and a third of a star
+more, for 2 mech HP).
 
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state

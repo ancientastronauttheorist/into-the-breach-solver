@@ -48,6 +48,7 @@
 #include "itb/engine.hpp"
 #include "itb/lua_host.hpp"
 #include "itb/movement.hpp"
+#include "itb/objectives.hpp"
 #include "itb/pilot_xp.hpp"
 
 namespace itb {
@@ -313,7 +314,12 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 //                    away, frozen or smoked, and spawns may be blocked. In
 //                    the kills experiment (threat_kills) it is VekKilled, or
 //                    VekKilled - 100 * threats with both flags: <= the
-//                    enemies alive at the root either way.
+//                    enemies alive at the root either way. With
+//                    objectives_first, plus kObjectivesFirstWeight times
+//                    the objective progress, whose cap
+//                    (objective_progress_cap, objectives.cpp) bounds each
+//                    objective line by what the root board allows; the
+//                    ObjectiveProgress component gets that cap too.
 //   VekKilled      <= enemies alive at the root (only those are counted).
 //   VekHpRemoved   <= their total HP (hp_before - hp_after, hp_after >= 0).
 //   ObjectiveProgress, Position: unbounded (INT32_MAX) unless the caller
@@ -321,7 +327,9 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 // tier_caps lowers any component further (the caller vouches for them).
 class TierBounds {
  public:
-  TierBounds(const Board& root, const std::optional<Score>& caps, bool threat_kills = false) {
+  TierBounds(const Board& root, const std::optional<Score>& caps, const SolveOptions& opt = {},
+             const TurnContext* ctx = nullptr) {
+    const bool threat_kills = opt.threat_kills;
     root_grid_ = root.grid_power;
     root_building_ = building_hp(root);
     for (const Pawn& p : root.pawns()) {
@@ -350,6 +358,12 @@ class TierBounds {
     caps_[ScoreKey::Threat] = 0;
     caps_[ScoreKey::VekKilled] = enemies;
     if (threat_kills) caps_[ScoreKey::Threat] = enemies;
+    if (opt.objectives_first && opt.tier_on()) {
+      progress_cap_ = objective_progress_cap(root, ctx);
+      caps_[ScoreKey::ObjectiveProgress] = progress_cap_;
+      const int64_t slot = int64_t{kObjectivesFirstWeight} * progress_cap_ + caps_[ScoreKey::Threat];
+      caps_[ScoreKey::Threat] = static_cast<int32_t>(std::min<int64_t>(slot, INT32_MAX - 1));
+    }
     caps_[ScoreKey::VekHpRemoved] = enemy_hp;
     if (caps) {
       for (size_t i = 0; i < caps_.v.size(); ++i) caps_.v[i] = std::min(caps_.v[i], caps->v[i]);
@@ -357,6 +371,8 @@ class TierBounds {
   }
 
   Score global() const { return caps_; }
+  // objective_progress_cap at the root (objectives_first only, else -1).
+  int progress_cap() const { return progress_cap_; }
 
   Score of(const Board& b) const {
     Score s = caps_;
@@ -371,6 +387,7 @@ class TierBounds {
   int root_grid_ = 0;
   int root_building_ = 0;
   bool grid_monotone_ = true;
+  int progress_cap_ = -1;
   Score caps_;
 };
 
@@ -489,15 +506,14 @@ class SharedMap {
 // What the search threads share.
 struct Shared {
   Shared(const Board& r, const TurnContext& ctx, const SolveOptions& opt)
-      : root(r), o(opt), bounds(r, opt.tier_caps, opt.threat_kills), tt(opt.tt_max_entries), leaf(opt.tt_max_entries), busy(SIZE_MAX) {
+      : root(r), o(opt), bounds(r, opt.tier_caps, opt, &ctx), tt(opt.tt_max_entries), leaf(opt.tt_max_entries), busy(SIZE_MAX) {
     base = ctx;
     base.events = nullptr;
     base.log = nullptr;
     adaptive = opt.min_proven_tiers > 0 && opt.time_limit_s > 0 && opt.max_time_s > opt.time_limit_s;
     tiers = components_for_tiers(std::clamp(opt.min_proven_tiers, 0, used_tier_count(opt.tier_on())),
                                  opt.tier_on());
-    score_options.threat_tier = opt.threat_tier;
-    score_options.threat_kills = opt.threat_kills;
+    score_options = opt.score_options();
     root_ub = bounds.of(r);
   }
   const Board& root;
@@ -661,7 +677,11 @@ class Worker {
       driver_.mark_random(pr.chances);
       if (!pr.exact) sh_.note("enemy phase: the recorded data does not pin every step down (EnvInexact)");
       if (!pr.emerged_unknown.empty()) sh_.note("enemy phase: spawns of unknown type emerge without a pawn");
-      worst = std::min(worst, score_turn(sh_.root, after, &tc_, &pr, sh_.score_options));
+      const Score s = score_turn(sh_.root, after, &tc_, &pr, sh_.score_options);
+      if (sh_.bounds.progress_cap() >= 0 && s[ScoreKey::ObjectiveProgress] > sh_.bounds.progress_cap()) {
+        sh_.note("objective progress above its derived cap (objective_progress_cap is unsound here)");
+      }
+      worst = std::min(worst, s);
       if (worst <= alpha) {
         cut = true;
         return false;
@@ -1259,10 +1279,7 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
     engine.lua().seed(kLuaSeed);
     const PhaseResult pr = engine.end_turn(b, tc);
     d.mark_random(pr.chances);
-    ScoreOptions so;
-    so.threat_tier = options.threat_tier;
-    so.threat_kills = options.threat_kills;
-    worst = std::min(worst, score_turn(board, b, &tc, &pr, so));
+    worst = std::min(worst, score_turn(board, b, &tc, &pr, options.score_options()));
     return true;
   });
   if (bad) return std::nullopt;

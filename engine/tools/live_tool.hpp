@@ -8,9 +8,11 @@
 //       compares (live_board_json below)
 //   {"cmd": "solve", "state": "...", "time_limit": 10, "node_limit": 0,
 //    "beam_width": -1, "threads": N, "max_time": 0, "min_tiers": 0,
-//    "threat_tier": false}
+//    "threat_tier": false, "threat_kills": false, "objectives_first": false}
 //       ("threat_tier": rank by the next-turn threat tier, SolveOptions::
-//       threat_tier; scores then carry "threat" and the reply lists
+//       threat_tier; "threat_kills" / "objectives_first": its variants,
+//       SolveOptions::threat_kills / objectives_first; scores then carry
+//       "threat" (the tier slot) and the reply lists
 //       "threatening_enemies" after the predicted enemy phase)
 //       the perfect-turn search, then its plan simulated sub-action by
 //       sub-action with the default chance outcome (the outcome the plan
