@@ -456,7 +456,8 @@ def _health_psion(u: dict) -> bool:
 def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
                 acid_pools: frozenset = frozenset(), resist: dict | None = None,
                 xp_split: bool = False, mines_gone: frozenset = frozenset(),
-                random_thaw: bool = False, freeze_mines_gone: frozenset = frozenset()) -> tuple[list, list]:
+                random_thaw: bool = False, freeze_mines_gone: frozenset = frozenset(),
+                repair_mines_gone: frozenset = frozenset()) -> tuple[list, list]:
     """Differences between a predicted and a live compact board (itb_live's
     live_board_json). Returns (differences, notes). Units in `known` (the
     turn-start uids) are matched by uid; others by type/tile/HP (the engine
@@ -475,6 +476,10 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
       that steps on one while planning is frozen; a non-mech the engine has
       unfrozen and the game frozen is a note while tripped freeze mines
       account for it.
+    - `repair_mines_gone`: like `mines_gone` for Item_Repair_Mine items
+      (Mission_Repair): a Vek that walks onto one while planning is healed
+      and loses ACID and fire. A non-mech that moved onto one of these tiles
+      with more HP, or with acid / fire cleared, is a note.
     - `random_thaw` (the prediction thawed frozen enemies at random:
       Mission_Reactivation thaws 2 random frozen Vek each enemy turn, a chance
       node the prediction takes one outcome of): enemies whose frozen flag
@@ -545,12 +550,19 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
             diffs.append(f"{describe_unit(a)}: engine alive at {visual(a['x'], a['y'])} hp {a['hp']}, game dead")
             continue
         who = describe_unit(a)
+        repaired = (enemy_phase and not a.get("mech") and (a["x"], a["y"]) != (b["x"], b["y"])
+                    and (b["x"], b["y"]) in repair_mines_gone)
+        if repaired:
+            notes.append(f"{who} took the repair mine at {visual(b['x'], b['y'])} moving during AI planning "
+                         f"(hp: engine {a['hp']}, game {b['hp']})")
         if a["type"] != b["type"]:
             diffs.append(f"{who}: engine {a['type']}, game {b['type']}")
         if (a["x"], a["y"]) != (b["x"], b["y"]) and (not enemy_phase or a.get("mech")):
             diffs.append(f"{who}: engine at {visual(a['x'], a['y'])}, game at {visual(b['x'], b['y'])}")
         if a["hp"] != b["hp"]:
-            if (psion is not None and b["hp"] == a["hp"] + 1 and not a.get("mech")
+            if repaired and b["hp"] > a["hp"]:
+                pass
+            elif (psion is not None and b["hp"] == a["hp"] + 1 and not a.get("mech")
                     and a.get("team") == psion.get("team") and not _health_psion(a)):
                 buffed.append(who)
             elif enemy_phase and xp_split and a.get("mech") and b["hp"] == a["hp"] + 2:
@@ -561,6 +573,8 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
         for f in fields:
             if bool(a.get(f)) != bool(b.get(f)):
                 moved = (a["x"], a["y"]) != (b["x"], b["y"])
+                if repaired and f in ("acid", "fire") and not b.get(f):
+                    continue
                 if (enemy_phase and f == "acid" and b.get(f) and not a.get("mech") and moved
                         and (b["x"], b["y"]) in acid_pools):
                     notes.append(f"{who} picked up the acid pool at {visual(b['x'], b['y'])} "
@@ -1224,6 +1238,8 @@ def end_turn(ctx) -> list:
     diffs, notes = diff_boards(pred["after_enemy"], live, known, enemy_phase=True, acid_pools=pools,
                                mines_gone=frozenset(mines(state) - mines(after)),
                                freeze_mines_gone=frozenset(mines(state, "Freeze_Mine") - mines(after, "Freeze_Mine")),
+                               repair_mines_gone=frozenset(mines(state, "Item_Repair_Mine")
+                                                           - mines(after, "Item_Repair_Mine")),
                                random_thaw=any(e.get("type") == "thawed"
                                                for e in (pred.get("enemy_phase") or {}).get("events", [])),
                                resist=resist_info(pred),

@@ -987,6 +987,21 @@ class DiffBoardsTest(unittest.TestCase):
         diffs, _ = lp.diff_boards(want, got, {97}, enemy_phase=True)
         self.assertEqual(len(diffs), 1)
 
+    def test_vek_healed_on_a_tripped_repair_mine_is_a_note(self):
+        # Live 2026-10-11 (Mission_Repair): a Burnbug walked onto the C3
+        # repair mine while the Vek planned their next turn: healed to full,
+        # acid gone.
+        want = self.board([dict(self.vek(3, 6), hp=1, acid=True)])
+        got = self.board([dict(self.vek(3, 3), hp=3, acid=False)])
+        diffs, notes = lp.diff_boards(want, got, {97}, enemy_phase=True, repair_mines_gone=frozenset({(3, 3)}))
+        self.assertEqual(diffs, [])
+        self.assertTrue(any("repair mine" in n for n in notes))
+        # Elsewhere, or without a tripped repair mine, it is still a difference.
+        diffs, _ = lp.diff_boards(want, got, {97}, enemy_phase=True, repair_mines_gone=frozenset({(1, 1)}))
+        self.assertEqual(len(diffs), 2)
+        diffs, _ = lp.diff_boards(want, got, {97}, enemy_phase=True)
+        self.assertEqual(len(diffs), 2)
+
     def test_an_egg_that_hatched_during_ai_planning_is_a_note(self):
         egg = {"uid": 97, "type": "SpiderlingEgg1", "x": 5, "y": 2, "hp": 1}
         diffs, notes = lp.diff_boards(self.board([egg]), self.board([]), {97}, enemy_phase=True)
