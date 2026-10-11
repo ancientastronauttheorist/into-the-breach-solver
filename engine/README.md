@@ -573,6 +573,27 @@ mech HP, ..., and `--min-tiers 6` keeps mech HP proven.
 `itb_inspect --threat-check DIR` checks the proxy against the engine and
 the recorded games and times it (see "Threat tier measurement").
 
+**Mech exchange (experimental, off by default).** A mech lost is gone for
+every remaining turn of the mission (and its pilot dies), while the strict
+order gives it up for any grid point. `ScoreOptions::mech_grid` = N >= 0
+(`SolveOptions::mech_grid`, `itb_inspect --solve --mech-grid N`, itb_live /
+Python `"mech_grid": N`, `live_play.py --mech-grid N`, `ITB_MECH_GRID=N` for
+the old bot) makes a mech worth more than N grid power and less than N + 1:
+the GridLost slot becomes `2 x grid + (2N + 1) x mechs` (`mech_grid_slot`),
+minus `kGridOutPenalty` (2^20) when the turn ends with no grid power, so the
+last grid point is never traded. Building HP and the later tiers keep their
+places (MechsLost stays as a now redundant component); N = 0 only lifts a
+mech above building HP. `mech_grid_turns` (`--mech-grid-turns`,
+`"mech_grid_turns"`, `ITB_MECH_GRID_TURNS=1`) caps N by the turns left after
+this one (`total_turns - turn`), so on a mission's last turn a mech is worth
+less than one grid point again. The rate is fixed per solve (the root
+board's turn). Printed and JSON scores carry the combined slot as "grid"
+(`itb_inspect` adds the plan's plain tiers, JSON `"plain"`; itb_live adds
+`"mech_grid_rate"` and `live_play.py` prints the slot formula). Off, nothing
+changes (byte-identical `--corpus/--moves/--weapons/--replay [--turns]`,
+node-budget solves identical in every counter). See "Mech exchange
+measurement".
+
 Pawn identity: engine uids of removed pawns can be handed out again within a
 turn (new pawns take one more than the largest uid still on the board), so a
 pawn on `after` is the same pawn only if its type matches and it did not
@@ -762,7 +783,10 @@ then `objective_progress_cap` (`objectives.cpp`) bounds every objective line
 by what the root board allows (pods present, targets alive, counters
 clamped at their targets) and caps both the progress and the threat slot
 (0 of 601 recorded turns exceed it; the solver warns if a leaf ever does). Grid and building losses are
-therefore committed once a player action causes them.
+therefore committed once a player action causes them. With the mech
+exchange the grid slot's bound is 2 x the grid bound + (2N + 1) x the mechs
+bound (both coefficients positive), less the grid-out penalty on a board
+already at grid 0 when grid power cannot rise.
 
 **Anytime.** With a time or node budget the result is the best plan found,
 `proven_optimal = false`, an `upper_bound` (the root's interval, sound
@@ -969,6 +993,77 @@ noise, both ways). Run 4 (88): threats 157 -> 127 / 126, mech HP -14 -> -62 /
 grid in every arm, with the same grid result; the tier changes 2 of them
 below grid (m04 turn 1: one threat fewer, one kill and a third of a star
 more, for 2 mech HP).
+
+**Mech exchange measurement** (`--mech-grid`, "Turn score"; 2026-10-11,
+after live Hard run 5 was lost). Mission_BotDefense (`live/20261011_011242`
+m68) turn 1 was proven optimal with the Drill Mech dead (worst case grid 0,
+building HP 0, mechs -1, mech HP -8; the same plan with and without the
+threat tier, proven in 28 s at 8 threads, so no plan keeps every mech at no
+building cost). `--mech-grid 7` proves the cheapest plan that keeps all
+three: 1 grid and 1 building HP (a Moth's shell on a building, Grid Defense
+may still resist it), mech HP 0 instead of -8, the same kill and Vek HP;
+`--mech-grid 1 --mech-grid-turns` with the live flags picks it too (31 s).
+With two mechs the mission then lost 3 + 2 grid and both stars, and the
+next mission lost the last 2 grid on its first turn.
+
+Corpus (all 878 recorded boards: 391 Easy, 35 Normal, 451 Hard, 1 Unfair;
+`--time 3 --max-time 60 --min-tiers 3 --threads 4`, then the boards that
+lose a mech again with 180 s): the plan loses a mech on 14 boards (1.6%; 8
+of the 451 Hard), plus 2 where it was budget noise (a longer search keeps
+every mech at no cost). The cheapest plan that keeps every mech
+(`--mech-grid 7`) costs 1 grid and 1 building HP on 10 of the 14, 2 on 2,
+and does not exist on 2; it mostly keeps more mech HP as well. 7 of the 14 are on the mission's
+last turn; of the 7 before it, 5 cost 1 grid (BotDefense t1/4, ScarabBoss
+t3/4 and CentipedeBoss t3/4 on Hard, Tanks t1/4 also with 2 stars, AcidStorm
+t2/4) and 1 costs 2 (Mission_Final t3/4).
+
+What a lost mech costs, from the recorded games (grid at each turn start):
+
+| turns played with | Hard: turns, grid lost per turn | all: turns, per turn |
+|---|---|---|
+| 3 mechs | 332, 0.148 | 637, 0.127 |
+| 2 mechs | 4, 1.25 | 13, 0.85 |
+
+On Hard, missions that kept 3 mechs lost 0.34 grid between the start of
+turn 2 and the start of their last turn (109 missions); the two Hard
+missions that lost a mech before then lost 3 (m68, plus 2 more in its last
+turn) and 2 (`live/20261010_174709` m26, AcidStorm). Few turns and
+confounded (harder boards lose mechs), but every estimate puts a mech lost
+with L turns left at roughly 0.7-1.1 grid per turn left, plus its pilot.
+
+Arms with the live flags (`--threat-tier --objectives-first --time 10
+--max-time 60 --min-tiers 6 --threads 4`), on the 16 boards where the
+screen lost a mech:
+
+| | off | `--mech-grid 1/2 --mech-grid-turns` | `--mech-grid 2` |
+|---|---|---|---|
+| grid / building HP | -8 / -8 | -13 / -13 | -24 / -24 |
+| mechs lost | 15 | 10 | 2 |
+| mech HP | -50 | -34 | -9 |
+| stars failed | 2 | 4 | 4 |
+
+`--mech-grid 1 --mech-grid-turns` and `--mech-grid 2 --mech-grid-turns`
+choose the same plans: 1 grid for a mech on BotDefense t1, ScarabBoss t3,
+CentipedeBoss t3 (unproven), AcidStorm t2 and Tanks t1 (which also fails 2
+stars: mechs already outrank stars). Mission_Final t3/4 needs 2 grid with
+1 turn left and keeps the plain plan; last turns are unchanged. Without the
+cap (`--mech-grid 2`) last turns trade too, and budget-limited boards trade
+grid for a mech a longer search keeps for free.
+
+Elsewhere the exchange changes nothing it could: with the plain optimum
+keeping every mech, no plan has a better slot. Cost, on 60 evenly spaced
+Hard boards with node budgets (150 k nodes, one thread each, both arms side
+by side): identical node counts on 59, 11 proven in both, 17 proven in 6
+tiers in both, the same speed per sub-action. 3 plans differ, all unproven
+and from search order: the end-of-turn values that order children and the
+beam rank a state with a mech about to die lower, so a plan that passes
+through one is found later (`live/20261011_011242` m32 turn 3: both proven
+optimal with the same value, at 110 s off and 149 s with the exchange,
+best plan found at 0.5 s and 116 s). A timed comparison on the same boards
+was dominated by machine load (3x slower per sub-action in one arm).
+Suggested live trial: `live_play.py ... --mech-grid 2 --mech-grid-turns`
+(a mech is worth up to min(2, turns left) grid, never the last grid point);
+it is still off by default.
 
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state

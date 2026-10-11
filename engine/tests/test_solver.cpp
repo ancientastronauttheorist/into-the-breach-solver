@@ -134,6 +134,7 @@ struct Naive {
   Engine& e;
   const Board& root;
   const TurnContext& base;
+  ScoreOptions score_options{};
   uint64_t evaluations = 0;
 
   void hooks(Choices& c, ActionOptions& o, TurnContext* tc) {
@@ -163,7 +164,7 @@ struct Naive {
       e.lua().seed(1);
       const PhaseResult pr = e.end_turn(after, tc);
       ++evaluations;
-      worst = std::min(worst, score_turn(root, after, &tc, &pr));
+      worst = std::min(worst, score_turn(root, after, &tc, &pr, score_options));
     });
     return worst;
   }
@@ -451,6 +452,8 @@ TEST_CASE("score: the mech exchange slot (mech_grid)") {
   CHECK(mech_grid_rate(last, o) == 1);
 }
 
+void check_mech_grid_naive(Engine& E, const Board& b, const TurnContext& ctx, int rate, const Score& got);
+
 TEST_CASE("solver: mech_grid keeps a mech for a building") {
   NEED_ENGINE();
   // Mech A (1 HP, done for the turn) is about to be stung by a Hornet; a
@@ -515,6 +518,10 @@ TEST_CASE("solver: mech_grid keeps a mech for a building") {
   REQUIRE(keep.proven_optimal);
   CHECK(keep.best.worst_case[ScoreKey::MechsLost] == -1);
   CHECK(keep.best.worst_case[ScoreKey::GridLost] == -15);  // 2 x 0 + 15 x (-1)
+
+  // The same values by naive exhaustive enumeration (defined further down).
+  check_mech_grid_naive(E, b, ctx, 1, on.best.worst_case);
+  check_mech_grid_naive(E, low, ctx, 7, keep.best.worst_case);
 }
 
 TEST_CASE("solver: a chance node whose worst case is not the default outcome") {
@@ -706,6 +713,75 @@ TEST_CASE("solver: tiny boards match a naive exhaustive enumeration") {
   }
   CHECK(checked == kTrials);
   MESSAGE("brute-force boards: " << checked << ", with chance branches: " << with_chance);
+}
+
+void check_mech_grid_naive(Engine& E, const Board& b, const TurnContext& ctx, int rate, const Score& got) {
+  Naive naive{E, b, ctx};
+  naive.score_options.mech_grid = rate;
+  CHECK(naive.value(b) == got);
+}
+
+TEST_CASE("solver: tiny boards with the mech exchange match a naive exhaustive enumeration") {
+  NEED_ENGINE();
+  // As above, with mechs at 1-2 HP so that keeping a mech and keeping a
+  // building compete; the exchange's slot and bound against the naive value.
+  std::mt19937 rng(20261011);
+  int checked = 0, lost = 0, traded = 0;
+  constexpr int kTrials = 30;
+  for (int trial = 0; trial < kTrials; ++trial) {
+    Board b = tiny_board(rng);
+    b.grid_power = 1 + static_cast<int>(rng() % 3u);  // sometimes the last grid point is at stake
+    bool first = true;
+    for (Pawn& p : b.pawns()) {
+      if (!p.mech) continue;
+      p.hp = static_cast<int8_t>(1 + rng() % 2u);
+      if (first && rng() % 3u != 0) p.active = false;  // done for the turn: cannot step away
+      first = false;
+    }
+    // Vek next to a mech attack it (each mech at most once), so that a mech
+    // and a building are both at stake.
+    std::vector<Point> mechs;
+    for (const Pawn& p : b.pawns()) {
+      if (p.mech) mechs.push_back(p.pos);
+    }
+    for (Pawn& p : b.pawns()) {
+      if (p.team != Team::Enemy) continue;
+      for (auto it = mechs.begin(); it != mechs.end(); ++it) {
+        if (std::abs(it->x - p.pos.x) + std::abs(it->y - p.pos.y) == 1) {
+          p.queued = QueuedShot{0, p.pos, *it};
+          mechs.erase(it);
+          break;
+        }
+      }
+    }
+    const TurnContext ctx = context();
+    for (int rate : {0, 1}) {
+      Naive naive{E, b, ctx};
+      naive.score_options.mech_grid = rate;
+      const Score want = naive.value(b);
+      Naive plain{E, b, ctx};
+      const Score base = plain.value(b);
+      if (rate == 1 && base[ScoreKey::MechsLost] < 0) ++lost;
+      if (rate == 1 && base[ScoreKey::MechsLost] < want[ScoreKey::MechsLost]) ++traded;
+      for (bool tt : {true, false}) {
+        SolveOptions o = quick(120);
+        o.mech_grid = rate;
+        o.use_tt = tt;
+        o.use_bounds = tt;
+        o.order_children = tt;
+        o.beam_width = tt ? 6 : 0;
+        const SolveResult r = solve_turn(E, b, ctx, o);
+        INFO("trial " << trial << " rate " << rate << " tt " << tt << " naive " << want.describe() << " solver "
+                      << r.best.worst_case.describe());
+        CHECK(r.proven_optimal);
+        CHECK(r.best.worst_case == want);
+      }
+    }
+    ++checked;
+  }
+  CHECK(checked == kTrials);
+  MESSAGE("mech exchange brute-force boards: " << checked << ", a mech lost by the plain order: " << lost
+                                              << ", kept for grid with mech_grid 1: " << traded);
 }
 
 // ---- Threads and recorded boards ----------------------------------------------------
