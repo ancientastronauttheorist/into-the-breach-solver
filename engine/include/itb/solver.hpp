@@ -85,12 +85,18 @@ struct SolveOptions {
   // ScoreOptions::objectives_first: objective progress first in the tier
   // slot (with a derived cap, objective_progress_cap).
   bool objectives_first = false;
+  // ScoreOptions::mech_grid / mech_grid_turns: a mech is worth up to this
+  // much grid power (folded into the GridLost slot); -1 = off.
+  int mech_grid = -1;
+  bool mech_grid_turns = false;
   bool tier_on() const { return threat_tier || threat_kills; }
   ScoreOptions score_options() const {
     ScoreOptions s;
     s.threat_tier = threat_tier;
     s.threat_kills = threat_kills;
     s.objectives_first = objectives_first;
+    s.mech_grid = mech_grid;
+    s.mech_grid_turns = mech_grid_turns;
     return s;
   }
   // Repair skill per unit uid (Engine::repair_skill of its pilot). Units not

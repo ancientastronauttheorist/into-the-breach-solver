@@ -8,12 +8,16 @@
 //       compares (live_board_json below)
 //   {"cmd": "solve", "state": "...", "time_limit": 10, "node_limit": 0,
 //    "beam_width": -1, "threads": N, "max_time": 0, "min_tiers": 0,
-//    "threat_tier": false, "threat_kills": false, "objectives_first": false}
+//    "threat_tier": false, "threat_kills": false, "objectives_first": false,
+//    "mech_grid": -1, "mech_grid_turns": false}
 //       ("threat_tier": rank by the next-turn threat tier, SolveOptions::
 //       threat_tier; "threat_kills" / "objectives_first": its variants,
 //       SolveOptions::threat_kills / objectives_first; scores then carry
 //       "threat" (the tier slot) and the reply lists
-//       "threatening_enemies" after the predicted enemy phase)
+//       "threatening_enemies" after the predicted enemy phase;
+//       "mech_grid" N >= 0: a mech is worth up to N grid, SolveOptions::
+//       mech_grid, folded into the "grid" score slot; "mech_grid_turns"
+//       caps N by the mission's turns left)
 //       the perfect-turn search, then its plan simulated sub-action by
 //       sub-action with the default chance outcome (the outcome the plan
 //       follows): the predicted board after every move, weapon and repair,

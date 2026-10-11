@@ -125,6 +125,7 @@ class FakeEngine:
         self.clears = clears
         self.solves = []
         self.budgets = []  # (time_limit, max_time, min_tiers) per solve
+        self.tiers = []  # ranking options (threat_tier, mech_grid, ...) per solve
         self.predicts = []
         self.predict_states = []
 
@@ -158,10 +159,11 @@ class FakeEngine:
                 "after_player": after, "after_enemy": enemy, "enemy_phase": copy.deepcopy(self.enemy_phase),
                 "warnings": []}
 
-    def solve(self, path, time_limit, max_time=0, min_tiers=0):
+    def solve(self, path, time_limit, max_time=0, min_tiers=0, **tiers):
         st = self._state(path)
         self.solves.append(st)
         self.budgets.append((time_limit, max_time, min_tiers))
+        self.tiers.append(tiers)
         active = {u["uid"] for u in st["units"] if u.get("team") == 1 and u.get("active")}
         moved = {u["uid"] for u in st["units"] if u.get("moved")}
         steps = [s for s in self.plan if s["uid"] in active and not (s["sub"] == "move" and s["uid"] in moved)]
@@ -420,6 +422,34 @@ class LivePlayTest(unittest.TestCase):
         eng = FakeEngine()
         self.assertEqual(self.run_cmd(["turn", "--time", "30", "--max-time", "90", "--min-tiers", "3"], eng), 1)
         self.assertEqual(eng.budgets, [(30.0, 90.0, 3), (30.0, 90.0, 3)])
+
+    def test_ranking_options_off_by_default(self):
+        self.bridge()
+        eng = FakeEngine()
+        self.assertEqual(self.run_cmd(["turn"], eng), 0)
+        self.assertEqual(eng.tiers, [{}])
+
+    def test_mech_grid_is_passed_to_every_solve(self):
+        self.bridge()
+        self.fb.damage = 2  # a mismatch: re-solve
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--mech-grid", "1", "--mech-grid-turns"], eng)
+        self.assertEqual(eng.tiers, [{"mech_grid": 1, "mech_grid_turns": True}] * 2)
+
+    def test_mech_grid_request(self):
+        sent = []
+        eng = lp.Engine.__new__(lp.Engine)
+        eng.threads = 4
+        eng.request = lambda req: sent.append(req) or {"ok": True}
+        eng.solve(Path("s.json"), 10)
+        eng.solve(Path("s.json"), 10, mech_grid=2)
+        eng.solve(Path("s.json"), 10, mech_grid=0, mech_grid_turns=True)
+        self.assertNotIn("mech_grid", sent[0])
+        self.assertEqual((sent[1]["mech_grid"], "mech_grid_turns" in sent[1]), (2, False))
+        self.assertEqual((sent[2]["mech_grid"], sent[2]["mech_grid_turns"]), (0, True))
+        self.assertIn("mech exchange: grid slot = 2 x grid + 3 x mechs",
+                      lp.plan_summary({"worst_case": {"grid": -2}, "mech_grid_rate": 1, "stats": {}}))
+        self.assertNotIn("mech exchange", lp.plan_summary({"worst_case": {"grid": -2}, "stats": {}}))
 
     def test_native_only_execution(self):
         self.bridge()

@@ -324,6 +324,12 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 //   VekHpRemoved   <= their total HP (hp_before - hp_after, hp_after >= 0).
 //   ObjectiveProgress, Position: unbounded (INT32_MAX) unless the caller
 //                    gives SolveOptions::tier_caps.
+// With the mech exchange (SolveOptions::mech_grid, rate r >= 0 from the
+// root, constant over the search) the GridLost slot is 2 * GridLost +
+// (2r + 1) * MechsLost - kGridOutPenalty [grid ends at 0]. Both
+// coefficients are positive, so 2 * (the grid cap above) + (2r + 1) * (the
+// mechs cap) bounds it, and with grid monotone a board at grid <= 0 ends
+// the turn at grid <= 0, so its penalty is certain and comes off its bound.
 // tier_caps lowers any component further (the caller vouches for them).
 class TierBounds {
  public:
@@ -365,6 +371,11 @@ class TierBounds {
       caps_[ScoreKey::Threat] = static_cast<int32_t>(std::min<int64_t>(slot, INT32_MAX - 1));
     }
     caps_[ScoreKey::VekHpRemoved] = enemy_hp;
+    grid_cap_ = caps_[ScoreKey::GridLost];
+    mech_rate_ = mech_grid_rate(root, opt.score_options());
+    if (mech_rate_ >= 0) {
+      caps_[ScoreKey::GridLost] = 2 * grid_cap_ + (2 * mech_rate_ + 1) * dead_mechs;
+    }
     if (caps) {
       for (size_t i = 0; i < caps_.v.size(); ++i) caps_.v[i] = std::min(caps_.v[i], caps->v[i]);
     }
@@ -376,7 +387,11 @@ class TierBounds {
 
   Score of(const Board& b) const {
     Score s = caps_;
-    if (grid_monotone_) {
+    if (grid_monotone_ && mech_rate_ >= 0) {
+      const int grid = std::min(grid_cap_, b.grid_power - root_grid_);
+      const int32_t slot = mech_grid_slot(mech_rate_, grid, s[ScoreKey::MechsLost], b.grid_power);
+      s[ScoreKey::GridLost] = std::min(s[ScoreKey::GridLost], slot);
+    } else if (grid_monotone_) {
       s[ScoreKey::GridLost] = std::min(s[ScoreKey::GridLost], b.grid_power - root_grid_);
     }
     s[ScoreKey::BuildingHpLost] = std::min(s[ScoreKey::BuildingHpLost], building_hp(b) - root_building_);
@@ -388,6 +403,8 @@ class TierBounds {
   int root_building_ = 0;
   bool grid_monotone_ = true;
   int progress_cap_ = -1;
+  int grid_cap_ = 0;   // the GridLost cap in grid units
+  int mech_rate_ = -1; // mech_grid_rate at the root (-1: off)
   Score caps_;
 };
 

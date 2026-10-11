@@ -64,12 +64,36 @@ struct ScoreOptions {
   // ObjectiveProgress keeps its own later component (then redundant).
   bool objectives_first = false;
   bool tier_on() const { return threat_tier || threat_kills; }
+  // Experiment (README "Turn score", mech exchange): a mech lost is worth
+  // more than `mech_grid` grid power and less than mech_grid + 1, so a plan
+  // may give up to that much grid to keep a mech. The GridLost slot becomes
+  // 2 * grid + (2 * rate + 1) * mechs (mech_grid_slot), minus
+  // kGridOutPenalty when the grid ends at 0 (the run is lost: never traded).
+  // MechsLost keeps its own later component (then redundant). -1 = off.
+  int mech_grid = -1;
+  // With mech_grid: the rate is min(mech_grid, mission turns left after this
+  // one), so on a mission's last turn a mech only outranks building HP.
+  bool mech_grid_turns = false;
+  bool mech_exchange() const { return mech_grid >= 0; }
 };
 
 // Larger than any spread of the threat / kills part of the slot (threats and
 // kills are each below 100 on an 8x8 board, so that part lies in
 // (-100 * 100, 100)), so whole objective-progress units dominate it.
 inline constexpr int kObjectivesFirstWeight = 16384;
+
+// ScoreOptions::mech_grid: taken from the GridLost slot of a plan that ends
+// with no grid power (larger than any spread of the rest of the slot).
+inline constexpr int kGridOutPenalty = 1 << 20;
+// The exchange rate on this board (the board at the start of the turn): -1
+// when off, else mech_grid, capped by the turns left with mech_grid_turns.
+int mech_grid_rate(const Board& before, const ScoreOptions& options);
+// The GridLost slot with the exchange at `rate` (>= 0): grid and mechs are
+// net changes (ScoreKey::GridLost, MechsLost), grid_after the grid power at
+// the end of the turn.
+inline int32_t mech_grid_slot(int rate, int grid, int mechs, int grid_after) {
+  return 2 * grid + (2 * rate + 1) * mechs - (grid_after <= 0 ? kGridOutPenalty : 0);
+}
 
 // The tiers in use, in rank order, as ScoreKey indices: every key, minus
 // Threat when the threat tier is off. Tier counts (SolveOptions::

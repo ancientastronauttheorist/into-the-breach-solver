@@ -219,6 +219,8 @@ int run_solve(const SolveToolOptions& opt) {
     so.threat_tier = opt.threat_tier;
     so.threat_kills = opt.kills_tier;
     so.objectives_first = opt.objectives_first;
+    so.mech_grid = opt.mech_grid;
+    so.mech_grid_turns = opt.mech_grid_turns;
     so.helper_engines = helper_ptrs;
     if (opt.beam >= 0) so.beam_width = opt.beam;
     if (opt.tt_entries > 0) so.tt_max_entries = opt.tt_entries;
@@ -255,6 +257,15 @@ int run_solve(const SolveToolOptions& opt) {
       }
     }
 
+    // With the mech exchange: the plan's worst case with plain tiers.
+    std::optional<Score> plain;
+    if (so.mech_grid >= 0) {
+      SolveOptions po = so;
+      po.mech_grid = -1;
+      po.helper_engines.clear();
+      plain = evaluate_plan(*engine, board, ctx, r.best.actions, po);
+    }
+
     if (single || opt.verbose) {
       std::printf("%s m%02d turn %d %s\n", rec->run_id.c_str(), rec->mission_index, rec->turn, rec->mission_id.c_str());
       if (single) std::fputs(render_board(board).c_str(), stdout);
@@ -266,6 +277,7 @@ int run_solve(const SolveToolOptions& opt) {
       for (const PlayerAction& a : r.best.actions) std::printf("  %d. %s\n", ++i, describe_action(cur, a).c_str());
       if (r.best.actions.empty()) std::printf("  (end turn)\n");
       std::printf("worst case: %s\n", score_text(r.best.worst_case, tier_on).c_str());
+      if (plain) std::printf("plain tiers (no mech exchange): %s\n", score_text(*plain, tier_on).c_str());
       if (!r.proven_optimal && r.upper_bound) {
         std::printf("upper bound: %s (optimal in the first %d tiers)\n", score_text(*r.upper_bound, tier_on).c_str(),
                     r.proven_components);
@@ -321,9 +333,11 @@ int run_solve(const SolveToolOptions& opt) {
         eo.threat_tier = true;
         eo.threat_kills = false;
         eo.objectives_first = false;
+        eo.mech_grid = -1;
         eo.helper_engines.clear();
         if (const auto e = evaluate_plan(*engine, board, ctx, r.best.actions, eo)) j["threat_eval"] = e->v;
       }
+      if (plain) j["plain"] = score_vector(*plain, tier_on);
       if (row.recorded) {
         j["recorded"] = score_vector(*row.recorded, tier_on);
         j["compare"] = row.compare;

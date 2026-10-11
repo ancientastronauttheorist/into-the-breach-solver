@@ -393,6 +393,130 @@ TEST_CASE("solver: two threats, two mechs; the order of actions matters") {
   (void)c;
 }
 
+TEST_CASE("score: the mech exchange slot (mech_grid)") {
+  // Three mechs, grid 5 on turn 1 of 4.
+  Board before;
+  before.grid_power = 5;
+  before.turn = 1;
+  before.total_turns = 4;
+  for (int i = 0; i < 3; ++i) {
+    Pawn m;
+    m.uid = i;
+    m.type = intern("PunchMech");
+    m.team = Team::Player;
+    m.mech = true;
+    m.corpse = true;
+    m.pos = {i, 0};
+    m.hp = m.max_hp = 3;
+    before.add_pawn(m);
+  }
+  Board dead = before;  // a mech lost, the grid kept
+  dead.find_pawn(0)->hp = 0;
+  Board grid1 = before;  // one grid lost, every mech kept
+  grid1.grid_power = 4;
+  Board grid2 = before;
+  grid2.grid_power = 3;
+
+  // Off: grid first, as always.
+  CHECK(score_turn(before, dead) > score_turn(before, grid1));
+  ScoreOptions o;
+  CHECK(mech_grid_rate(before, o) == -1);
+  // mech_grid 0: a mech outranks building HP, not one grid.
+  o.mech_grid = 0;
+  CHECK(score_turn(before, dead, nullptr, nullptr, o) > score_turn(before, grid1, nullptr, nullptr, o));
+  // mech_grid 1: worth more than 1 grid, less than 2.
+  o.mech_grid = 1;
+  const Score d1 = score_turn(before, dead, nullptr, nullptr, o);
+  CHECK(d1[ScoreKey::GridLost] == -3);
+  CHECK(d1[ScoreKey::MechsLost] == -1);
+  CHECK(d1 < score_turn(before, grid1, nullptr, nullptr, o));
+  CHECK(d1 > score_turn(before, grid2, nullptr, nullptr, o));
+  // Never the last grid: a plan that ends at grid 0 ranks below any other.
+  Board out = before;
+  out.grid_power = 0;
+  o.mech_grid = 7;
+  Board both = dead;
+  both.find_pawn(1)->hp = 0;
+  both.find_pawn(2)->hp = 0;
+  both.grid_power = 1;
+  CHECK(score_turn(before, out, nullptr, nullptr, o) < score_turn(before, both, nullptr, nullptr, o));
+  // mech_grid_turns: capped by the turns left after this one.
+  o.mech_grid = 2;
+  o.mech_grid_turns = true;
+  CHECK(mech_grid_rate(before, o) == 2);
+  Board last = before;
+  last.turn = 4;
+  CHECK(mech_grid_rate(last, o) == 0);
+  last.turn = 3;
+  CHECK(mech_grid_rate(last, o) == 1);
+}
+
+TEST_CASE("solver: mech_grid keeps a mech for a building") {
+  NEED_ENGINE();
+  // Mech A (1 HP, done for the turn) is about to be stung by a Hornet; a
+  // second Hornet is about to hit a building. Mech B can punch one of them.
+  // Grid first saves the building and loses A; mech_grid >= 1 saves A.
+  Board b;
+  b.grid_power = 5;
+  b.turn = 1;
+  b.total_turns = 4;
+  const int32_t a = place(b, "PunchMech", {6, 7}, true);
+  P(b, a).hp = 1;
+  P(b, a).active = false;
+  const int32_t m = place(b, "PunchMech", {4, 4}, true);
+  P(b, m).move = 3;
+  const int32_t h1 = place(b, "Hornet1", {6, 6});
+  queue(b, h1, {6, 7});
+  const int32_t h2 = place(b, "Hornet1", {3, 3});
+  queue(b, h2, {3, 2});
+  set_building(b, {3, 2});
+  const TurnContext ctx = context();
+
+  const SolveResult off = solve_turn(E, b, ctx, quick());
+  REQUIRE(off.proven_optimal);
+  CHECK(off.best.worst_case[ScoreKey::GridLost] == 0);
+  CHECK(off.best.worst_case[ScoreKey::MechsLost] == -1);
+
+  SolveOptions o = quick();
+  o.mech_grid = 1;
+  const SolveResult on = solve_turn(E, b, ctx, o);
+  REQUIRE(on.proven_optimal);
+  CHECK(on.best.worst_case[ScoreKey::MechsLost] == 0);
+  CHECK(on.best.worst_case[ScoreKey::GridLost] == -2);  // 2 x (-1 grid)
+  CHECK(on.upper_bound == on.best.worst_case);
+  const auto plain = evaluate_plan(E, b, ctx, on.best.actions);
+  REQUIRE(plain);
+  CHECK((*plain)[ScoreKey::GridLost] == -1);
+  CHECK((*plain)[ScoreKey::BuildingHpLost] == -1);
+  CHECK((*plain)[ScoreKey::MechsLost] == 0);
+  const auto again = evaluate_plan(E, b, ctx, on.best.actions, o);
+  REQUIRE(again);
+  CHECK(*again == on.best.worst_case);
+
+  // mech_grid 0 (a mech above building HP only) keeps the building.
+  o.mech_grid = 0;
+  const SolveResult zero = solve_turn(E, b, ctx, o);
+  REQUIRE(zero.proven_optimal);
+  CHECK(zero.best.worst_case[ScoreKey::MechsLost] == -1);
+  // On the mission's last turn, mech_grid_turns caps the rate at 0.
+  o.mech_grid = 1;
+  o.mech_grid_turns = true;
+  Board last = b;
+  last.turn = 4;
+  const SolveResult end = solve_turn(E, last, ctx, o);
+  REQUIRE(end.proven_optimal);
+  CHECK(end.best.worst_case[ScoreKey::MechsLost] == -1);
+  // Never for the last grid power.
+  Board low = b;
+  low.grid_power = 1;
+  o.mech_grid = 7;
+  o.mech_grid_turns = false;
+  const SolveResult keep = solve_turn(E, low, ctx, o);
+  REQUIRE(keep.proven_optimal);
+  CHECK(keep.best.worst_case[ScoreKey::MechsLost] == -1);
+  CHECK(keep.best.worst_case[ScoreKey::GridLost] == -15);  // 2 x 0 + 15 x (-1)
+}
+
 TEST_CASE("solver: a chance node whose worst case is not the default outcome") {
   NEED_ENGINE();
   // Lightning strike order (stage 7 V29): the psion struck first is the

@@ -2,7 +2,7 @@
 // (live_tool.hpp has the request format).
 //
 //   itb_live [--game DIR] solve <state.json> [--time S] [--nodes N] [--threads N]
-//            [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--out FILE] [--pretty]
+//            [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] [--out FILE] [--pretty]
 //   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--threat-tier] [--out FILE] [--pretty]
 //   itb_live [--game DIR] board <state.json> [--pretty]
 //   itb_live [--game DIR] serve [--threads N]
@@ -453,6 +453,10 @@ json LiveSession::handle(const json& request) {
     tiers.threat_tier = request.value("threat_tier", false);
     tiers.threat_kills = request.value("threat_kills", false);
     tiers.objectives_first = request.value("objectives_first", false);
+    // Experiment: a mech is worth up to mech_grid grid (SolveOptions::mech_grid).
+    tiers.mech_grid = request.value("mech_grid", -1);
+    tiers.mech_grid_turns = request.value("mech_grid_turns", false);
+    if (const int rate = mech_grid_rate(l.board, tiers.score_options()); rate >= 0) out["mech_grid_rate"] = rate;
     const bool threat = tiers.tier_on();
     if (cmd == "predict") {
       if (!request.contains("plan")) throw std::invalid_argument("predict needs a 'plan'");
@@ -468,6 +472,8 @@ json LiveSession::handle(const json& request) {
         so.threat_tier = tiers.threat_tier;
         so.threat_kills = tiers.threat_kills;
         so.objectives_first = tiers.objectives_first;
+        so.mech_grid = tiers.mech_grid;
+        so.mech_grid_turns = tiers.mech_grid_turns;
         const int beam = request.value("beam_width", -1);
         if (beam >= 0) so.beam_width = beam;
         so.repair_skills = l.repair_skills;
@@ -509,7 +515,7 @@ namespace {
 
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
-               "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] | "
+               "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | serve [--threads N]) "
                "[--out FILE] [--pretty]\n";
   return 2;
@@ -581,6 +587,10 @@ int run_live(int argc, char** argv) {
         request["threat_kills"] = true;
       } else if (args[i] == "--objectives-first" && (cmd == "solve" || cmd == "predict")) {
         request["objectives_first"] = true;
+      } else if (args[i] == "--mech-grid" && more && (cmd == "solve" || cmd == "predict")) {
+        request["mech_grid"] = std::stoi(args[++i]);
+      } else if (args[i] == "--mech-grid-turns" && (cmd == "solve" || cmd == "predict")) {
+        request["mech_grid_turns"] = true;
       } else if (args[i] == "--beam" && more && cmd == "solve") {
         request["beam_width"] = std::stoi(args[++i]);
       } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve")) {
