@@ -23,9 +23,18 @@ struct SolveToolOptions {
   std::filesystem::path json_out;  // one JSON line per board
   bool lua_counts = false;         // print Lua calls by table and method at the end
   uint64_t tt_entries = 0;         // SolveOptions::tt_max_entries (0: the default)
+  bool threat_tier = false;        // SolveOptions::threat_tier
+  bool kills_tier = false;         // SolveOptions::threat_kills (experiment: kills above mech HP)
+  // JSON: also each plan's actions and its worst case scored with the threat
+  // tier on ("plan", "threat_eval"), whatever the search ranked by.
+  bool threat_eval = false;
 };
 
 int run_solve(const SolveToolOptions& options);
+
+// itb_inspect --threat-check DIR (threat_tool.cpp): the next-turn threat
+// proxy against the engine's enemy phase on recorded boards, and its cost.
+int run_threat_check(const std::filesystem::path& dir, const std::filesystem::path& game);
 
 struct DiffWeaponsOptions {
   std::filesystem::path game;

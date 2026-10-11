@@ -325,7 +325,7 @@ TEST_CASE("solver: one Vek threatens a building; the punch saves it") {
   CHECK(r.best.actions[0].target == Point{3, 3});
   CHECK(r.best.actions[0].move == Point{2, 3});
   CHECK(r.upper_bound == r.best.worst_case);
-  CHECK(r.proven_components == kScoreKeys);
+  CHECK(r.proven_components == used_tier_count(false));
   // The plan's value, re-run open-loop.
   const auto again = evaluate_plan(E, b, ctx, r.best.actions);
   REQUIRE(again);
@@ -705,7 +705,7 @@ TEST_CASE("solver: adaptive budget, unproven at the base time, proves the first 
       REQUIRE(r.upper_bound);
       CHECK(*r.upper_bound >= r.best.worst_case);
       CHECK(*r.upper_bound >= full.best.worst_case);  // sound
-      CHECK(same_tiers(r.best.worst_case, full.best.worst_case, k));
+      CHECK(same_tiers(r.best.worst_case, full.best.worst_case, components_for_tiers(k, false)));
       CHECK(r.best.worst_case <= full.best.worst_case);
       if (r.proven_optimal) CHECK(r.best.worst_case == full.best.worst_case);
       if (!r.best.contingent) {
@@ -784,7 +784,7 @@ TEST_CASE("solver: adaptive budget runs to the cap while the tiers are unproven"
   ctx.mission = rec->mission;
   o.time_limit_s = 0.2;
   o.max_time_s = 0.8;
-  o.min_proven_tiers = kScoreKeys;
+  o.min_proven_tiers = used_tier_count(false);
   const SolveResult r = solve_turn(E, board, ctx, o);
   MESSAGE("cap stop: " << r.stats.time_s << " s, proven " << r.proven_optimal << ", in "
                        << r.proven_components << " tiers");

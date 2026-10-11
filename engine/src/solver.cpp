@@ -307,6 +307,11 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 //                    level-up (+2 each, pilot_hp_room). So <= sum of
 //                    (max_hp [+1] + level-up room - hp_before).
 //   ObjectivesFailed = -(stars lost) <= 0.
+//   Threat         = -(enemies able to hit a building next turn) <= 0 (0
+//                    whenever the threat tier is off). In the kills
+//                    experiment (threat_kills) it is VekKilled, capped below. No tighter cap is
+//                    sound cheaply: any enemy may still be killed, pushed
+//                    away, frozen or smoked, and spawns may be blocked.
 //   VekKilled      <= enemies alive at the root (only those are counted).
 //   VekHpRemoved   <= their total HP (hp_before - hp_after, hp_after >= 0).
 //   ObjectiveProgress, Position: unbounded (INT32_MAX) unless the caller
@@ -314,7 +319,7 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 // tier_caps lowers any component further (the caller vouches for them).
 class TierBounds {
  public:
-  TierBounds(const Board& root, const std::optional<Score>& caps) {
+  TierBounds(const Board& root, const std::optional<Score>& caps, bool threat_kills = false) {
     root_grid_ = root.grid_power;
     root_building_ = building_hp(root);
     for (const Pawn& p : root.pawns()) {
@@ -340,7 +345,9 @@ class TierBounds {
     caps_[ScoreKey::MechsLost] = dead_mechs;
     caps_[ScoreKey::MechHpLost] = mech_room;
     caps_[ScoreKey::ObjectivesFailed] = 0;
+    caps_[ScoreKey::Threat] = 0;
     caps_[ScoreKey::VekKilled] = enemies;
+    if (threat_kills) caps_[ScoreKey::Threat] = enemies;
     caps_[ScoreKey::VekHpRemoved] = enemy_hp;
     if (caps) {
       for (size_t i = 0; i < caps_.v.size(); ++i) caps_.v[i] = std::min(caps_.v[i], caps->v[i]);
@@ -480,12 +487,15 @@ class SharedMap {
 // What the search threads share.
 struct Shared {
   Shared(const Board& r, const TurnContext& ctx, const SolveOptions& opt)
-      : root(r), o(opt), bounds(r, opt.tier_caps), tt(opt.tt_max_entries), leaf(opt.tt_max_entries), busy(SIZE_MAX) {
+      : root(r), o(opt), bounds(r, opt.tier_caps, opt.threat_kills), tt(opt.tt_max_entries), leaf(opt.tt_max_entries), busy(SIZE_MAX) {
     base = ctx;
     base.events = nullptr;
     base.log = nullptr;
     adaptive = opt.min_proven_tiers > 0 && opt.time_limit_s > 0 && opt.max_time_s > opt.time_limit_s;
-    tiers = std::clamp(opt.min_proven_tiers, 0, kScoreKeys);
+    tiers = components_for_tiers(std::clamp(opt.min_proven_tiers, 0, used_tier_count(opt.tier_on())),
+                                 opt.tier_on());
+    score_options.threat_tier = opt.threat_tier;
+    score_options.threat_kills = opt.threat_kills;
     root_ub = bounds.of(r);
   }
   const Board& root;
@@ -504,7 +514,8 @@ struct Shared {
 
   // Adaptive budget (solver.cpp header).
   bool adaptive = false;
-  int tiers = 0;                          // min_proven_tiers, clamped
+  int tiers = 0;                          // ScoreKey components holding min_proven_tiers
+  ScoreOptions score_options;
   Score root_ub;                          // bounds.of(root)
   std::atomic<bool> tiers_proven{false};  // the incumbent meets root_ub in the first `tiers`
   std::atomic<bool> prefix_mode{false};   // past time_limit_s, proving the first `tiers` only
@@ -648,7 +659,7 @@ class Worker {
       driver_.mark_random(pr.chances);
       if (!pr.exact) sh_.note("enemy phase: the recorded data does not pin every step down (EnvInexact)");
       if (!pr.emerged_unknown.empty()) sh_.note("enemy phase: spawns of unknown type emerge without a pawn");
-      worst = std::min(worst, score_turn(sh_.root, after, &tc_, &pr));
+      worst = std::min(worst, score_turn(sh_.root, after, &tc_, &pr, sh_.score_options));
       if (worst <= alpha) {
         cut = true;
         return false;
@@ -1170,7 +1181,8 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   Score upper = kHigh;
   for (size_t i = 0; i < workers.size(); ++i) {
     if (workers[i]->complete() && roots[i].hi > claimed) {
-      out.warnings.push_back("search completed with a root bound above the plan: " + roots[i].hi.describe());
+      out.warnings.push_back("search completed with a root bound above the plan: " +
+                             roots[i].hi.describe(options.tier_on()));
     }
     upper = std::min(upper, roots[i].hi);
   }
@@ -1178,8 +1190,12 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   if (out.extended && sh.completed && out.chance_exact && upper == sh.incumbent) out.proven_optimal = true;
   if (out.proven_optimal) upper = sh.incumbent;
   out.upper_bound = upper;
+  // Leading tiers in use where the bound meets the plan (an unused Threat
+  // tier is 0 in both and not counted).
   int k = 0;
-  while (k < kScoreKeys && upper.v[static_cast<size_t>(k)] == sh.incumbent.v[static_cast<size_t>(k)]) ++k;
+  for (int i = 0; i < kScoreKeys && upper.v[static_cast<size_t>(i)] == sh.incumbent.v[static_cast<size_t>(i)]; ++i) {
+    if (tier_used(i, options.tier_on())) ++k;
+  }
   out.proven_components = k;
   if (!out.chance_exact) {
     out.warnings.push_back("chance not enumerated exactly (sampled death-effect seed or chance tree over the cap)");
@@ -1189,7 +1205,8 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   if (!out.best.contingent && !out.best.actions.empty()) {
     const std::optional<Score> again = evaluate_plan(engine, board, ctx, out.best.actions, options);
     if (!again || *again != out.best.worst_case) {
-      out.warnings.push_back("re-running the plan gives " + (again ? again->describe() : std::string("a refusal")));
+      out.warnings.push_back("re-running the plan gives " +
+                             (again ? again->describe(options.tier_on()) : std::string("a refusal")));
     }
   }
   return out;
@@ -1240,7 +1257,10 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
     engine.lua().seed(kLuaSeed);
     const PhaseResult pr = engine.end_turn(b, tc);
     d.mark_random(pr.chances);
-    worst = std::min(worst, score_turn(board, b, &tc, &pr));
+    ScoreOptions so;
+    so.threat_tier = options.threat_tier;
+    so.threat_kills = options.threat_kills;
+    worst = std::min(worst, score_turn(board, b, &tc, &pr, so));
     return true;
   });
   if (bad) return std::nullopt;

@@ -31,23 +31,33 @@ using nlohmann::json;
 namespace itb::tools {
 namespace {
 
-const char* kTierNames[kScoreKeys] = {"grid",     "building_hp", "mechs", "objectives_failed", "mech_hp",
-                                      "objectives", "kills",     "vek_hp", "position"};
+const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "threat",
+                                      "mech_hp", "objectives",  "kills", "vek_hp",            "position"};
 
 Point json_point(const json& j) {
   if (!j.is_array() || j.size() < 2 || !j[0].is_number() || !j[1].is_number()) return kInvalidPoint;
   return {j[0].get<int>(), j[1].get<int>()};
 }
 
-std::string score_text(const Score& s) {
+// The tiers in use (score.hpp tier_used): Threat only with the threat tier.
+std::string score_text(const Score& s, bool threat) {
   std::string out;
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (i) out += " ";
+    if (!tier_used(i, threat)) continue;
+    if (!out.empty()) out += " ";
     out += kTierNames[i];
     out += "=";
     out += s.v[static_cast<size_t>(i)] == INT32_MAX ? std::string("inf") : std::to_string(s.v[static_cast<size_t>(i)]);
   }
   return out;
+}
+
+std::vector<int32_t> score_vector(const Score& s, bool threat) {
+  std::vector<int32_t> v;
+  for (int i = 0; i < kScoreKeys; ++i) {
+    if (tier_used(i, threat)) v.push_back(s.v[static_cast<size_t>(i)]);
+  }
+  return v;
 }
 
 // The first tier where a and b differ, or -1.
@@ -123,6 +133,7 @@ double percentile(std::vector<double> v, double q) {
 }  // namespace
 
 int run_solve(const SolveToolOptions& opt) {
+  const bool tier_on = opt.threat_tier || opt.kills_tier;
   std::unique_ptr<Engine> engine;
   try {
     engine = Engine::create(opt.game);
@@ -205,6 +216,8 @@ int run_solve(const SolveToolOptions& opt) {
     so.node_limit = opt.node_limit;
     so.max_time_s = opt.max_time;
     so.min_proven_tiers = opt.min_tiers;
+    so.threat_tier = opt.threat_tier;
+    so.threat_kills = opt.kills_tier;
     so.helper_engines = helper_ptrs;
     if (opt.beam >= 0) so.beam_width = opt.beam;
     if (opt.tt_entries > 0) so.tt_max_entries = opt.tt_entries;
@@ -251,9 +264,9 @@ int run_solve(const SolveToolOptions& opt) {
       int i = 0;
       for (const PlayerAction& a : r.best.actions) std::printf("  %d. %s\n", ++i, describe_action(cur, a).c_str());
       if (r.best.actions.empty()) std::printf("  (end turn)\n");
-      std::printf("worst case: %s\n", score_text(r.best.worst_case).c_str());
+      std::printf("worst case: %s\n", score_text(r.best.worst_case, tier_on).c_str());
       if (!r.proven_optimal && r.upper_bound) {
-        std::printf("upper bound: %s (optimal in the first %d tiers)\n", score_text(*r.upper_bound).c_str(),
+        std::printf("upper bound: %s (optimal in the first %d tiers)\n", score_text(*r.upper_bound, tier_on).c_str(),
                     r.proven_components);
       }
       std::printf("search (%d threads): %llu nodes, %llu sub-actions (%.2fs), %llu enemy phases (%.2fs), %llu chance branches, "
@@ -267,7 +280,7 @@ int run_solve(const SolveToolOptions& opt) {
                   static_cast<unsigned long long>(r.stats.bound_prunes), r.stats.first_plan_s, r.stats.best_plan_s);
       for (const std::string& w : r.warnings) std::printf("warning: %s\n", w.c_str());
       if (row.recorded) {
-        std::printf("recorded plan: %s -> %s%s\n", score_text(*row.recorded).c_str(),
+        std::printf("recorded plan: %s -> %s%s\n", score_text(*row.recorded, tier_on).c_str(),
                     row.compare > 0 ? "ours better in " : row.compare < 0 ? "OURS WORSE in " : "equal",
                     row.tier >= 0 ? kTierNames[row.tier] : "");
       } else if (!row.recorded_refused.empty()) {
@@ -292,17 +305,32 @@ int run_solve(const SolveToolOptions& opt) {
              {"leaf_entries", r.stats.leaf_entries},
              {"first_plan_s", r.stats.first_plan_s},
              {"best_plan_s", r.stats.best_plan_s},
-             {"ours", r.best.worst_case.v},
+             {"ours", score_vector(r.best.worst_case, tier_on)},
              {"contingent", r.best.contingent},
              {"proven_components", r.proven_components},
              {"chance_exact", r.chance_exact},
              {"extended", r.extended},
              {"warnings", r.warnings}};
-      if (r.upper_bound) j["upper"] = r.upper_bound->v;
+      if (r.upper_bound) j["upper"] = score_vector(*r.upper_bound, tier_on);
+      if (opt.threat_eval) {
+        json plan = json::array();
+        for (const PlayerAction& a : r.best.actions) plan.push_back(describe_action(board, a));
+        j["plan"] = plan;
+        SolveOptions eo = so;
+        eo.threat_tier = true;
+        eo.threat_kills = false;
+        eo.helper_engines.clear();
+        if (const auto e = evaluate_plan(*engine, board, ctx, r.best.actions, eo)) j["threat_eval"] = e->v;
+      }
       if (row.recorded) {
-        j["recorded"] = row.recorded->v;
+        j["recorded"] = score_vector(*row.recorded, tier_on);
         j["compare"] = row.compare;
-        j["tier"] = row.tier;
+        // As a position among the tiers in use (the "ours" vector's index).
+        int tier = row.tier;
+        for (int i = 0; i < row.tier; ++i) {
+          if (!tier_used(i, tier_on)) --tier;
+        }
+        j["tier"] = tier;
       } else if (!row.recorded_refused.empty()) {
         j["recorded_refused"] = row.recorded_refused;
       }

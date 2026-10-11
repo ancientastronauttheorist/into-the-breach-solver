@@ -14,8 +14,10 @@
 //                                               score the recorded plan (tiers, objectives, position)
 //   itb_inspect [--game DIR] --solve (<recording.json> | DIR) [--time S] [--nodes N]
 //               [--max-time S --min-tiers K] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE]
-//               [--lua-counts] [--tt ENTRIES]
+//               [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--threat-eval]
 //                                               the perfect-turn search vs the recorded plan
+//   itb_inspect [--game DIR] --threat-check DIR
+//                                               the next-turn threat proxy vs the engine, and its cost
 //   itb_inspect [--game DIR] --predict <state.json> [--actions JSON|@FILE] [--no-enemy]
 //               [--branches [N]] [--json FILE]
 //                                               the engine's outcome for a bridge state (live tests)
@@ -54,7 +56,8 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
-               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] | "
+               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--threat-eval] | "
+               "--threat-check DIR | "
                "--predict <state.json> [--actions JSON|@FILE] [--no-enemy] [--branches [N]] [--json FILE] | "
                "--diff-weapons [DIR] [--random N] [--seed S] [--weapon ID] [--all-tables] [--ports])\n";
   return 2;
@@ -364,6 +367,10 @@ int main(int argc, char** argv) {
     }
     return tools::run_replay(o);
   }
+  if (args[0] == "--threat-check") {
+    if (args.size() < 2) return usage();
+    return tools::run_threat_check(args[1], game);
+  }
   if (args[0] == "--score") {
     if (args.size() < 2) return usage();
     return tools::run_score(args[1], game);
@@ -402,6 +409,12 @@ int main(int argc, char** argv) {
         o.lua_counts = true;
       } else if (args[i] == "--tt" && i + 1 < args.size()) {
         o.tt_entries = std::stoull(args[++i]);
+      } else if (args[i] == "--threat-tier") {
+        o.threat_tier = true;
+      } else if (args[i] == "--kills-tier") {
+        o.kills_tier = true;
+      } else if (args[i] == "--threat-eval") {
+        o.threat_eval = true;
       } else {
         return usage();
       }
