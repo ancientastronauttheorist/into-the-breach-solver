@@ -1,6 +1,7 @@
 #include "itb/recording.hpp"
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 
 #include <nlohmann/json.hpp>
@@ -471,6 +472,31 @@ void load_mission_ext(const json& s, Recording& rec) {
       if (auto l = e->find("Locations"); l != e->end() && m.ordered_locations.empty()) {
         m.ordered_locations = xy_points(*l);
       }
+      // Env_Belt's Belts and BeltsDir, in list order (the push order).
+      auto belts = e->find("Belts");
+      auto dirs = e->find("BeltsDir");
+      // An empty Lua table dumps as {}: no belts left (CheckBelts dropped them).
+      auto empty = [](const json& j) { return j.is_object() && j.empty(); };
+      if (belts != e->end() && dirs != e->end() && empty(*belts) && empty(*dirs)) {
+        m.belts.clear();
+        m.belts_known = true;
+      } else if (belts != e->end() && dirs != e->end() && belts->is_array() && dirs->is_array() &&
+                 belts->size() == dirs->size()) {
+        const std::vector<Point> pts = xy_points(*belts);
+        bool ok = pts.size() == belts->size();
+        std::vector<std::pair<Point, Dir>> list;
+        for (size_t i = 0; ok && i < pts.size(); ++i) {
+          const json& d = (*dirs)[i];
+          ok = pts[i].valid() && d.is_number_integer() && d.get<int>() >= 0 && d.get<int>() < 4;
+          if (ok) list.emplace_back(pts[i], static_cast<Dir>(d.get<int>()));
+        }
+        if (ok) {
+          m.belts = std::move(list);
+          m.belts_known = true;
+        } else {
+          rec.warnings.push_back("env_instance Belts/BeltsDir unreadable (conveyors from the tiles)");
+        }
+      }
     }
   }
   if (auto it = s.find("zones"); it != s.end() && it->is_object()) {
@@ -492,6 +518,50 @@ void load_mission_ext(const json& s, Recording& rec) {
       }
       rec.env_strikes.push_back(std::move(strike));
     }
+  }
+}
+
+// The tiles' conveyor directions. The bridge's `conveyor` field comes from a
+// scan of the whole save file, which holds every region's map: on an island
+// with another belt map it reports phantom belts, on belt missions and others
+// alike, and wrong directions (live m34, Mission_BeltRandom: the B4 and C4
+// belts as pushing left, not down). The live sources win: the Env_Belt
+// instance's Belts/BeltsDir, else the "conveyor<dir>.png" custom tiles
+// Env_Belt:MarkBoard draws (CheckBelts clears a broken belt's tile), which
+// the bridge extension exports for every tile (custom_tile).
+void reconcile_conveyors(Recording& rec) {
+  Board& b = rec.board;
+  const MissionData& m = rec.mission;
+  std::array<int8_t, kTileCount> dir;
+  dir.fill(-1);
+  bool live = rec.bridge_ext_version >= 1;
+  if (m.belts_known) {
+    live = true;
+    for (const auto& [p, d] : m.belts) dir[p.index()] = static_cast<int8_t>(d);
+  } else {
+    for (int i = 0; i < kTileCount; ++i) {
+      const Tile& t = b.tile(Point::from_index(i));
+      if (t.custom_tile == kNoSymbol) continue;
+      const std::string_view name = symbol_name(t.custom_tile);
+      if (name.size() == 13 && name.starts_with("conveyor") && name.ends_with(".png") && name[8] >= '0' &&
+          name[8] <= '3') {
+        dir[i] = static_cast<int8_t>(name[8] - '0');
+        live = true;  // older bridges with custom_tile: the sprites are live too
+      }
+    }
+  }
+  if (!live) return;  // old bridges: the conveyor field is all there is
+  int fixed = 0;
+  for (int i = 0; i < kTileCount; ++i) {
+    Tile& t = b.tile(Point::from_index(i));
+    if (t.conveyor != dir[i]) {
+      t.conveyor = dir[i];
+      ++fixed;
+    }
+  }
+  if (fixed > 0) {
+    rec.warnings.push_back("conveyor field disagrees with the live belts on " + std::to_string(fixed) +
+                           " tile(s) (save scan); using the live belts");
   }
 }
 
@@ -789,6 +859,7 @@ std::optional<Recording> load_recording(const std::filesystem::path& path,
     }
   }
   load_mission(s, rec);
+  reconcile_conveyors(rec);
   load_spawn_queue(s, rec);
   if (auto it = s.find("attack_order"); it != s.end() && it->is_array()) {
     for (const json& uid : *it) {

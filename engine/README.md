@@ -449,7 +449,7 @@ used when present.
 | Mission_Terratide (Env_Terratide) | row 7-Index smoked from the bottom, no shadow | exact |
 | Mission_SnowStorm (Env_SnowStorm) | 3x3 block frozen in one frame | exact (`environment_freeze`) |
 | Mission_Wind (Env_RandomWind) | two columns pushed from the downwind edge, 0.2 s after occupied rows | exact with `environment_wind_dir`; old recordings: chance node `EnvChoice` (Down/Up) + EnvInexact |
-| Mission_Belt / BeltRandom (Env_Belt) | belts push downstream first, 0.2 s after occupied belts | exact unless chains feed each other or a belt breaks mid-phase (EnvInexact: `Belts` order / CheckBelts quirk) |
+| Mission_Belt / BeltRandom (Env_Belt) | belts push in `Belts` list order (downstream first), 0.2 s after occupied belts | exact with the bridge's `env_instance` Belts/BeltsDir; else from the tiles, exact unless chains feed each other; a belt breaking mid-phase is EnvInexact (CheckBelts quirk) |
 | Mission_Final (Env_Volcano) | rocks: fire artillery DAMAGE_DEATH; lava: tile to lava; super-volcano repaired | exact with `mission_final_volcano`; old: mode and order from the tile pattern (EnvInexact for a single tile) |
 | Mission_Final_Cave (Env_Final) | rocks drop (DAMAGE_DEATH, ground), tentacles (DAMAGE_DEATH, lava); bomb re-drop | exact with `mission_final_cave`; old: phase from the turn number (EnvInexact), phase-2 order a chance node; bomb drop a chance node `MissionRandom` |
 | Mission_AcidStorm | every pawn ACID every frame while the generator lives | exact |
@@ -461,6 +461,14 @@ used when present.
 | Mission_Volatile | last enemy retreats | exact with `is_infinite_spawn` |
 | Mission_Reactivation | NextTurn thaws 2 random frozen enemies | chance node `MissionRandom` over the pairs |
 | anything else with marks | none | `EnvUnsupported` (NanoStorm, Sandstorm, LandChange are unshipped) |
+
+Conveyor directions come from the live belts: the Env_Belt instance's
+Belts/BeltsDir, else the `conveyor<dir>.png` custom tiles. The bridge's
+per-tile `conveyor` field scans the whole save, which holds every region's
+map, and on an island with another belt map it reports phantom belts and
+wrong directions (live m34: B4 and C4 read as pushing left, not down), so
+the loader replaces it (warning "conveyor field disagrees with the live
+belts") whenever the bridge extension or a conveyor sprite is present.
 
 Spawn types are hidden (decided when queued, not shown): spawns without a
 type in `TurnContext::spawn_types` emerge without a pawn

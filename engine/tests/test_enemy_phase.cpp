@@ -941,6 +941,55 @@ TEST_CASE("player turn: the acid storm re-applies ACID right after a repair (liv
   CHECK_FALSE(P(calm, jet).acid);
 }
 
+TEST_CASE("conveyors come from the live belts, not the save scan (live 2026-10-11 m34)") {
+  NEED_ENGINE();
+  // Mission_BeltRandom. The bridge's per-tile `conveyor` field scans the whole
+  // save, which holds the other regions' maps too: it reported phantom belts
+  // along row 5 and the B4/C4 belts as pushing left. The Env_Belt instance
+  // (Belts/BeltsDir) and the conveyor<dir>.png custom tiles agree: six belts,
+  // C4 and B4 pushing down.
+  const Recording t1 = live_fixture("live_belt_t1_end_turn.json");
+  REQUIRE(t1.mission.mission_id == "Mission_BeltRandom");
+  REQUIRE(t1.mission.belts_known);
+  REQUIRE(t1.mission.belts.size() == 6);
+  CHECK(t1.mission.belts.back() == std::pair<Point, Dir>{Point{4, 5}, Dir::Down});
+  int conveyors = 0;
+  for (int i = 0; i < kTileCount; ++i) conveyors += t1.board.tile(Point::from_index(i)).conveyor >= 0;
+  CHECK(conveyors == 6);
+  CHECK(t1.board.tile({4, 5}).conveyor == static_cast<int>(Dir::Down));
+  CHECK(t1.board.tile({4, 6}).conveyor == static_cast<int>(Dir::Down));
+  CHECK(t1.board.tile({3, 5}).conveyor == -1);  // phantom
+
+  // Turn 1: the B4 belt bumps the Armor psion into the A4 mountain, then the
+  // C4 belt bumps the Tumblebug into it: the psion dies (armor gone), the
+  // Tumblebug stays on C4 and its rock throw kills the bomb rock on C5, whose
+  // explosion hits the Tumblebug and the DoubleTank the Burnbug pulled to D5.
+  {
+    Board b = t1.board;
+    const PhaseResult r = E.end_turn(b, turn_context(t1, Visibility::Full));
+    CHECK(r.exact);  // the recorded list fixes the push order
+    CHECK(hp_of(b, 1) == 2);          // DoubletankMech: game 2
+    CHECK(P(b, 1).pos == Point{3, 4});
+    CHECK(hp_of(b, 1376) == 3);       // Dung2: game 3
+    CHECK(P(b, 1376).pos == Point{4, 5});
+    CHECK(dead(b, 1377));             // Jelly_Armor1: game dead
+    CHECK(dead(b, 1398));             // the bomb rock
+  }
+  // Turn 2: the rock on B5 dies under the throw; the explosion hits the
+  // Tumblebug and rolls Grid Defense for the A5 building (the game resisted).
+  const Recording t2 = live_fixture("live_belt_t2_end_turn.json");
+  {
+    Board b = t2.board;
+    const PhaseResult r = E.end_turn(b, turn_context(t2, Visibility::Full));
+    CHECK(hp_of(b, 2) == 1);     // NapalmMech: game 1
+    CHECK(hp_of(b, 1376) == 2);  // Dung2: game 2
+    CHECK(dead(b, 1439));        // BombRock: game dead
+    bool rolled = false;
+    for (const ChanceRecord& c : r.chances) rolled |= c.kind == ChanceKind::GridDefense && c.point == Point{3, 7};
+    CHECK(rolled);
+  }
+}
+
 TEST_CASE("player turn: under the acid storm a popped shield lets ACID in before the next shot") {
   NEED_ENGINE();
   Board b;

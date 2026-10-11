@@ -90,7 +90,12 @@ struct MissionData {
   // Ordered Env_Attack Locations when known (e.g. a future bridge export of
   // the env instance); empty = only the danger tiles are known.
   std::vector<Point> ordered_locations;
-  int32_t hacking_bot = -1;       // Mission_Hacking BotID
+  // Env_Belt Belts / BeltsDir (bridge env_instance), in list order: the
+  // order the belts push in. `belts_known` false = not recorded (the tiles'
+  // conveyor directions are all there is).
+  std::vector<std::pair<Point, Dir>> belts;
+  bool belts_known = false;
+  int32_t hacking_bot = -1;      // Mission_Hacking BotID
   int32_t hacking_building = -1;  // Mission_Hacking HackID
   std::optional<bool> infinite_spawn;
   std::vector<int32_t> launching;  // satellite rockets with a queued launch

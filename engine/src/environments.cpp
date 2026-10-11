@@ -661,12 +661,21 @@ class WindEnv final : public Environment {
 // Env_Belt (missions/acid/mission_belt.lua): every conveyor pushes its tile,
 // in the Belts list order (downstream end of each chain first), with 0.2 s
 // after each belt that held a pawn when the effect was built. CheckBelts
-// drops belts on chasm, water or cracked tiles first.
+// drops belts on chasm, water or cracked tiles first. The list comes from the
+// bridge's env_instance when recorded (exact order); otherwise it is rebuilt
+// from the tiles' conveyor directions.
 class BeltEnv final : public Environment {
  public:
-  explicit BeltEnv(std::string mission) : mission_(std::move(mission)) {}
+  explicit BeltEnv(const MissionData& m) : mission_(m.mission_id), known_(m.belts_known), list_(m.belts) {}
   std::string name() const override { return mission_ == "Mission_Belt" ? "Env_BeltLine" : "Env_BeltRandom"; }
   void begin(EnvHost& host) override {
+    if (known_) {
+      for (const auto& [p, d] : list_) {
+        belts_.push_back(p);
+        dirs_.push_back(d);
+      }
+      return;
+    }
     const Board& b = host.board();
     std::vector<Point> belts;
     for (int i = 0; i < kTileCount; ++i) {
@@ -745,6 +754,8 @@ class BeltEnv final : public Environment {
 
  private:
   std::string mission_;
+  bool known_ = false;
+  std::vector<std::pair<Point, Dir>> list_;
   std::vector<Point> belts_;
   std::vector<Dir> dirs_;
 };
@@ -1077,7 +1088,7 @@ std::unique_ptr<Environment> make_native_environment(const MissionData& m) {
   if (id == "Mission_Terratide") return std::make_unique<TidesEnv>(m, true);
   if (id == "Mission_SnowStorm") return std::make_unique<SnowStormEnv>(m);
   if (id == "Mission_Wind") return std::make_unique<WindEnv>(m);
-  if (id == "Mission_Belt" || id == "Mission_BeltRandom") return std::make_unique<BeltEnv>(id);
+  if (id == "Mission_Belt" || id == "Mission_BeltRandom") return std::make_unique<BeltEnv>(m);
   if (id == "Mission_Final") return std::make_unique<VolcanoEnv>(m);
   if (id == "Mission_Final_Cave") return std::make_unique<FinalCaveEnv>(m);
   if (id == "Mission_Dam") return std::make_unique<DamMission>();
