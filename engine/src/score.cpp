@@ -95,7 +95,10 @@ Score score_turn(const Board& before, const Board& after, const TurnContext* ctx
   s[ScoreKey::ObjectivesFailed] = -obj.failed();
   s[ScoreKey::ObjectiveProgress] = obj.progress();
   s[ScoreKey::Position] = position_terms(after).total();
-  if (options.threat_kills) {
+  if (options.threat_kills && options.threat_tier) {
+    // Both experiments: threats first, then kills, in one component.
+    s[ScoreKey::Threat] = s[ScoreKey::VekKilled] - 100 * count_threats(after);
+  } else if (options.threat_kills) {
     s[ScoreKey::Threat] = s[ScoreKey::VekKilled];
   } else if (options.threat_tier) {
     s[ScoreKey::Threat] = -count_threats(after);

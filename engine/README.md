@@ -40,6 +40,8 @@ engine/build/itb_inspect --replay recordings --turns                    # whole 
 engine/build/itb_inspect --score recordings/<run>/m07_turn_01_solve_input.json  # score a recorded plan
 engine/build/itb_inspect --solve recordings/<run>/m07_turn_01_solve_input.json --time 10 --threads 8
 engine/build/itb_inspect --solve recordings --sample 60 --time 120 --threads 8 --json out.jsonl
+engine/build/itb_inspect --solve recordings --threat-tier --threat-eval --json on.jsonl  # experimental threat tier
+engine/build/itb_inspect --threat-check recordings                       # threat proxy vs engine and games, cost
 engine/build/itb_inspect --predict state.json --actions @actions.json --branches   # live validation
 engine/build/itb_live solve state.json --time 10 --threads 8                      # live play (JSON)
 engine/build/itb_inspect --diff-weapons recordings --random 300   # C++ weapon ports vs their Lua
@@ -530,6 +532,32 @@ over chance outcomes, the score judges one concrete outcome.
    over the pawns. Spawn tiles are left out: a blocked spawn stays queued and
    hurts its blocker again next turn, so occupying one is not a clear gain.
 
+**Next-turn threat (experimental, off by default).** `ScoreKey::Threat`
+sits between objective stars and mech HP and is scored only with
+`ScoreOptions::threat_tier` (`SolveOptions::threat_tier`, `itb_inspect
+--solve --threat-tier`, itb_live / Python `"threat_tier": true`,
+`live_play.py --threat-tier`, `ITB_THREAT_TIER=1` for the old bot). It is
+minus the enemies on the scored board (the end of the enemy phase, just
+before AI planning) that could attack a building in the coming AI phase
+(`threat.hpp`): scored enemies (Minor pawns and bots included) that are
+alive, not frozen and have a weapon that damages tiles, standing (after an
+AI move: `GetReachablePoints` with their profile and speed, or staying; not
+on smoke unless smoke-immune) where their weapon's reach class covers a
+building with HP that is not frozen. Reach classes come from the weapon
+name: footprints (melee, self-centred blasts, diagonals, artillery 2..N with
+their extra tiles), projectiles (first obstacle that will still be there:
+mountains, buildings, every pawn but enemies about to move; with splash for
+the Centipede), lasers (through pawns up to a building or mountain), and
+none (egg, blob and totem throwers, hatching). Unknown names get every tile
+in line. Off, the tier is 0, its TierBounds cap is 0, and it is left out of
+printed scores, JSON score vectors and tier counts (`tier_used`,
+`components_for_tiers`), so every result is unchanged; on, tier counts
+include it (`--min-tiers 5` = grid through threat). `--kills-tier` puts
+the kill count in that slot instead (an experiment: kills above mech HP;
+with `--threat-tier` too, kills - 100 x threats: threats first, then kills).
+`itb_inspect --threat-check DIR` checks the proxy against the engine and
+the recorded games and times it (see "Threat tier measurement").
+
 Pawn identity: engine uids of removed pawns can be handed out again within a
 turn (new pawns take one more than the largest uid still on the board), so a
 pawn on `after` is the same pawn only if its type matches and it did not
@@ -710,7 +738,9 @@ cut. Per tier (each argued in `solver.cpp`): grid power never rises
 disables this bound), building HP never rises (no weapon, death or native
 environment script builds a building), mechs revived <= mechs dead at the
 start, net mech HP <= the HP missing at the start (+1 per mech with Psion
-Leech), objective stars lost <= 0, kills and HP removed <= the enemies and
+Leech), objective stars lost <= 0, next-turn threat <= 0 (no tighter cap is
+cheaply sound: any enemy may still be killed, pushed, frozen or smoked, and
+spawns blocked), kills and HP removed <= the enemies and
 their HP at the start. Objective progress and position have no derived cap
 (`SolveOptions::tier_caps` can supply them). Grid and building losses are
 therefore committed once a player action causes them.
@@ -849,7 +879,48 @@ false for EnvInexact missions is reported as a warning); 128-bit hash
 collisions are ignored; past `tt_max_entries` entries the tables replace old
 entries (deepest first).
 
-### Bridge extension and live validation
+**Threat tier measurement** (experimental tier, "Turn score"; 2026-10-11,
+all 733 recorded boards of the main checkout, other jobs running).
+
+The proxy (`itb_inspect --threat-check recordings`): of 1060 queued attacks
+that hit a building (found by running the enemy phase with only that attack
+kept), the proxy counts 1058 on the board where they were queued (the two
+misses are Bouncers whose push bumps a pawn into a building; pushes are not
+modelled). As a prediction, on 535 turns followed by the next recorded turn
+(the engine's board after the enemy phase vs the attacks the game's AI then
+queued): of 1073 enemies on both boards, the proxy counts 720, 410 hit a
+building next turn, 406 of them counted (recall 99.0%, precision 56.4%
+against a base rate of 38.2%). It is a cautious upper bound, not a forecast.
+Cost: `count_threats` 1.9 us median per board after the enemy phase, one
+enemy phase 33.5 us; node-budget solves of 30 Hard boards (20 k nodes, one
+thread): 89.4 -> 93.0 us per node (+4%).
+
+Solves at `--time 10 --max-time 60 --min-tiers 5 --threads 4`, off vs
+`--threat-tier` side by side (on: 5 tiers = grid through threat). Totals
+over the boards; the old tiers of the threat plans are compared with the
+off plans, threats are each plan's worst case scored with the tier.
+
+| | Hard (306) | Hard, final missions (27) | other (sample of 150) |
+|---|---|---|---|
+| plans changed | 173 | 15 | 82 |
+| threats next turn | 573 -> 389 | 63 -> 52 | 175 -> 88 |
+| mech HP | -38 -> -185 | -25 -> -39 | 32 -> -10 |
+| objective progress (stars) | -16.7 | 0 | -11.0 |
+| kills / Vek HP | +39 / +48 | +5 / +10 | +23 / +25 |
+| position | -100 | -6 | -22 |
+| proven optimal | 106 -> 112 | 3 -> 8 | 69 -> 86 |
+| proven in 5 tiers | 238 -> 204 | 14 -> 10 | 143 -> 142 |
+| proven through mech HP | 238 -> 145 | 14 -> 9 | 143 -> 133 |
+| mean time, at the 60 s cap | 23.5 -> 29.2 s, 68 -> 102 | 39.5 -> 47.2 s, 13 -> 17 | 11.5 -> 13.5 s, 7 -> 8 |
+
+Grid and building differences (+5 for the threat tier on Hard, one more
+mech lost on one board) all come from boards neither search proved, i.e.
+budget noise. The objective progress lost is progress toward bonus stars
+that now ranks below the threat (a dam or vat not hit, fewer bots frozen).
+On 60 evenly spaced Hard boards (other runs alongside): off 111 threats,
+116 kills, mech HP +1; threat tier 75, 126, -26; `--kills-tier` (kills
+above mech HP) 91, 140, -27; both flags (threats, then kills) 72, 140, -39.
+
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state
 dump, each under pcall with failures listed in `bridge_errors`: the

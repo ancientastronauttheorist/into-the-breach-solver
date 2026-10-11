@@ -308,10 +308,12 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 //                    (max_hp [+1] + level-up room - hp_before).
 //   ObjectivesFailed = -(stars lost) <= 0.
 //   Threat         = -(enemies able to hit a building next turn) <= 0 (0
-//                    whenever the threat tier is off). In the kills
-//                    experiment (threat_kills) it is VekKilled, capped below. No tighter cap is
+//                    whenever the threat tier is off). No tighter cap is
 //                    sound cheaply: any enemy may still be killed, pushed
-//                    away, frozen or smoked, and spawns may be blocked.
+//                    away, frozen or smoked, and spawns may be blocked. In
+//                    the kills experiment (threat_kills) it is VekKilled, or
+//                    VekKilled - 100 * threats with both flags: <= the
+//                    enemies alive at the root either way.
 //   VekKilled      <= enemies alive at the root (only those are counted).
 //   VekHpRemoved   <= their total HP (hp_before - hp_after, hp_after >= 0).
 //   ObjectiveProgress, Position: unbounded (INT32_MAX) unless the caller

@@ -231,6 +231,15 @@ TEST_CASE("threat: score tier and tier views") {
   on.threat_tier = true;
   const Score s = score_turn(before, after, nullptr, nullptr, on);
   CHECK(s[ScoreKey::Threat] == -2);
+  // The kills experiments: kills in the slot, or kills - 100 * threats.
+  ScoreOptions kills;
+  kills.threat_kills = true;
+  Board one_dead = after;
+  one_dead.find_pawn(1)->hp = 0;
+  CHECK(score_turn(before, one_dead, nullptr, nullptr, kills)[ScoreKey::Threat] == 1);
+  kills.threat_tier = true;
+  CHECK(score_turn(before, one_dead, nullptr, nullptr, kills)[ScoreKey::Threat] == 1 - 100);
+  CHECK(score_turn(before, after, nullptr, nullptr, kills)[ScoreKey::Threat] == -200);
   // Every other tier is the same.
   Score t = s;
   t[ScoreKey::Threat] = 0;

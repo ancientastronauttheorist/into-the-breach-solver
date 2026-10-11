@@ -55,7 +55,8 @@ struct ScoreOptions {
   bool threat_tier = false;
   // Experiment: the Threat slot holds the kill count instead (VekKilled
   // ranked above mech HP), for comparison with the threat metric. Counts as
-  // the threat tier being in use.
+  // the threat tier being in use. With threat_tier too, the slot holds
+  // kills - 100 * threats (threats first, then kills).
   bool threat_kills = false;
   bool tier_on() const { return threat_tier || threat_kills; }
 };
