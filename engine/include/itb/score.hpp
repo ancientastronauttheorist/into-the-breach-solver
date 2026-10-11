@@ -58,8 +58,18 @@ struct ScoreOptions {
   // the threat tier being in use. With threat_tier too, the slot holds
   // kills - 100 * threats (threats first, then kills).
   bool threat_kills = false;
+  // With the tier in use: objective progress ranks above the threat (and
+  // kills): the slot becomes kObjectivesFirstWeight * ObjectiveProgress plus
+  // the above, so a bonus-objective step is never traded for a threat.
+  // ObjectiveProgress keeps its own later component (then redundant).
+  bool objectives_first = false;
   bool tier_on() const { return threat_tier || threat_kills; }
 };
+
+// Larger than any spread of the threat / kills part of the slot (threats and
+// kills are each below 100 on an 8x8 board, so that part lies in
+// (-100 * 100, 100)), so whole objective-progress units dominate it.
+inline constexpr int kObjectivesFirstWeight = 16384;
 
 // The tiers in use, in rank order, as ScoreKey indices: every key, minus
 // Threat when the threat tier is off. Tier counts (SolveOptions::

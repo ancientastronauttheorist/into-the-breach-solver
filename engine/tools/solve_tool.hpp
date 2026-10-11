@@ -25,6 +25,7 @@ struct SolveToolOptions {
   uint64_t tt_entries = 0;         // SolveOptions::tt_max_entries (0: the default)
   bool threat_tier = false;        // SolveOptions::threat_tier
   bool kills_tier = false;         // SolveOptions::threat_kills (experiment: kills above mech HP)
+  bool objectives_first = false;   // SolveOptions::objectives_first
   // JSON: also each plan's actions and its worst case scored with the threat
   // tier on ("plan", "threat_eval"), whatever the search ranked by.
   bool threat_eval = false;

@@ -283,7 +283,7 @@ class Engine:
         return reply
 
     def solve(self, path: Path, time_limit: float, max_time: float = 0, min_tiers: int = 0,
-              threat_tier: bool = False) -> dict:
+              threat_tier: bool = False, threat_kills: bool = False, objectives_first: bool = False) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
         min_tiers score tiers are proven, up to max_time. threat_tier: rank by
@@ -293,6 +293,10 @@ class Engine:
             req.update(max_time=max_time, min_tiers=min_tiers)
         if threat_tier:
             req["threat_tier"] = True
+        if threat_kills:
+            req["threat_kills"] = True
+        if objectives_first:
+            req["objectives_first"] = True
         return self.request(req)
 
     def predict(self, path: Path, plan: list) -> dict:
@@ -1034,7 +1038,7 @@ def play_turn(ctx) -> list:
         path = run.save_state(solver_input, label, {"patches": patches} if patches else None)
         if patches:
             run.save_state(st, label + "_raw")
-        extra = {"threat_tier": True} if getattr(args, "threat_tier", False) else {}
+        extra = {k: True for k in ("threat_tier", "threat_kills", "objectives_first") if getattr(args, k, False)}
         pred = engine.solve(path, args.time, max_time=args.max_time, min_tiers=args.min_tiers, **extra)
         run.save_json(prediction_path(path).name, pred)
         run.event("solve", {"state": path.name, "plan": pred.get("plan"), "proven": pred.get("proven_optimal"),
@@ -1468,6 +1472,11 @@ def build_parser() -> argparse.ArgumentParser:
     engine.add_argument("--threat-tier", action="store_true",
                         help="experimental: rank plans by the next-turn threat tier (enemies able to hit a "
                              "building next turn) between objectives failed and mech HP")
+    engine.add_argument("--threat-kills", action="store_true",
+                        help="experimental: with --threat-tier, threats then kills in that tier (kills alone without)")
+    engine.add_argument("--objectives-first", action="store_true",
+                        help="experimental: with --threat-tier / --threat-kills, objective progress ranks above "
+                             "the threat in that tier")
     engine.add_argument("--threads", type=int, default=8)
     engine.add_argument("--game", help="game install for the engine (default: ITB_GAME_DIR / build default)")
     engine.add_argument("--max-resolves", type=int, default=3, help="re-solves per turn before giving up")

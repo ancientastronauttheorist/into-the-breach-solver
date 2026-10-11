@@ -2,7 +2,7 @@
 // (live_tool.hpp has the request format).
 //
 //   itb_live [--game DIR] solve <state.json> [--time S] [--nodes N] [--threads N]
-//            [--beam W] [--threat-tier] [--out FILE] [--pretty]
+//            [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--out FILE] [--pretty]
 //   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--threat-tier] [--out FILE] [--pretty]
 //   itb_live [--game DIR] board <state.json> [--pretty]
 //   itb_live [--game DIR] serve [--threads N]
@@ -212,7 +212,7 @@ int weapon_index(const Pawn* p, const std::string& weapon) {
 // Fills out["plan"], ["steps"], ["refused"], the boards and the predicted
 // score, and appends to `warnings`.
 void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& plan, json& out,
-              std::vector<std::string>& warnings, bool threat_tier) {
+              std::vector<std::string>& warnings, const ScoreOptions& score_options) {
   Board b = l.board;
   ActionOptions opts = action_options(l.ctx);  // the mission's per-frame hooks
   opts.check_legal = true;
@@ -294,10 +294,8 @@ void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
   const PhaseResult pr = engine.end_turn(b, ctx);
   out["after_enemy"] = live_board_json(b);
   out["enemy_phase"] = phase_json(l.board, b, pr);
-  ScoreOptions score_options;
-  score_options.threat_tier = threat_tier;
-  out["predicted_score"] = score_json(score_turn(l.board, b, &ctx, &pr, score_options), threat_tier);
-  if (threat_tier) out["threatening_enemies"] = threatening_enemies(b);
+  out["predicted_score"] = score_json(score_turn(l.board, b, &ctx, &pr, score_options), score_options.tier_on());
+  if (score_options.tier_on()) out["threatening_enemies"] = threatening_enemies(b);
   if (!pr.exact) warnings.push_back("enemy phase: the recorded data does not pin every step down (EnvInexact)");
   if (pr.timing_sensitive()) warnings.push_back("enemy phase: frame-timing sensitive");
   if (!pr.quiescent) warnings.push_back("enemy phase: a step never settled");
@@ -450,7 +448,12 @@ json LiveSession::handle(const json& request) {
     }
     std::vector<std::string> warnings;
     std::vector<PlayerAction> plan;
-    const bool threat = request.value("threat_tier", false);
+    // Experimental tiers (SolveOptions::threat_tier, threat_kills, objectives_first).
+    SolveOptions tiers;
+    tiers.threat_tier = request.value("threat_tier", false);
+    tiers.threat_kills = request.value("threat_kills", false);
+    tiers.objectives_first = request.value("objectives_first", false);
+    const bool threat = tiers.tier_on();
     if (cmd == "predict") {
       if (!request.contains("plan")) throw std::invalid_argument("predict needs a 'plan'");
       plan = parse_plan(request["plan"]);
@@ -462,7 +465,9 @@ json LiveSession::handle(const json& request) {
         so.node_limit = request.value("node_limit", so.node_limit);
         so.max_time_s = request.value("max_time", so.max_time_s);
         so.min_proven_tiers = request.value("min_tiers", so.min_proven_tiers);
-        so.threat_tier = threat;
+        so.threat_tier = tiers.threat_tier;
+        so.threat_kills = tiers.threat_kills;
+        so.objectives_first = tiers.objectives_first;
         const int beam = request.value("beam_width", -1);
         if (beam >= 0) so.beam_width = beam;
         so.repair_skills = l.repair_skills;
@@ -488,7 +493,7 @@ json LiveSession::handle(const json& request) {
         warnings.push_back("no active unit: nothing to solve (the enemy phase is still predicted)");
       }
     }
-    simulate(*main_, l, plan, out, warnings, threat);
+    simulate(*main_, l, plan, out, warnings, tiers.score_options());
     std::vector<std::string> unique;
     for (const std::string& w : warnings) {
       if (std::find(unique.begin(), unique.end(), w) == unique.end()) unique.push_back(w);
@@ -504,7 +509,7 @@ namespace {
 
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
-               "[--threads N] [--beam W] [--threat-tier] | "
+               "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | serve [--threads N]) "
                "[--out FILE] [--pretty]\n";
   return 2;
@@ -572,6 +577,10 @@ int run_live(int argc, char** argv) {
         request["min_tiers"] = std::stoi(args[++i]);
       } else if (args[i] == "--threat-tier" && (cmd == "solve" || cmd == "predict")) {
         request["threat_tier"] = true;
+      } else if (args[i] == "--threat-kills" && (cmd == "solve" || cmd == "predict")) {
+        request["threat_kills"] = true;
+      } else if (args[i] == "--objectives-first" && (cmd == "solve" || cmd == "predict")) {
+        request["objectives_first"] = true;
       } else if (args[i] == "--beam" && more && cmd == "solve") {
         request["beam_width"] = std::stoi(args[++i]);
       } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve")) {

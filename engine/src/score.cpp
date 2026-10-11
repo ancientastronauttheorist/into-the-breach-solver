@@ -103,6 +103,9 @@ Score score_turn(const Board& before, const Board& after, const TurnContext* ctx
   } else if (options.threat_tier) {
     s[ScoreKey::Threat] = -count_threats(after);
   }
+  if (options.objectives_first && options.tier_on()) {
+    s[ScoreKey::Threat] += kObjectivesFirstWeight * s[ScoreKey::ObjectiveProgress];
+  }
   return s;
 }
 

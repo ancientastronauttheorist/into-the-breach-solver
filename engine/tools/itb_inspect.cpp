@@ -14,7 +14,8 @@
 //                                               score the recorded plan (tiers, objectives, position)
 //   itb_inspect [--game DIR] --solve (<recording.json> | DIR) [--time S] [--nodes N]
 //               [--max-time S --min-tiers K] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE]
-//               [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--threat-eval]
+//               [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first]
+//               [--threat-eval]
 //                                               the perfect-turn search vs the recorded plan
 //   itb_inspect [--game DIR] --threat-check DIR
 //                                               the next-turn threat proxy vs the engine, and its cost
@@ -56,7 +57,7 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
-               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--threat-eval] | "
+               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--threat-eval] | "
                "--threat-check DIR | "
                "--predict <state.json> [--actions JSON|@FILE] [--no-enemy] [--branches [N]] [--json FILE] | "
                "--diff-weapons [DIR] [--random N] [--seed S] [--weapon ID] [--all-tables] [--ports])\n";
@@ -411,6 +412,8 @@ int main(int argc, char** argv) {
         o.tt_entries = std::stoull(args[++i]);
       } else if (args[i] == "--threat-tier") {
         o.threat_tier = true;
+      } else if (args[i] == "--objectives-first") {
+        o.objectives_first = true;
       } else if (args[i] == "--kills-tier") {
         o.kills_tier = true;
       } else if (args[i] == "--threat-eval") {

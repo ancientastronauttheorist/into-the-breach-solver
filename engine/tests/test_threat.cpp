@@ -9,6 +9,7 @@
 
 #include "itb/engine.hpp"
 #include "itb/game_data.hpp"
+#include "itb/objectives.hpp"
 #include "itb/score.hpp"
 #include "itb/solver.hpp"
 #include "itb/threat.hpp"
@@ -314,4 +315,71 @@ TEST_CASE("threat: the tier changes the plan; off, nothing changes") {
   const SolveResult r = solve_turn(E, b, ctx, a);
   CHECK(r.proven_components >= 5);
   CHECK(r.best.worst_case[ScoreKey::Threat] == 0);
+}
+
+TEST_CASE("threat: objectives first, and the objective progress cap") {
+  // The cap: pods, a target to destroy, nothing on an empty mission.
+  Board b;
+  CHECK(objective_progress_cap(b, nullptr) == 0);
+  b.tile({2, 2}).pod = PodState::Present;
+  b.tile({5, 5}).pod = PodState::Present;
+  CHECK(objective_progress_cap(b, nullptr) == 2 * kStar);
+  TurnContext dam;
+  dam.mission.mission_id = "Mission_Dam";
+  CHECK(objective_progress_cap(b, &dam) == 2 * kStar);  // no dam on the board
+  enemy(b, nullptr, {0, 3});
+  b.pawns().back().type = intern("Dam_Pawn");
+  CHECK(objective_progress_cap(b, &dam) == 3 * kStar);
+
+  // The slot: objective progress dominates the threat.
+  Board before;
+  building(before, {3, 0});
+  enemy(before, "ScorpionAtk1", {3, 1});
+  before.tile({6, 6}).pod = PodState::Present;
+  Board after = before;
+  after.tile({6, 6}).pod = PodState::Collected;
+  ScoreOptions o;
+  o.threat_tier = true;
+  o.objectives_first = true;
+  const Score s = score_turn(before, after, nullptr, nullptr, o);
+  CHECK(s[ScoreKey::ObjectiveProgress] == kStar);
+  CHECK(s[ScoreKey::Threat] == kObjectivesFirstWeight * kStar - 1);
+  CHECK(s > score_turn(before, before, nullptr, nullptr, o));
+  // Without a tier in use the flag does nothing.
+  ScoreOptions only;
+  only.objectives_first = true;
+  CHECK(score_turn(before, after, nullptr, nullptr, only)[ScoreKey::Threat] == 0);
+
+  if (!engine()) return;
+  Engine& E = *engine();
+  // A Punch Mech can either pick up a pod or kill the Vek next to a
+  // building, not both. Threat first: the kill. Objectives first: the pod.
+  Board g;
+  building(g, {3, 0});
+  g.tile({4, 7}).pod = PodState::Present;
+  const PawnDef* def = E.data().pawn("PunchMech");
+  REQUIRE(def != nullptr);
+  Pawn m = E.data().make_pawn(*def, 0, {4, 4});
+  m.mech = true;
+  m.corpse = true;
+  m.team = Team::Player;
+  m.active = true;
+  g.add_pawn(m);
+  Pawn v = E.data().make_pawn(*E.data().pawn("Scorpion1"), 1, {3, 1});
+  v.hp = 1;
+  g.add_pawn(v);
+  TurnContext ctx;
+  SolveOptions so;
+  so.time_limit_s = 60;
+  so.threat_tier = true;
+  const SolveResult threat = solve_turn(E, g, ctx, so);
+  REQUIRE(threat.proven_optimal);
+  CHECK(threat.best.worst_case[ScoreKey::VekKilled] == 1);
+  CHECK(threat.best.worst_case[ScoreKey::ObjectiveProgress] == 0);
+  so.objectives_first = true;
+  const SolveResult first = solve_turn(E, g, ctx, so);
+  REQUIRE(first.proven_optimal);
+  CHECK(first.best.worst_case[ScoreKey::ObjectiveProgress] == kStar);
+  CHECK(first.best.worst_case[ScoreKey::Threat] == kObjectivesFirstWeight * kStar - 1);
+  for (const std::string& w : first.warnings) CHECK_MESSAGE(w.find("cap") == std::string::npos, w);
 }

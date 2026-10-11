@@ -72,10 +72,16 @@ _OVERLAYS_COVERED_BY_ENGINE = {"final_turn_pod_collection"}
 
 def _tier_options() -> dict:
     """Engine options that change how plans are ranked: the experimental
-    next-turn threat tier when ITB_THREAT_TIER is 1/true (default off)."""
-    if os.environ.get("ITB_THREAT_TIER", "").strip().lower() in ("1", "true", "yes", "on"):
-        return {"threat_tier": True}
-    return {}
+    next-turn threat tier when ITB_THREAT_TIER is 1/true, its variants with
+    ITB_THREAT_KILLS / ITB_OBJECTIVES_FIRST (default off)."""
+    def on(name: str) -> bool:
+        return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+    opts = {}
+    for env, key in (("ITB_THREAT_TIER", "threat_tier"), ("ITB_THREAT_KILLS", "threat_kills"),
+                     ("ITB_OBJECTIVES_FIRST", "objectives_first")):
+        if on(env):
+            opts[key] = True
+    return opts
 
 
 _engine_lock = threading.Lock()

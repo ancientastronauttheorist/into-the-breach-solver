@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include "itb/engine.hpp"
+#include "itb/objectives.hpp"
 #include "itb/recording.hpp"
 #include "itb/threat.hpp"
 #include "solve_tool.hpp"
@@ -156,6 +157,8 @@ int run_threat_check(const fs::path& dir, const fs::path& game) {
   std::map<std::string, std::pair<int, int>> missed;  // weapon -> (missed, hitting)
   // Prediction: turns, enemies on both boards, flagged, hit next turn, both.
   int turns = 0, from_end_turn = 0, common = 0, p_flagged = 0, p_hit = 0, p_both = 0;
+  // objective_progress_cap against the progress of the recorded turns.
+  int cap_checked = 0, cap_violations = 0, cap_with_progress = 0;
   std::vector<double> threat_us, phase_us;
   for (const fs::path& f : files) {
     std::string error;
@@ -203,6 +206,16 @@ int run_threat_check(const fs::path& dir, const fs::path& game) {
         engine->lua().seed(1);
         if (engine->play_turn(b, *plan, tc).ok()) after = b;
       }
+      if (after) {
+        const int cap = objective_progress_cap(board, &ctx);
+        const int progress = evaluate_objectives(board, *after, &ctx, nullptr).progress();
+        ++cap_checked;
+        cap_with_progress += progress > 0;
+        if (progress > cap) {
+          ++cap_violations;
+          std::printf("progress above its cap: %s %d > %d\n", f.filename().string().c_str(), progress, cap);
+        }
+      }
       if (next && after) {
         ++turns;
         const std::vector<int32_t> pred = threatening_enemies(*after);
@@ -244,6 +257,8 @@ int run_threat_check(const fs::path& dir, const fs::path& game) {
               "hit a building next turn %d, both %d (precision %.1f%%, recall %.1f%%)\n",
               turns, from_end_turn, common, p_flagged, p_hit, p_both, 100.0 * p_both / std::max(1, p_flagged),
               100.0 * p_both / std::max(1, p_hit));
+  std::printf("objective progress cap: %d turns, %d with progress, %d above the cap\n", cap_checked,
+              cap_with_progress, cap_violations);
   std::printf("cost: count_threats median %.2f us, p95 %.2f us; enemy phase (one run) median %.1f us, p95 %.1f us\n",
               percentile(threat_us, 0.5), percentile(threat_us, 0.95), percentile(phase_us, 0.5),
               percentile(phase_us, 0.95));
