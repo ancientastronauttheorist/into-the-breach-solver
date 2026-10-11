@@ -74,6 +74,15 @@ struct SolveOptions {
   // budget".
   int min_proven_tiers = 0;
   double max_time_s = 0;
+  // Score the next-turn threat tier (ScoreOptions::threat_tier, threat.hpp),
+  // ranked between objective stars and mech HP. Off (the default): the tier
+  // is 0 everywhere and left out of tier counts, so results are unchanged.
+  // Tier counts (min_proven_tiers, proven_components) count the tiers in
+  // use: with it on, 5 = grid through threat.
+  bool threat_tier = false;
+  // Experiment (ScoreOptions::threat_kills): the tier slot holds kills.
+  bool threat_kills = false;
+  bool tier_on() const { return threat_tier || threat_kills; }
   // Repair skill per unit uid (Engine::repair_skill of its pilot). Units not
   // listed use Skill_Repair.
   std::vector<std::pair<int32_t, std::string>> repair_skills;
@@ -147,7 +156,7 @@ struct SolveResult {
   // best.worst_case when proven). INT32_MAX components are unbounded.
   std::optional<Score> upper_bound;
   // Leading score tiers in which `best` is proven optimal: no plan has a
-  // better prefix of this many components (kScoreKeys when proven).
+  // better prefix of this many tiers in use (used_tier_count when proven).
   int proven_components = 0;
   // Every chance node was enumerated exactly (false: a sampled death-effect
   // seed or a chance tree over max_chance_leaves was involved).

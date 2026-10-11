@@ -44,6 +44,7 @@ add_library(itb_engine
   src/enemy_phase.cpp
   src/environments.cpp
   src/score.cpp
+  src/threat.cpp
   src/objectives.cpp
   src/board_hash.cpp
   src/solver.cpp
@@ -57,7 +58,7 @@ target_compile_definitions(itb_engine PRIVATE
 target_compile_options(itb_engine PRIVATE -Wall -Wextra -Wpedantic -ffp-contract=off)
 
 add_executable(itb_inspect tools/itb_inspect.cpp tools/replay.cpp tools/turn_replay.cpp tools/score_tool.cpp
-  tools/solve_tool.cpp tools/predict_tool.cpp tools/diff_weapons.cpp)
+  tools/solve_tool.cpp tools/predict_tool.cpp tools/diff_weapons.cpp tools/threat_tool.cpp)
 target_compile_options(itb_inspect PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(itb_inspect PRIVATE itb_engine nlohmann_json::nlohmann_json)
 
@@ -97,6 +98,7 @@ add_executable(itb_tests
   tests/test_enemy_phase.cpp
   tests/test_score.cpp
   tests/test_solver.cpp
+  tests/test_threat.cpp
   tests/test_bridge.cpp
   tests/test_live.cpp
   tests/test_weapon_ports.cpp

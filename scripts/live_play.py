@@ -18,8 +18,11 @@ uid: type, tile, HP, statuses; building HP; never the save-based grid_power,
 which is stale mid-turn). A mismatch re-solves from the live board, with the
 same budget. Does not end the turn. The solve budget is adaptive: --time is
 the base, kept when the plan is proven optimal in its first --min-tiers score
-tiers (5: grid, buildings, mechs lost, mech HP, objectives failed); otherwise
-the search goes on, proving only those tiers, up to --max-time. Execution is
+tiers (5: grid, buildings, mechs lost, objectives failed, mech HP); otherwise
+the search goes on, proving only those tiers, up to --max-time. --threat-tier
+ranks by the engine's next-turn threat tier (enemies able to hit a building
+next turn, between objectives failed and mech HP; experimental, off by
+default; then 5 tiers end at the threat tier). Execution is
 native only: the bridge is put in EXEC_MODE native (every action is the game's own Pawn:FireWeapon with the mech selected, no
 emulated damage, moves or repairs) and a bridge without it is refused; an
 action the game refuses, or one sent while the game is busy, is an error ack
@@ -99,10 +102,15 @@ CLICK_WAIT = 8
 ACTION_TIMEOUT = 60.0
 
 # The adaptive solve budget's default tier target: the score tiers through
-# objectives failed (engine score.hpp ScoreKey: GridLost, BuildingHpLost,
-# MechsLost, MechHpLost, ObjectivesFailed), what the solver reports as
-# "optimal in the first 5 tiers".
+# mech HP (engine score.hpp ScoreKey: GridLost, BuildingHpLost, MechsLost,
+# ObjectivesFailed, MechHpLost), what the solver reports as "optimal in the
+# first 5 tiers". With --threat-tier the fifth tier is Threat instead.
 MIN_TIERS = 5
+
+# The engine's score tiers in rank order (itb_live score JSON keys); "threat"
+# is only present with --threat-tier.
+SCORE_TIERS = ("grid", "building_hp", "mechs", "objectives_failed", "threat", "mech_hp",
+               "objectives", "kills", "vek_hp", "position")
 
 # Psions whose mutation gives every Vek +1 HP (and max HP) the moment they
 # arrive (engine Leader 1 Soldier Psion, 7 Psion Abomination): a hidden spawn
@@ -274,13 +282,17 @@ class Engine:
             raise Anomaly(f"itb_live {req.get('cmd')}: {reply.get('error')}")
         return reply
 
-    def solve(self, path: Path, time_limit: float, max_time: float = 0, min_tiers: int = 0) -> dict:
+    def solve(self, path: Path, time_limit: float, max_time: float = 0, min_tiers: int = 0,
+              threat_tier: bool = False) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
-        min_tiers score tiers are proven, up to max_time."""
+        min_tiers score tiers are proven, up to max_time. threat_tier: rank by
+        the next-turn threat tier (SolveOptions::threat_tier)."""
         req = {"cmd": "solve", "state": str(path), "time_limit": time_limit, "threads": self.threads}
         if min_tiers > 0 and max_time > time_limit:
             req.update(max_time=max_time, min_tiers=min_tiers)
+        if threat_tier:
+            req["threat_tier"] = True
         return self.request(req)
 
     def predict(self, path: Path, plan: list) -> dict:
@@ -925,8 +937,7 @@ def plan_summary(pred: dict) -> str:
     if not pred.get("searched", True):
         return "no active unit (nothing to solve)"
     wc = pred.get("worst_case") or {}
-    tiers = " ".join(f"{k}={wc[k]}" for k in ("grid", "building_hp", "mechs", "objectives_failed", "mech_hp",
-                                                 "objectives", "kills", "vek_hp", "position") if k in wc)
+    tiers = " ".join(f"{k}={wc[k]}" for k in SCORE_TIERS if k in wc)
     proof = "proven optimal" if pred.get("proven_optimal") else \
         f"best found, optimal in the first {pred.get('proven_components', 0)} tiers"
     if pred.get("extended"):
@@ -1023,7 +1034,8 @@ def play_turn(ctx) -> list:
         path = run.save_state(solver_input, label, {"patches": patches} if patches else None)
         if patches:
             run.save_state(st, label + "_raw")
-        pred = engine.solve(path, args.time, max_time=args.max_time, min_tiers=args.min_tiers)
+        extra = {"threat_tier": True} if getattr(args, "threat_tier", False) else {}
+        pred = engine.solve(path, args.time, max_time=args.max_time, min_tiers=args.min_tiers, **extra)
         run.save_json(prediction_path(path).name, pred)
         run.event("solve", {"state": path.name, "plan": pred.get("plan"), "proven": pred.get("proven_optimal"),
                             "proven_components": pred.get("proven_components"),
@@ -1452,7 +1464,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="hard cap per solve (s) while the first --min-tiers tiers are unproven")
     engine.add_argument("--min-tiers", type=int, default=MIN_TIERS,
                         help="score tiers to prove before stopping at --time (5: grid, buildings, mechs lost, "
-                             "mech HP, objectives failed; 0: always stop at --time)")
+                             "objectives failed, mech HP; 0: always stop at --time)")
+    engine.add_argument("--threat-tier", action="store_true",
+                        help="experimental: rank plans by the next-turn threat tier (enemies able to hit a "
+                             "building next turn) between objectives failed and mech HP")
     engine.add_argument("--threads", type=int, default=8)
     engine.add_argument("--game", help="game install for the engine (default: ITB_GAME_DIR / build default)")
     engine.add_argument("--max-resolves", type=int, default=3, help="re-solves per turn before giving up")

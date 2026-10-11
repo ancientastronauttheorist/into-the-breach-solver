@@ -4,6 +4,7 @@
 #include <sstream>
 
 #include "itb/objectives.hpp"
+#include "itb/threat.hpp"
 
 namespace itb {
 namespace {
@@ -32,11 +33,29 @@ bool retreated(const Pawn& p, const Pawn* q) { return q && !p.minor && q->minor 
 
 }  // namespace
 
-std::string Score::describe() const {
-  static constexpr const char* kNames[kScoreKeys] = {
-      "grid", "bldg_hp", "mechs", "obj_fail", "mech_hp", "obj", "kills", "vek_hp", "position"};
+const char* score_key_name(int key) {
+  static constexpr const char* kNames[kScoreKeys] = {"grid",    "bldg_hp", "mechs", "obj_fail", "threat",
+                                                     "mech_hp", "obj",     "kills", "vek_hp",   "position"};
+  return key >= 0 && key < kScoreKeys ? kNames[key] : "?";
+}
+
+int components_for_tiers(int tiers, bool threat_tier) {
+  int used = 0;
+  for (int i = 0; i < kScoreKeys; ++i) {
+    if (used >= tiers) return i;
+    if (tier_used(i, threat_tier)) ++used;
+  }
+  return kScoreKeys;
+}
+
+std::string Score::describe(bool threat_tier) const {
   std::ostringstream out;
-  for (int i = 0; i < kScoreKeys; ++i) out << (i ? " " : "") << kNames[i] << "=" << v[i];
+  bool first = true;
+  for (int i = 0; i < kScoreKeys; ++i) {
+    if (!tier_used(i, threat_tier)) continue;
+    out << (first ? "" : " ") << score_key_name(i) << "=" << v[static_cast<size_t>(i)];
+    first = false;
+  }
   return out.str();
 }
 
@@ -51,7 +70,10 @@ std::string Score::describe() const {
 //     start (spawns of this turn are not scored); net HP, so psion
 //     regeneration counts against the player. Retreats are not kills.
 //  5. position (objectives.hpp position_terms).
-Score score_turn(const Board& before, const Board& after, const TurnContext* ctx, const PhaseResult* phase) {
+// With the threat tier, Threat (between stars and mech HP) is minus the
+// enemies on `after` that could attack a building next turn (threat.hpp).
+Score score_turn(const Board& before, const Board& after, const TurnContext* ctx, const PhaseResult* phase,
+                 const ScoreOptions& options) {
   Score s;
   s[ScoreKey::GridLost] = after.grid_power - before.grid_power;
   s[ScoreKey::BuildingHpLost] = building_hp(after) - building_hp(before);
@@ -73,6 +95,14 @@ Score score_turn(const Board& before, const Board& after, const TurnContext* ctx
   s[ScoreKey::ObjectivesFailed] = -obj.failed();
   s[ScoreKey::ObjectiveProgress] = obj.progress();
   s[ScoreKey::Position] = position_terms(after).total();
+  if (options.threat_kills && options.threat_tier) {
+    // Both experiments: threats first, then kills, in one component.
+    s[ScoreKey::Threat] = s[ScoreKey::VekKilled] - 100 * count_threats(after);
+  } else if (options.threat_kills) {
+    s[ScoreKey::Threat] = s[ScoreKey::VekKilled];
+  } else if (options.threat_tier) {
+    s[ScoreKey::Threat] = -count_threats(after);
+  }
   return s;
 }
 

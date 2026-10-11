@@ -53,16 +53,30 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NO_TARGET = (255, 255)
 MOVE_ONLY_WEAPON = "None"
 REPAIR_WEAPON = "_REPAIR"
+# The engine's score tiers in rank order (engine score.hpp ScoreKey). "threat"
+# (enemies able to hit a building next turn) is only scored, and only present
+# in the engine's JSON, with the experimental threat tier
+# (ITB_THREAT_TIER=1, options "threat_tier").
 SCORE_TIERS = (
-    "grid", "building_hp", "mechs", "objectives_failed", "mech_hp",
+    "grid", "building_hp", "mechs", "objectives_failed", "threat", "mech_hp",
     "objectives", "kills", "vek_hp", "position",
 )
 # Tier weights for the single float ``Solution.score`` the bot prints and
 # stores; the lexicographic tiers themselves are in ``meta["worst_case"]``.
-_SCORE_WEIGHTS = (1e8, 1e7, 1e6, 1e5, 1e4, 1.0, 1e2, 1e1, 1.0)
+_SCORE_WEIGHTS = (1e8, 1e7, 1e6, 1e5, 2e4, 1e4, 1.0, 1e2, 1e1, 1.0)
 DEFAULT_THREADS = 8
 # Achievement overlays the engine's fixed tiers already cover.
 _OVERLAYS_COVERED_BY_ENGINE = {"final_turn_pod_collection"}
+
+
+
+def _tier_options() -> dict:
+    """Engine options that change how plans are ranked: the experimental
+    next-turn threat tier when ITB_THREAT_TIER is 1/true (default off)."""
+    if os.environ.get("ITB_THREAT_TIER", "").strip().lower() in ("1", "true", "yes", "on"):
+        return {"threat_tier": True}
+    return {}
+
 
 _engine_lock = threading.Lock()
 _engine_cache: dict[tuple[str, int], Any] = {}
@@ -727,7 +741,7 @@ def solve(bridge_data: dict, time_limit: float, *, spawns=None, current_turn: in
         bridge_json = json.dumps(bridge_data)
         budget = max(1.0, float(time_limit) - load_s - 0.5)
         raw = json.loads(engine.solve(bridge_json, json.dumps({
-            "time_limit": budget, "threads": engine.threads,
+            "time_limit": budget, "threads": engine.threads, **_tier_options(),
         })))
     except Exception as exc:  # engine missing, bad board, engine error
         meta["error"] = f"{type(exc).__name__}: {exc}"
@@ -817,8 +831,8 @@ def _executable_plan(engine, bridge_json: str, plan: list[dict], sim: dict, meta
 
     if is_interleaved(plan):
         regrouped = regroup_by_unit(plan)
-        ev = json.loads(engine.evaluate(bridge_json, _plan_payload(regrouped)))
-        cur = json.loads(engine.evaluate(bridge_json, _plan_payload(plan)))
+        ev = json.loads(engine.evaluate(bridge_json, _plan_payload(regrouped), json.dumps(_tier_options())))
+        cur = json.loads(engine.evaluate(bridge_json, _plan_payload(plan), json.dumps(_tier_options())))
         same = ev.get("ok") and cur.get("ok") and \
             ev.get("worst_case_vector") == cur.get("worst_case_vector")
         meta["interleaved"] = True
@@ -835,7 +849,7 @@ def _executable_plan(engine, bridge_json: str, plan: list[dict], sim: dict, meta
 
     if changed:
         sim = json.loads(engine.simulate(bridge_json, _plan_payload(plan)))
-        ev = json.loads(engine.evaluate(bridge_json, _plan_payload(plan)))
+        ev = json.loads(engine.evaluate(bridge_json, _plan_payload(plan), json.dumps(_tier_options())))
         meta["executed_worst_case"] = ev.get("worst_case")
         meta["executed_worst_case_vector"] = ev.get("worst_case_vector")
         if ev.get("worst_case_vector") != original:
