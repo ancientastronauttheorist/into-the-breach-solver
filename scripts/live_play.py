@@ -460,11 +460,6 @@ def _health_psion(u: dict) -> bool:
     return u.get("leader") in HEALTH_LEADERS or u.get("type") in HEALTH_PSIONS
 
 
-# Pawn types with Lua TempUnit = true that the game removes in the enemy
-# turn (diff_boards).
-TEMP_UNIT_TYPES = frozenset({"DeployUnit_Bomby"})
-
-
 def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
                 acid_pools: frozenset = frozenset(), resist: dict | None = None,
                 xp_split: bool = False, mines_gone: frozenset = frozenset(),
@@ -558,13 +553,6 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
                 notes.append(f"{describe_unit(a)} (engine alive at {visual(a['x'], a['y'])} hp {a['hp']}) died on "
                              f"a mine moving during AI planning (mines tripped: "
                              f"{', '.join(visual(*xy) for xy in sorted(mines_gone))})")
-                continue
-            # The enemy turn's "Temp Units Die" step (TurnOrder_TempUnit)
-            # removes TempUnit pawns such as the Bombling's walking bomb; the
-            # engine does not model it yet (live 2026-10-11).
-            if enemy_phase and a.get("type") in TEMP_UNIT_TYPES:
-                notes.append(f"{describe_unit(a)} at {visual(a['x'], a['y'])} died as a temp unit "
-                             f"(Temp Units Die, not in the engine yet)")
                 continue
             diffs.append(f"{describe_unit(a)}: engine alive at {visual(a['x'], a['y'])} hp {a['hp']}, game dead")
             continue
