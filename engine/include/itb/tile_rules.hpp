@@ -235,6 +235,12 @@ Pawn* first_occupant(Board& board, Point p);
 // Board::GetPawn(p): the first living occupant, else the last one (a corpse);
 // null when the tile has no pawn (IsPawnSpace).
 Pawn* board_pawn(Board& board, Point p);
+// Board::GetPawn(p, false): the first living occupant, else the last one even
+// if it is a dead body still on the tile; null only when nobody is listed.
+// Board::ApplyEffect finds the pawn of a movement entry (charge, leap, walk,
+// teleport, burrow) this way, so a body killed earlier in the same effect is
+// still moved.
+Pawn* listed_pawn(Board& board, Point p);
 
 // ---- Continuous rules ----------------------------------------------------------
 

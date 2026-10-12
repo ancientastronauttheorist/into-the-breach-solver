@@ -144,6 +144,16 @@ Pawn* board_pawn(Board& board, Point p) {
   return occ.back();
 }
 
+Pawn* listed_pawn(Board& board, Point p) {
+  if (!p.valid()) return nullptr;
+  const std::vector<Pawn*> occ = occupants(board, p);
+  if (occ.empty()) return nullptr;
+  for (Pawn* pawn : occ) {
+    if (pawn->alive()) return pawn;
+  }
+  return occ.back();
+}
+
 int effective_damage(const SpaceDamage& sd) {
   return sd.damage == kDamageZero ? 0 : sd.damage;
 }

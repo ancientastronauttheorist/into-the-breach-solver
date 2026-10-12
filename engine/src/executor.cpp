@@ -910,7 +910,11 @@ void Simulation::cancel_queued_shot(Pawn& pawn) {
 // ---- Movement entries ---------------------------------------------------------------------------
 
 void Simulation::start_movement(const SkillEffect& effect, const SpaceDamage& sd) {
-  Pawn* pawn = board_pawn(board_, sd.path.front());
+  // GetPawn(start, false): a body that died earlier in this effect (still on
+  // its tile, its death not yet processed) is moved like a living pawn (live
+  // 2026-10-12 m16: a Burnbug's grapple kills a BombRock and drags its body
+  // one tile, where it then explodes).
+  Pawn* pawn = listed_pawn(board_, sd.path.front());
   if (!pawn) return;  // nobody at the path start: the game only warns
   PawnSim& ps = state(pawn->uid);
   const bool forced = sd.path.front() == effect.origin;

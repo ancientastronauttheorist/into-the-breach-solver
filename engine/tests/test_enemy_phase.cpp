@@ -1862,3 +1862,53 @@ TEST_CASE("live: a Centipede pushed off the cracked ice the hit broke survives a
     CHECK(hp_of(b, p.uid) == after.board.find_pawn(p.uid)->hp);
   }
 }
+
+// ---- Movement entries move a body killed earlier in the same effect ------------
+// Board::ApplyEffect finds a movement entry's pawn with GetPawn(start, false):
+// the first living pawn listed on the tile, else the last one even if dead.
+// BurnbugAtk1 hits the pawn it grapples, then charges it next to itself: a
+// pawn the hit kills is still dragged, and its death plays out (and an
+// Explodes pawn detonates) on the tile it was dragged to.
+
+TEST_CASE("live: a Burnbug drags the BombRock its grapple killed; it explodes there (2026-10-12 m16)") {
+  NEED_ENGINE();
+  // Mission_Hacking turn 3: Burnbug1 at (4,2), 1 HP after its fire tick,
+  // grapples toward (4,3); the 1-HP BombRock at (4,4) dies from the hit and
+  // is pulled to (4,3), where its blast kills the Burnbug. The Dung1 next to
+  // (4,4) is not hit by it (the game's turn 4 board: Burnbug dead, the Dung
+  // down only by the other rock's blast).
+  Board b;
+  mech(b, {7, 7});
+  const int32_t bug = place(b, "Burnbug1", {4, 2});
+  hp(b, bug, 1);
+  queue(b, bug, {4, 3});
+  const int32_t rock = place(b, "BombRock", {4, 4});
+  REQUIRE(P(b, rock).pushable);
+  REQUIRE(P(b, rock).explodes);
+  const int32_t dung = place(b, "Dung1", {5, 4});
+  const int32_t side = place(b, "Scorpion1", {3, 3});
+  const PhaseResult r = E.end_turn(b, context());
+  CHECK(fired(r).count(bug) == 1);
+  CHECK(dead(b, rock));
+  CHECK(dead(b, bug));
+  CHECK(hp_of(b, dung) == 3);
+  CHECK(hp_of(b, side) == 2);  // (3,3) borders (4,3), the rock's last tile
+}
+
+TEST_CASE("a grappled pawn the hit kills is still dragged: its ACID pool lands where it ends") {
+  NEED_ENGINE();
+  // A 1-HP Scorpion with ACID at (4,5): the grapple's hit kills it, the charge
+  // drags its body to (4,3), and its death leaves the pool there.
+  Board b;
+  mech(b, {7, 7});
+  const int32_t bug = place(b, "Burnbug1", {4, 2});
+  queue(b, bug, {4, 3});
+  const int32_t s = place(b, "Scorpion1", {4, 5});
+  hp(b, s, 1);
+  P(b, s).acid = true;
+  E.end_turn(b, context());
+  CHECK(dead(b, s));
+  CHECK(b.tile({4, 3}).acid);
+  CHECK_FALSE(b.tile({4, 5}).acid);
+  CHECK(hp_of(b, bug) == 3);
+}
