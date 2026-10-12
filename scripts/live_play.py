@@ -1090,6 +1090,16 @@ def write_executed_plan(run: Run, start: dict, pred0: dict, executed: list, reso
     run.save_json(f"{run.prefix(start)}_solve.json", rec)
 
 
+def load_plan(path: str) -> list:
+    """A plan for `turn --plan`: itb_live's action list, or any JSON with a
+    "plan" list (an itb_live solve reply)."""
+    data = json.loads(Path(path).read_text())
+    plan = data.get("plan") if isinstance(data, dict) else data
+    if not isinstance(plan, list) or not plan:
+        raise Refused(f"{path}: no plan (a JSON list of actions, or an object with a 'plan' list)")
+    return plan
+
+
 def play_turn(ctx) -> list:
     """One player turn. Returns the anomalies (empty: every step matched)."""
     bridge, engine, run, args = ctx.bridge, ctx.engine, ctx.run, ctx.args
@@ -1118,7 +1128,7 @@ def play_turn(ctx) -> list:
                                   if args.min_tiers > 0 and args.max_time > args.time else "")
     say(f"== {state.get('mission_id')} turn {state.get('turn')}: solving ({budget}, {args.threads} threads)")
 
-    def solve(st: dict, label: str) -> tuple[Path, dict]:
+    def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
         solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under)
         for n in notes:
@@ -1129,7 +1139,10 @@ def play_turn(ctx) -> list:
         extra = {k: True for k in ("threat_tier", "threat_kills", "objectives_first") if getattr(args, k, False)}
         if getattr(args, "mech_grid", -1) is not None and getattr(args, "mech_grid", -1) >= 0:
             extra.update(mech_grid=args.mech_grid, mech_grid_turns=bool(getattr(args, "mech_grid_turns", False)))
-        pred = engine.solve(path, args.time, max_time=args.max_time, min_tiers=args.min_tiers, **extra)
+        if plan is not None:
+            pred = engine.predict(path, plan)
+        else:
+            pred = engine.solve(path, args.time, max_time=args.max_time, min_tiers=args.min_tiers, **extra)
         run.save_json(prediction_path(path).name, pred)
         run.event("solve", {"state": path.name, "plan": pred.get("plan"), "proven": pred.get("proven_optimal"),
                             "proven_components": pred.get("proven_components"),
@@ -1137,14 +1150,17 @@ def play_turn(ctx) -> list:
         return path, pred
 
     start = state
-    _, pred = solve(state, "start")
+    given = load_plan(args.plan) if getattr(args, "plan", None) else None
+    if given is not None:
+        say(f"playing the given plan {args.plan} (re-solves still use the engine)")
+    _, pred = solve(state, "start", given)
     pred0 = pred
     print_plan(pred)
     if args.dry_run:
         say("dry run: nothing executed")
         return anomalies
     if pred.get("refused", -1) >= 0:
-        raise Anomaly(f"the engine refused its own plan: {pred.get('refused_reason')}")
+        raise Anomaly(f"the engine refused the plan: {pred.get('refused_reason')}")
     ensure_native(ctx)
 
     executed, plan_id, resolves, i = [], 0, 0, 0
@@ -1195,7 +1211,7 @@ def play_turn(ctx) -> list:
         _, pred = solve(state, "resolve")
         print_plan(pred)
         if pred.get("refused", -1) >= 0:
-            raise Anomaly(f"the engine refused its own plan: {pred.get('refused_reason')}")
+            raise Anomaly(f"the engine refused the plan: {pred.get('refused_reason')}")
         steps, i, plan_id = pred["steps"], 0, plan_id + 1
         uid_map.clear()
     write_executed_plan(run, start, pred0, executed, resolves > 0)
@@ -1711,7 +1727,9 @@ def build_parser() -> argparse.ArgumentParser:
     ending.add_argument("--end-turn-xy", type=lambda s: tuple(int(v) for v in s.split(",")),
                         default=lv.END_TURN_SCREEN, help="End Turn screen point (default: fullscreen 1360x768)")
     sub.add_parser("status", parents=[common], help="bridge and board summary")
-    sub.add_parser("turn", parents=[common, engine], help="play one player turn (not End Turn)")
+    p = sub.add_parser("turn", parents=[common, engine], help="play one player turn (not End Turn)")
+    p.add_argument("--plan", help="play this plan instead of solving (itb_live's action list, or a solve reply "
+                                  "with a 'plan'); a mismatch still re-solves")
     sub.add_parser("end-turn", parents=[common, engine, ending], help="End Turn and check the enemy phase")
     p = sub.add_parser("mission", parents=[common, engine, ending], help="turns until the mission ends")
     p.add_argument("--max-turns", type=int, default=10)

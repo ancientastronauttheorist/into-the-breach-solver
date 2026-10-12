@@ -97,7 +97,9 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   with that turn's solve input. Continue resumes the run at the start of
   that turn, Vek intents and spawn points included, so the same turn can be
   replayed with another plan or other solver settings, and the game referees
-  the outcome.
+  the outcome. `turn --plan FILE` plays a given plan (itb_live's action list,
+  or a solve reply with a `plan`) instead of solving; it is predicted and
+  checked step by step like the engine's own, and a mismatch re-solves.
 
 - **turn** solves the live board (`Visibility::Player`), then executes the
   plan one sub-action at a time (`MOVE_NATIVE`; `ATTACK` /

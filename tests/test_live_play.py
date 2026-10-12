@@ -174,7 +174,8 @@ class FakeEngine:
     def predict(self, path, plan):
         self.predicts.append(plan)
         self.predict_states.append(self._state(path))
-        return self._simulate(self._state(path), [])
+        # A given plan (`turn --plan`) plays out as this engine's own plan.
+        return self._simulate(self._state(path), self.plan if plan else [])
 
     def board(self, path):
         return compact(self._state(path))
@@ -397,6 +398,24 @@ class LivePlayTest(unittest.TestCase):
         wrapper = json.loads((run / "m00_turn_01_solve_input.json").read_text())
         self.assertEqual(wrapper["data"]["bridge_state"]["mission_id"], "Mission_Test")
         self.assertEqual(wrapper["run_id"], run.name)
+
+    def test_turn_plays_a_given_plan_without_solving(self):
+        self.bridge()
+        eng = FakeEngine()
+        plan = [{"uid": 0, "kind": "weapon", "move": [3, 4], "weapon": "Prime_Lasermech_A", "target": [3, 3]}]
+        path = self.tmp / "plan.json"
+        path.write_text(json.dumps({"plan": plan}))
+        self.assertEqual(self.run_cmd(["turn", "--plan", str(path)], eng), 0)
+        self.assertEqual(eng.solves, [])
+        self.assertEqual(eng.predicts, [plan])
+        self.assertEqual(self.acting(), ["MOVE_NATIVE 0 3 4", "ATTACK 0 1 3 3", "ATTACK 1 0 3 3"])
+
+    def test_turn_refuses_an_empty_plan(self):
+        self.bridge()
+        path = self.tmp / "plan.json"
+        path.write_text("[]")
+        self.assertEqual(self.run_cmd(["turn", "--plan", str(path)]), 2)
+        self.assertEqual(self.acting(), [])
 
     def test_turn_checkpoints_the_save_files_once_per_turn(self):
         self.bridge()
