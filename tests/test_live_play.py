@@ -1293,6 +1293,21 @@ class DiffBoardsTest(unittest.TestCase):
         self.assertEqual(diffs, [])
         self.assertTrue(any("Jelly_Health1#577 emerged" in n and "Digger2#566" in n for n in notes), notes)
 
+    def test_soldier_psion_buffs_a_burrower_underground_in_the_engine(self):
+        # Live 2026-10-12 run 8 Mission_AcidStorm: two Burrowers dove, then
+        # came up with +1 HP as a Jelly_Health1 emerged.
+        known = {0, 5580}
+        want = self.board([self.unit(0, "JetMech", 4, 2, 3, team=1, mech=True)])
+        want["underground"] = [self.unit(5580, "Burrower2", 3, 6, 2)]
+        got = self.board([self.unit(0, "JetMech", 4, 2, 3, team=1, mech=True), self.unit(5580, "Burrower2", 4, 5, 1),
+                          self.unit(5582, "Jelly_Health1", 2, 6, 5, leader=1)])
+        diffs, notes = lp.diff_boards(want, got, known, enemy_phase=True)
+        self.assertEqual(diffs, [])
+        self.assertTrue(any("Burrower2#5580" in n and "emerged" in n for n in notes), notes)
+        got["units"].pop()  # no psion: +1 HP stops
+        diffs, _ = lp.diff_boards(want, got, known, enemy_phase=True)
+        self.assertEqual(len(diffs), 1)
+
     def test_psion_without_the_leader_field_by_type(self):
         diffs, _ = self.psion_case(leader=None)
         self.assertEqual(diffs, [])

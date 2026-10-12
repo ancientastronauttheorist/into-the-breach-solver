@@ -557,16 +557,17 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
     - A Burrower the engine has underground (want["underground"]; it dove
       after a hit) that the game shows again after the enemy phase came up in
       the AI's move (not modelled): matched by uid on type and HP, a note.
-      Underground on both sides (absent from both unit lists) is a match."""
+      Underground on both sides (absent from both unit lists) is a match;
+      with an emerged Soldier Psion it may come up with +1 HP."""
     diffs, notes = [], []
     fields = ENEMY_FIELDS if enemy_phase else STEP_FIELDS
     w = {u["uid"]: u for u in want["units"]}
     g = {u["uid"]: u for u in got["units"]}
     under = {u["uid"]: u for u in want.get("underground") or []}
     psion = None
+    buffed = []
     if enemy_phase and not any(_health_psion(u) for u in want["units"]):
         psion = next((u for u in got["units"] if u["uid"] not in known and _health_psion(u)), None)
-    buffed = []
     thaw_swaps = []
     mines_left = len(mines_gone)
     freeze_left = len(freeze_mines_gone)
@@ -580,6 +581,11 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
             if not enemy_phase:
                 diffs.append(f"{describe_unit(b)}: engine underground (dove at {dove}), game at "
                              f"{visual(b['x'], b['y'])} hp {b['hp']}")
+            elif (d.get("type") == b["type"] and psion is not None and b["hp"] == (d.get("hp") or 0) + 1
+                    and b.get("team") == psion.get("team")):
+                buffed.append(describe_unit(b))
+                notes.append(f"{describe_unit(b)} resurfaced at {visual(b['x'], b['y'])} hp {b['hp']} (underground "
+                             f"in the engine since it dove at {dove}: the AI's move brings it up)")
             elif d.get("type") != b["type"] or d.get("hp") != b["hp"]:
                 diffs.append(f"{describe_unit(b)}: engine underground {d.get('type')} hp {d.get('hp')}, game "
                              f"{b['type']} at {visual(b['x'], b['y'])} hp {b['hp']}")
