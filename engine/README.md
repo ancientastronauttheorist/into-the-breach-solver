@@ -648,7 +648,11 @@ ends (`PhaseResult::mission_ended`; without a phase, `turn >= total_turns`).
 Objectives are weighted by their stars, not equally: that is how the game
 pays them. `ObjectiveProgress` is progress toward stars not yet earned, in
 `kStar` = 840 units per star (lcm 1..8, so "1 of 5 kills" is exact); it can
-be negative (fires put out, bots thawed). Time pods are not in the game's
+be negative (fires put out, bots thawed). Counted objectives (kills,
+blocked spawns, Mission_Force mountains, Mission_Repair platforms) are
+paced: their progress is scaled by the units still needed per turn left
+(this one included, at most 4), so the objective behind schedule wins a
+trade with one that can wait (`paced`, objectives.cpp). Time pods are not in the game's
 objective list but are weighted as 1 star: lost when broken, secured when a
 player unit picks one up.
 
@@ -661,7 +665,7 @@ player unit picks one up.
 | BONUS_PACIFIST | KilledVek crosses the limit | - | `mission_kill_limit`, kills | yes |
 | BONUS_GRID | grid damage since deployment reaches 3 | - | PowerStart: turn-1 grid (later turns: this turn only) | turn 1 |
 | BONUS_MECHS | end: mech damage >= 4 | (tier 2) | board | yes |
-| BONUS_BLOCK | end: BlockedSpawns < 3 | blocked spawns (`SpawnBlocked`) | BlockedSpawns not exported | no |
+| BONUS_BLOCK | after the last turn with spawns (TurnLimit - 1): BlockedSpawns < 3 | blocked spawns (`SpawnBlocked`) | `mission_blocked_spawns` | yes |
 | BONUS_DEBRIS | end: an egg sack left | sack destroyed: 1/2 | BonusDebris pawns | yes |
 | BONUS_SELFDAMAGE | end: a mech infected | mite removed: 1/3 | `infected` | yes |
 | BONUS_KILL | end: an enemy left | - | board | yes |

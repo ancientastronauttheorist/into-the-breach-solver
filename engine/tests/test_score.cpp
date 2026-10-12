@@ -238,6 +238,7 @@ TEST_CASE("objectives: BONUS_KILL_FIVE counts EVENT_ENEMY_KILLED deaths toward t
   kill(after, 10);
   kill(after, 12);
   kill(after, 13);
+  t.before.total_turns = 2;  // 2 kills needed in 2 turns: pace 1
   ObjectiveReport r = t.eval(after);
   CHECK(r.enemy_kills == 2);
   std::optional<ObjectiveLine> l = find(r, "BONUS_KILL_FIVE");
@@ -310,9 +311,11 @@ TEST_CASE("objectives: BONUS_BLOCK counts blocked spawns") {
   o.blocked_spawns = 2;
   t.phase.events.push_back(PhaseEvent{PhaseEventType::SpawnBlocked, {1, 1}, 0, 0, ""});
   t.phase.events.push_back(PhaseEvent{PhaseEventType::SpawnBlocked, {2, 2}, 0, 0, ""});
+  t.before.total_turns = 1;  // 1 block needed in 1 turn: pace 1
   std::optional<ObjectiveLine> l = find(t.eval(t.before), "BONUS_BLOCK");
   REQUIRE(l);
   CHECK(l->progress == kStar / 3);  // only the third block counts
+  t.before.total_turns = 5;
   o.blocked_spawns = 0;
   t.phase.events.clear();
   CHECK(find(t.eval(t.before), "BONUS_BLOCK")->failed == 0);
@@ -322,6 +325,25 @@ TEST_CASE("objectives: BONUS_BLOCK counts blocked spawns") {
   t.before.turn = 2;
   t.phase.mission_ended = true;
   CHECK(find(t.eval(t.before), "BONUS_BLOCK")->failed == 1);
+}
+
+TEST_CASE("objectives: counted objectives are paced by what is still needed per turn left") {
+  Turn t;
+  ObjectiveData& o = t.ctx.mission.objectives;
+  o.kill_target = 7;
+  o.kills_done = 0;
+  t.before.add_pawn(vek(10, {1, 1}));
+  Board after = t.before;
+  kill(after, 10);
+  t.before.turn = 1;
+  t.before.total_turns = 4;  // 7 kills in 4 turns: 7/4 of a kill each
+  CHECK(find(t.eval(after), "BONUS_KILL_FIVE")->progress == kStar / 7 * 7 / 4);
+  o.kills_done = 5;
+  t.before.turn = 3;  // 2 in 2 turns: 1
+  CHECK(find(t.eval(after), "BONUS_KILL_FIVE")->progress == kStar / 7);
+  o.kills_done = 0;
+  t.before.turn = 4;  // 7 in the last turn: capped at 4
+  CHECK(find(t.eval(after), "BONUS_KILL_FIVE")->progress == kStar / 7 * 4);
 }
 
 TEST_CASE("objectives: BONUS_DEBRIS, BONUS_SELFDAMAGE and BONUS_KILL") {
@@ -516,6 +538,7 @@ TEST_CASE("objectives: Mission_Disposal and Mission_Force mountains") {
   after = f.before;
   after.tile({3, 3}).terrain = Terrain::Rubble;
   after.tile({4, 4}).terrain = Terrain::Rubble;
+  f.before.total_turns = 1;  // pace 1
   r = f.eval(after);
   CHECK(r.mountains_destroyed == 2);
   CHECK(find(r, "Mission_Force")->progress == kStar / 2);  // only one was still needed
@@ -647,6 +670,7 @@ TEST_CASE("objectives: Mission_Repair counts platforms used by player units") {
   after.find_pawn(0)->pos = {1, 1};
   after.tile({2, 2}).item = kNoSymbol;
   after.find_pawn(10)->pos = {2, 2};  // an enemy on a platform does not count
+  t.before.total_turns = 1;  // 1 platform needed in 1 turn: pace 1
   ObjectiveReport r = t.eval(after);
   CHECK(r.repairs_used == 1);
   CHECK(find(r, "Mission_Repair")->progress == kStar / 3);

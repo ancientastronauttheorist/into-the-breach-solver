@@ -122,6 +122,21 @@ int toward(int done, int gained, int target, int stars = 1) {
   return units(done + gained) - units(done);
 }
 
+// A counted objective's progress (kills, blocks, mountains, repair
+// platforms) scaled by its pace: the units still needed per turn left, this
+// one included, up to kMaxPace. Two such objectives compete in one tier, and
+// unscaled the one with the smaller target always won: run 7's Mission_Force
+// took 1 of 2 mountains (420) over 2 of 7 kills (240) on turn 1, finished the
+// mountains on turn 4 anyway and missed the kills; paced (mountains 1/turn
+// needed of 4 -> x0.5, kills 7/4 -> x1.75) the replay took the kills.
+constexpr int kMaxPace = 4;
+int paced(int progress, int done, int target, const Board& before) {
+  if (target <= 0) return progress;
+  const int needed = std::max(1, target - std::max(0, done));
+  const int turns = std::max(1, before.total_turns - before.turn + 1);
+  return progress * std::min(needed, kMaxPace * turns) / turns;
+}
+
 const char* bonus_name(BonusId b) {
   switch (b) {
     case BonusId::Asset: return "BONUS_ASSET";
@@ -339,13 +354,13 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
         const bool known = od.blocked_spawns >= 0;
         const int so_far = known ? od.blocked_spawns : 0;
         const bool last = ends || before.turn >= before.total_turns - 1;
-        line(name, last && known && so_far + r.spawns_blocked < 3 ? 1 : 0, toward(so_far, r.spawns_blocked, 3),
+        line(name, last && known && so_far + r.spawns_blocked < 3 ? 1 : 0, paced(toward(so_far, r.spawns_blocked, 3), so_far, 3, before),
              known, num(r.spawns_blocked) + " blocked" + (known ? "" : " (BlockedSpawns not recorded)"));
         break;
       }
       case BonusId::KillFive: {
         const int target = od.kill_target > 0 ? od.kill_target : kill_bonus(difficulty);
-        line(name, ends && done + kills < target ? 1 : 0, toward(done, kills, target), kills_known,
+        line(name, ends && done + kills < target ? 1 : 0, paced(toward(done, kills, target), done, target, before), kills_known,
              num(done) + " + " + num(kills) + " of " + num(target) + " kills");
         break;
       }
@@ -458,7 +473,7 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
     const bool known = od.mountains_done >= 0;
     const int so_far = known ? od.mountains_done : 0;
     const int target = od.mountain_target > 0 ? od.mountain_target : 2;
-    line(id, ends && so_far + r.mountains_destroyed < target ? 1 : 0, toward(so_far, r.mountains_destroyed, target),
+    line(id, ends && so_far + r.mountains_destroyed < target ? 1 : 0, paced(toward(so_far, r.mountains_destroyed, target), so_far, target, before),
          known, num(so_far) + " + " + num(r.mountains_destroyed) + " of " + num(target) + " mountains");
   } else if (id == "Mission_AcidTank") {
     // 2 stars: the first acid kill earns 1, the fourth the second.
@@ -490,7 +505,7 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
     const bool known = od.repairs_done >= 0;
     const int so_far = known ? od.repairs_done : 0;
     const int target = od.repair_target > 0 ? od.repair_target : 3;
-    line(id, ends && so_far + r.repairs_used < target ? 1 : 0, toward(so_far, r.repairs_used, target), known,
+    line(id, ends && so_far + r.repairs_used < target ? 1 : 0, paced(toward(so_far, r.repairs_used, target), so_far, target, before), known,
          num(so_far) + " + " + num(r.repairs_used) + " of " + num(target) + " platforms");
   } else if (id == "Mission_FreezeBldg") {
     const int target = od.freeze_target > 0 ? od.freeze_target : 5;
@@ -602,10 +617,11 @@ int objective_progress_cap(const Board& before, const TurnContext* ctx) {
   for (BonusId b : active_bonuses(before, m)) {
     switch (b) {
       case BonusId::Block:
-        cap += toward(od.blocked_spawns >= 0 ? od.blocked_spawns : 0, kMany, 3);
+        cap += paced(toward(od.blocked_spawns >= 0 ? od.blocked_spawns : 0, kMany, 3), od.blocked_spawns, 3, before);
         break;
       case BonusId::KillFive:
-        cap += toward(done, enemies, od.kill_target > 0 ? od.kill_target : kill_bonus(m.difficulty));
+        cap += paced(toward(done, enemies, od.kill_target > 0 ? od.kill_target : kill_bonus(m.difficulty)), done,
+                     od.kill_target > 0 ? od.kill_target : kill_bonus(m.difficulty), before);
         break;
       case BonusId::Debris:
         cap += alive_count([](const Pawn& p) { return type_is(p, "BonusDebris"); }) * kStar / 2;
@@ -630,8 +646,9 @@ int objective_progress_cap(const Board& before, const TurnContext* ctx) {
       cap += open * kStar / static_cast<int>(od.grass.size());
     }
   } else if (id == "Mission_Force") {
-    cap += toward(od.mountains_done >= 0 ? od.mountains_done : 0, mountains(before),
-                  od.mountain_target > 0 ? od.mountain_target : 2);
+    cap += paced(toward(od.mountains_done >= 0 ? od.mountains_done : 0, mountains(before),
+                        od.mountain_target > 0 ? od.mountain_target : 2),
+                 od.mountains_done, od.mountain_target > 0 ? od.mountain_target : 2, before);
   } else if (id == "Mission_AcidTank") {
     // Acid kills include pawns created during the turn (a split blob, a
     // spawn), so the enemies alive now do not bound them.
@@ -651,7 +668,8 @@ int objective_progress_cap(const Board& before, const TurnContext* ctx) {
       const Tile& t = before.tile(Point::from_index(i));
       items += t.item != kNoSymbol && symbol_name(t.item) == "Item_Repair_Mine" ? 1 : 0;
     }
-    cap += toward(od.repairs_done >= 0 ? od.repairs_done : 0, items, od.repair_target > 0 ? od.repair_target : 3);
+    cap += paced(toward(od.repairs_done >= 0 ? od.repairs_done : 0, items, od.repair_target > 0 ? od.repair_target : 3),
+                 od.repairs_done, od.repair_target > 0 ? od.repair_target : 3, before);
   } else if (id == "Mission_FreezeBldg") {
     const int target = od.freeze_target > 0 ? od.freeze_target : 5;
     std::vector<Point> tiles = od.freeze_buildings;
