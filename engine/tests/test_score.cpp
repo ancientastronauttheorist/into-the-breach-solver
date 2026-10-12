@@ -511,15 +511,28 @@ TEST_CASE("objectives: Mission_AcidTank counts acid kills, 2 stars") {
   a.acid = true;
   t.before.add_pawn(a);
   t.before.add_pawn(vek(11, {2, 2}));
+  t.before.acid_destroyed = 5;  // a running count: the turn's share is after - before
   Board after = t.before;
+  // Deaths are counted as they are processed (Board::acid_destroyed, see
+  // the executor and enemy phase tests), not read off the pawns.
   kill(after, 10);
   kill(after, 11);
+  ++after.acid_destroyed;
   ObjectiveReport r = t.eval(after);
   CHECK(r.acid_kills == 1);
   CHECK(find(r, "Mission_AcidTank")->progress == kStar);  // the first acid kill earns a star
   CHECK_FALSE(find(r, "BONUS_KILL_FIVE").has_value());         // the acid goal is not a kill bonus
   t.phase.mission_ended = true;
   CHECK(find(t.eval(after), "Mission_AcidTank")->failed == 1);
+  // The fourth earns the second star. Pawns created during the turn (a split
+  // blob, a spawn) count too, so 2 enemies at the start can make 4 kills and
+  // the progress cap must allow it.
+  after.acid_destroyed += 3;
+  r = t.eval(after);
+  CHECK(r.acid_kills == 4);
+  CHECK(find(r, "Mission_AcidTank")->failed == 0);
+  CHECK(find(r, "Mission_AcidTank")->progress == 2 * kStar);
+  CHECK(objective_progress_cap(t.before, &t.ctx) >= 2 * kStar);
 }
 
 TEST_CASE("objectives: Mission_Barrels and Mission_BoomBots") {

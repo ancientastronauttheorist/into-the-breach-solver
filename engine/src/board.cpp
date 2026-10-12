@@ -71,7 +71,7 @@ bool Board::operator==(const Board& o) const {
          grid_defense == o.grid_defense && turn == o.turn && total_turns == o.total_turns &&
          player_phase == o.player_phase && passives == o.passives && next_uid == o.next_uid && psion == o.psion &&
          spawn_points == o.spawn_points && teleporters == o.teleporters &&
-         teleporter_occupants == o.teleporter_occupants;
+         teleporter_occupants == o.teleporter_occupants && acid_destroyed == o.acid_destroyed;
 }
 
 Pawn* Board::find_pawn(int32_t uid) {

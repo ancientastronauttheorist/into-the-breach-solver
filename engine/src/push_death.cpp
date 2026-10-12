@@ -217,6 +217,9 @@ void Simulation::process_death(Pawn& pawn, PawnSim& ps) {
     ps.xp_gone = frame_ + clock_.tracker_updates(dur_.xp_popup);
   }
   credit_kill(pawn);
+  // EVENT_ACID_DESTROYED: ACID as the death is processed, wherever it came
+  // from (this turn's shot, a pool, acid water), minor pawns included.
+  if (pawn.team == Team::Enemy && !pawn.mech && pawn.acid) ++board_.acid_destroyed;
   changed_ = true;
   log(ResolveEventType::DeathProcessed, pawn.pos, pawn.uid);
 }

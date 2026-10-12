@@ -78,7 +78,7 @@ struct ObjectiveReport {
   bool mission_ends = false;  // the mission ends after this enemy phase
   // Native event counts for this turn, as the game would raise them.
   int enemy_kills = 0;     // EVENT_ENEMY_KILLED: team-6 non-minor deaths, any killer
-  int acid_kills = 0;      // EVENT_ACID_DESTROYED: team-6 deaths with ACID
+  int acid_kills = 0;      // EVENT_ACID_DESTROYED: team-6 non-mech deaths with ACID as they die (Board::acid_destroyed)
   int spawns_blocked = 0;  // EVENT_SPAWNBLOCKED (PhaseResult SpawnBlocked events)
   int mountains_destroyed = 0;  // mountains that became rubble
   int repairs_used = 0;    // repair platforms used by player-team pawns

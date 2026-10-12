@@ -9,9 +9,11 @@
 #include <string>
 #include <vector>
 
+#include "itb/engine.hpp"
 #include "itb/executor.hpp"
 #include "itb/game_data.hpp"
 #include "itb/movement.hpp"
+#include "itb/objectives.hpp"
 #include "itb/timing.hpp"
 
 using namespace itb;
@@ -1071,6 +1073,52 @@ TEST_CASE("e53 an ACID Vek leaves a pool where it dies") {
   se.add_damage(space_damage({3, 3}, 1));
   w.fire(se);
   CHECK(w.tile({3, 3}).acid);
+}
+
+TEST_CASE("EVENT_ACID_DESTROYED: the dying pawn's ACID as its death is processed") {
+  World w;
+  w.add(vek(1, A, 1, 3));      // gets ACID and dies in the same effect
+  w.add(vek(2, R, 1, 3));      // no ACID
+  Pawn old = vek(3, {5, 5}, 1, 3);
+  old.acid = true;             // ACID since an earlier turn
+  w.add(old);
+  Pawn m = mech(4, {6, 6}, 1);
+  m.acid = true;               // mechs never count
+  w.add(m);
+  Pawn egg = vek(5, {1, 5}, 1, 1);
+  egg.minor = true;            // minor pawns do (the event comes first)
+  egg.acid = true;
+  w.add(egg);
+  const Board start = w.board;
+  TurnContext tc;
+  tc.mission.mission_id = "Mission_AcidTank";
+  auto acid_kills = [&] { return evaluate_objectives(start, w.board, &tc, nullptr).acid_kills; };
+
+  SkillEffect same;
+  SpaceDamage acid = space_damage(A);
+  acid.acid = StatusChange::Apply;
+  same.add_damage(acid);
+  same.add_damage(space_damage(A, 1));
+  w.fire(same);
+  CHECK(w.removed(1));  // gone from the board, ACID and all
+  CHECK(w.board.acid_destroyed == 1);
+  CHECK(acid_kills() == 1);
+
+  SkillEffect plain;
+  plain.add_damage(space_damage(R, 1));
+  w.fire(plain);
+  CHECK(w.removed(2));
+  CHECK(acid_kills() == 1);
+
+  SkillEffect rest;
+  rest.add_damage(space_damage({5, 5}, 1));
+  rest.add_damage(space_damage({6, 6}, 1));
+  rest.add_damage(space_damage({1, 5}, 1));
+  w.fire(rest);
+  CHECK_FALSE(w.pawn(4)->alive());
+  CHECK(w.removed(3));
+  CHECK(w.removed(5));
+  CHECK(acid_kills() == 3);  // vek 1, the old ACID Vek, the minor one
 }
 
 TEST_CASE("e54 mech corpses block pushes and stay") {

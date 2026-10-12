@@ -327,6 +327,11 @@ class Board {
   // pad that is not its recorded occupant is warped (Board::Teleport).
   std::vector<Point> teleporters;
   std::vector<int32_t> teleporter_occupants;
+  // EVENT_ACID_DESTROYED raised on this board so far: Pawn::ProcessDeath of a
+  // non-mech enemy-team pawn that has ACID at that moment (minor ones too).
+  // A running count, never reset: a turn's acid kills are after - before.
+  // Kept here because the dead pawn (and its ACID) leaves the board.
+  int acid_destroyed = 0;
 
  private:
   std::array<Tile, kTileCount> tiles_{};
