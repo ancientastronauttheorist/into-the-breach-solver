@@ -440,6 +440,34 @@ TEST_CASE("objectives: destroy targets (dam, generators, hacked tower, bosses)")
   }
 }
 
+TEST_CASE("objectives: hits on a destroy target short of a kill are progress") {
+  // Mission_Hacking's tower: 1 HP behind a shield set once at the start.
+  Turn t("Mission_Hacking");
+  Pawn tower = unit(5, "Hacked_Building", Team::Enemy, {1, 1}, 1);
+  tower.shield = true;
+  t.before.add_pawn(tower);
+  Board after = t.before;
+  after.find_pawn(5)->shield = false;
+  std::optional<ObjectiveLine> l = find(t.eval(after), "Mission_Hacking tower");
+  REQUIRE(l);
+  CHECK(l->progress == kStar / 4);  // half the hits, worth half a star at most
+  CHECK(l->failed == 0);
+  kill(after, 5);
+  l = find(t.eval(after), "Mission_Hacking tower");
+  CHECK(l->progress == kStar);
+  // A boss: 1 of its 3 HP.
+  Turn b("Mission_JellyBoss");
+  b.before.add_pawn(unit(6, "Jelly_Boss", Team::Enemy, {2, 2}, 3));
+  Board hit = b.before;
+  hit.find_pawn(6)->hp = 2;
+  l = find(b.eval(hit), "Mission_JellyBoss");
+  REQUIRE(l);
+  CHECK(l->progress == kStar / 6);
+  // No hit: no progress.
+  l = find(b.eval(b.before), "Mission_JellyBoss");
+  CHECK(l->progress == 0);
+}
+
 TEST_CASE("objectives: Mission_Hacking's bot, and its conversion is not a loss") {
   Turn t("Mission_Hacking");
   Pawn bot = unit(7, "Snowtank1", Team::Enemy, {2, 2});

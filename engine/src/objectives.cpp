@@ -230,13 +230,28 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
     line(name, lost, 0, true, num(lost) + " lost");
   };
   // A target to destroy (1 star): progress when it dies, failed if it is
-  // still alive when the mission ends.
+  // still alive when the mission ends. Short of a kill, the hits it still
+  // takes to die (HP, plus one for a shield and one for ice, which each
+  // absorb a hit) count toward up to half a star, in proportion to the hits
+  // it took this turn: Mission_Hacking's tower has 1 HP behind a shield set
+  // once at the start, so stripping the shield is half the work, but no
+  // turn that only strips it would otherwise gain anything (live
+  // 2026-10-12, run 8: the tower was never touched and the star was lost).
   auto destroy = [&](const std::string& name, auto pred) {
     if (count_alive(before, pred) == 0) return;
     const int killed = died(turn, pred);
     const int left = count_alive(after, pred);
-    line(name, ends && left > 0 ? 1 : 0, killed > 0 ? kStar : 0, true,
-         num(killed) + " destroyed, " + num(left) + " left");
+    int progress = killed > 0 ? kStar : 0;
+    if (killed == 0) {
+      auto hits = [](const Pawn& p) { return std::max(0, static_cast<int>(p.hp)) + (p.shield ? 1 : 0) + (p.frozen ? 1 : 0); };
+      for (const Pawn& p : before.pawns()) {
+        if (!alive(&p) || !pred(p)) continue;
+        const Pawn* q = same_pawn(p, after, phase);
+        if (!alive(q) || hits(p) <= 0) continue;
+        progress = std::max(progress, (hits(p) - hits(*q)) * kStar / (2 * hits(p)));
+      }
+    }
+    line(name, ends && left > 0 ? 1 : 0, progress, true, num(killed) + " destroyed, " + num(left) + " left");
   };
 
   // ---- Time pods: not an objective in the game's list, but a reward that is
