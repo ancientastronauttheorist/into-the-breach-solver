@@ -170,6 +170,8 @@ BoardHash hash_board(const Board& b, HashMode mode) {
     // next_uid only labels pawns created later; kept so that equal hashes
     // mean equal futures, uids included.
     k.put(static_cast<uint32_t>(b.next_uid), 32);
+    // Scored (Mission_AcidTank), so boards that differ only here differ.
+    k.put(static_cast<uint32_t>(b.acid_destroyed), 32);
     k.put(b.player_phase, 1);
     k.put(u8(static_cast<int>(b.psion)), 8);
     k.put(b.spawn_points.size(), 16);

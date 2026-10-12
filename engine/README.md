@@ -681,8 +681,13 @@ only add a threshold to what tiers 1 and 2 already rank.
 
 Native counters follow the decompile: `Pawn::ProcessDeath` raises
 EVENT_ENEMY_KILLED for every team-6 non-minor death (bots included, any
-killer) and EVENT_ACID_DESTROYED for team-6 deaths with ACID; Mission.KilledVek
-only counts while KILL_FIVE or PACIFIST is active (Mission:BaseUpdate).
+killer) and EVENT_ACID_DESTROYED for every team-6 non-mech death (minor ones
+too) with ACID at that moment, in either phase; Mission.KilledVek only counts
+while KILL_FIVE or PACIFIST is active (Mission:BaseUpdate), AcidKills always.
+The dead pawn leaves the board with its ACID, so acid kills are counted where
+deaths are processed (`Simulation::process_death` into the running
+`Board::acid_destroyed`) and a turn's share is after - before: ACID gained and
+the kill in one turn counts, and so does a pawn created during the turn.
 
 Validation (`itb_inspect --replay recordings --turns`, the 216 replayed
 turns with a trustworthy next board, 15 more against post_enemy): the
@@ -690,7 +695,10 @@ engine's kill count matches the next turn's `mission_kills_done` on all 19
 turns where the game counts kills; repair platforms 4/4; objective buildings
 standing 231/231; pods 231/231; infected mechs 216/216. Every scored failure
 (8: a Cannon Bot, an Archive tank, three Volatile Vek, two trains stopped,
-a pod) happened in game too.
+a pod) happened in game too. Acid kills (`--score` on the live
+Mission_AcidTank turns, whose bridge exports AcidKills): 6/6 agree with the
+next turn's count; the May run's m07 (older bridge, no AcidKills) adds up
+to the 4 its outcome ("ACID objective completed") needs.
 `itb_inspect --score <recording>` prints one recorded plan's score, every
 objective line and the position terms beside the game's outcome.
 

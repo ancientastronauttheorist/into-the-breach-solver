@@ -198,12 +198,13 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
 
   // ---- Native event counters.
   for (const Pawn& p : before.pawns()) {
-    if (!alive(&p) || p.team != Team::Enemy || p.mech) continue;
-    if (fate(p, turn) != Fate::Died) continue;
-    const Pawn* q = same_pawn(p, after, phase);
-    if (!p.minor) ++r.enemy_kills;
-    if (p.acid || (q && q->acid)) ++r.acid_kills;
+    if (!alive(&p) || p.team != Team::Enemy || p.mech || p.minor) continue;
+    if (fate(p, turn) == Fate::Died) ++r.enemy_kills;
   }
+  // Counted as deaths are processed (Simulation::process_death): the ACID
+  // that matters is the one the pawn has as it dies, and the pawn is gone
+  // from `after`. Pawns created during the turn count too.
+  r.acid_kills = after.acid_destroyed - before.acid_destroyed;
   if (phase) r.spawns_blocked = phase->count(PhaseEventType::SpawnBlocked);
   for (int i = 0; i < kTileCount; ++i) {
     const Point pt = Point::from_index(i);
@@ -548,7 +549,7 @@ int objective_progress_cap(const Board& before, const TurnContext* ctx) {
   auto destroy = [&](auto pred) { cap += alive_count(pred) > 0 ? kStar : 0; };
   auto mission_unit = [](std::string_view type) { return [type](const Pawn& p) { return type_is(p, type); }; };
   // Team-6 non-mech pawns alive at the start: an upper bound on this turn's
-  // EVENT_ENEMY_KILLED and EVENT_ACID_DESTROYED counts.
+  // EVENT_ENEMY_KILLED count as evaluate_objectives takes it.
   const int enemies = alive_count([](const Pawn& p) { return p.team == Team::Enemy && !p.mech; });
 
   int pods = 0;
@@ -590,9 +591,11 @@ int objective_progress_cap(const Board& before, const TurnContext* ctx) {
     cap += toward(od.mountains_done >= 0 ? od.mountains_done : 0, mountains(before),
                   od.mountain_target > 0 ? od.mountain_target : 2);
   } else if (id == "Mission_AcidTank") {
+    // Acid kills include pawns created during the turn (a split blob, a
+    // spawn), so the enemies alive now do not bound them.
     const int so_far = od.kills_done >= 0 ? od.kills_done : 0;
     auto units = [](int c) { return c <= 0 ? 0 : kStar + (std::min(c, 4) - 1) * kStar / 3; };
-    cap += units(so_far + enemies) - units(so_far);
+    cap += units(so_far + kMany) - units(so_far);
   } else if (id == "Mission_Barrels") {
     cap += alive_count([](const Pawn& p) { return type_name(p).starts_with("AcidVat"); }) * kStar;
   } else if (id == "Mission_BoomBots") {

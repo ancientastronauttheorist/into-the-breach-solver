@@ -15,6 +15,7 @@
 
 #include "itb/engine.hpp"
 #include "itb/game_data.hpp"
+#include "itb/objectives.hpp"
 #include "itb/recording.hpp"
 #include "itb/score.hpp"
 #include "itb/tile_rules.hpp"
@@ -159,6 +160,29 @@ TEST_CASE("V2 a Vek burning to death never fires") {
   CHECK(b.grid_power == 7);
   CHECK(fired(r).empty());
   CHECK(r.count(PhaseEventType::ShotCancelled) == 1);
+}
+
+TEST_CASE("an ACID Vek burning to death in the enemy phase is an acid kill") {
+  // EVENT_ACID_DESTROYED is raised by the death itself, whatever the phase;
+  // Mission_AcidTank's UpdateMission adds it up every frame.
+  NEED_ENGINE();
+  Board b;
+  const int32_t f = place(b, "Firefly1", {2, 5});
+  hp(b, f, 1);
+  P(b, f).fire = true;
+  P(b, f).acid = true;
+  const int32_t g = place(b, "Firefly1", {5, 5});  // no ACID
+  hp(b, g, 1);
+  P(b, g).fire = true;
+  const Board before = b;
+  const TurnContext ctx = context("Mission_AcidTank");
+  const PhaseResult r = E.end_turn(b, ctx);
+  CHECK(dead(b, f));
+  CHECK(dead(b, g));
+  CHECK(b.acid_destroyed == 1);
+  const ObjectiveReport obj = evaluate_objectives(before, b, &ctx, &r);
+  CHECK(obj.acid_kills == 1);
+  CHECK(obj.enemy_kills == 2);
 }
 
 TEST_CASE("V3 the fire tick ignores shields and armor") {
