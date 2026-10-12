@@ -18,6 +18,14 @@
 // building takes no damage). Grid, unpopulated and objective buildings count
 // alike; each enemy counts once however many buildings it reaches.
 //
+// Unit threats are counted the same way with the units a mission objective
+// protects as the targets (the Terraformer, trains, tanks, bombs,
+// satellites...: their tiles, unless frozen) instead of buildings. Losing
+// one costs a star, and it has few HP, so they rank above objective
+// progress (score.hpp kUnitThreatWeight): run 8 lost the Terraformer, and
+// both its stars, to two Vek that turn 1 had left next to it while it
+// terraformed; ranked this way the replay killed them and kept it.
+//
 // Reach classes (threat_class), by weapon table name, from the shipped
 // weapon scripts (our summary of their target areas and effects):
 //   - footprint: the tiles a shot from tile o can damage are fixed offsets
@@ -65,5 +73,8 @@ ThreatClass threat_class(Symbol weapon);
 std::vector<int32_t> threatening_enemies(const Board& b);
 // Their number: what ScoreKey::Threat negates.
 int count_threats(const Board& b);
+// The same for the units a mission objective protects.
+std::vector<int32_t> unit_threatening_enemies(const Board& b);
+int count_unit_threats(const Board& b);
 
 }  // namespace itb

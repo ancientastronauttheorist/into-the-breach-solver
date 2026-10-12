@@ -51,7 +51,8 @@ inline constexpr int kScoreKeys = static_cast<int>(ScoreKey::Count);
 
 // Runtime choices of score_turn.
 struct ScoreOptions {
-  // Score ScoreKey::Threat (README "Turn score", threat.hpp). Off: it is 0.
+  // Score ScoreKey::Threat (README "Turn score", threat.hpp): minus the
+  // building threats, minus kUnitThreatWeight per unit threat. Off: it is 0.
   bool threat_tier = false;
   // Experiment: the Threat slot holds the kill count instead (VekKilled
   // ranked above mech HP), for comparison with the threat metric. Counts as
@@ -81,6 +82,13 @@ struct ScoreOptions {
 // kills are each below 100 on an 8x8 board, so that part lies in
 // (-100 * 100, 100)), so whole objective-progress units dominate it.
 inline constexpr int kObjectivesFirstWeight = 16384;
+
+// With the threat tier, each enemy that could attack a protected mission
+// unit (threat.hpp count_unit_threats) takes this off the slot, counted up to
+// kMaxUnitThreats: above whole objective-progress units (up to 4096 of them
+// at kObjectivesFirstWeight) and the building threats, within int32.
+inline constexpr int kUnitThreatWeight = 1 << 26;
+inline constexpr int kMaxUnitThreats = 15;
 
 // ScoreOptions::mech_grid: taken from the GridLost slot of a plan that ends
 // with no grid power (larger than any spread of the rest of the slot).

@@ -542,6 +542,29 @@ TEST_CASE("objectives: Mission_Terraform") {
   CHECK(find(t.eval(after), "Mission_Terraform grass")->failed == 0);  // alive: not decided yet
 }
 
+TEST_CASE("objectives: Mission_Terraform grass is the grass sprite, not the terrain") {
+  Turn t("Mission_Terraform");
+  t.before.add_pawn(unit(5, "Terraformer", Team::Player, {1, 1}, 2));
+  ObjectiveData& o = t.ctx.mission.objectives;
+  o.grass_known = true;
+  o.grass = {{2, 2}, {2, 3}};
+  const Symbol grass = intern("ground_grass.png");
+  t.before.tile({2, 2}).custom_tile = grass;
+  t.before.tile({2, 3}).custom_tile = grass;
+  t.before.tile({4, 4}).terrain = Terrain::Sand;  // no matter
+  Board after = t.before;
+  after.tile({2, 2}).custom_tile = kNoSymbol;  // terraformed, then hit: ground again
+  ObjectiveReport r = t.eval(after);
+  CHECK(find(r, "Mission_Terraform grass")->exact);
+  CHECK(find(r, "Mission_Terraform grass")->progress == kStar / 2);
+  after.tile({2, 3}).terrain = Terrain::Sand;  // sand alone is not terraformed
+  CHECK(find(t.eval(after), "Mission_Terraform grass")->progress == kStar / 2);
+  t.phase.mission_ended = true;
+  CHECK(find(t.eval(after), "Mission_Terraform grass")->failed == 1);
+  after.tile({2, 3}).custom_tile = kNoSymbol;
+  CHECK(find(t.eval(after), "Mission_Terraform grass")->failed == 0);
+}
+
 TEST_CASE("objectives: Mission_AcidTank counts acid kills, 2 stars") {
   Turn t("Mission_AcidTank");
   t.ctx.mission.objectives.kills_done = 0;

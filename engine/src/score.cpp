@@ -113,6 +113,9 @@ Score score_turn(const Board& before, const Board& after, const TurnContext* ctx
   if (options.objectives_first && options.tier_on()) {
     s[ScoreKey::Threat] += kObjectivesFirstWeight * s[ScoreKey::ObjectiveProgress];
   }
+  if (options.threat_tier) {
+    s[ScoreKey::Threat] -= kUnitThreatWeight * std::min(count_unit_threats(after), kMaxUnitThreats);
+  }
   if (const int rate = mech_grid_rate(before, options); rate >= 0) {
     s[ScoreKey::GridLost] = mech_grid_slot(rate, s[ScoreKey::GridLost], s[ScoreKey::MechsLost], after.grid_power);
   }

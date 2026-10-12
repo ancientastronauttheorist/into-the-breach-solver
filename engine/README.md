@@ -593,7 +593,12 @@ their extra tiles), projectiles (first obstacle that will still be there:
 mountains, buildings, every pawn but enemies about to move; with splash for
 the Centipede), lasers (through pawns up to a building or mountain), and
 none (egg, blob and totem throwers, hatching). Unknown names get every tile
-in line. Off, the tier is 0, its TierBounds cap is 0, and it is left out of
+in line. Enemies that could attack a unit a mission objective protects
+(the Terraformer, trains, tanks, bombs, satellites...) are counted apart
+with those units as the targets, and each takes `kUnitThreatWeight` (2^26)
+off the slot, above objective progress: such a unit is a star with few HP
+(run 8 lost the Terraformer to two Vek that turn 1 left next to it while it
+terraformed; the replay ranked this way killed them and kept it). Off, the tier is 0, its TierBounds cap is 0, and it is left out of
 printed scores, JSON score vectors and tier counts (`tier_used`,
 `components_for_tiers`), so every result is unchanged; on, tier counts
 include it (`--min-tiers 5` = grid through threat). `--kills-tier` puts

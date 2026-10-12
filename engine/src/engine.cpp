@@ -112,6 +112,13 @@ bool apply_board_write(Resolver& r, RulesContext& rules, const LuaWrite& w) {
     }
     return true;
   }
+  if (m == "SetCustomTile") {
+    // The tile's sprite (Mission_Terraform's grass: the Terraformer clears it).
+    const std::string* name = arg_str(w, 1);
+    if (!p || !name) return false;
+    if (p->valid()) b.tile(*p).custom_tile = name->empty() ? kNoSymbol : intern(*name);
+    return true;
+  }
   if (m == "SetPopulated") {
     const bool* on = arg_bool(w, 0);
     const Point* q = arg_point(w, 1);

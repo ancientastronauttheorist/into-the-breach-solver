@@ -220,6 +220,37 @@ TEST_CASE("threat: projectiles stop at the first obstacle that stays") {
   CHECK(count_threats(laser) == 0);
 }
 
+TEST_CASE("threat: protected mission units are counted apart, above objective progress") {
+  Board b;
+  building(b, {3, 0});
+  Pawn t;
+  t.uid = 50;
+  t.type = intern("Terraformer");
+  t.team = Team::Player;
+  t.pos = {6, 0};
+  t.hp = t.max_hp = 2;
+  b.add_pawn(t);
+  const int32_t at_unit = enemy(b, "ScorpionAtk1", {6, 1});
+  const int32_t at_building = enemy(b, "ScorpionAtk1", {3, 1});
+  CHECK(threatening_enemies(b) == std::vector<int32_t>{at_building});
+  CHECK(unit_threatening_enemies(b) == std::vector<int32_t>{at_unit});
+  Board other = b;
+  other.find_pawn(50)->type = intern("Archive_Tank");
+  CHECK(count_unit_threats(other) == 1);
+  other.find_pawn(50)->frozen = true;  // takes no damage
+  CHECK(count_unit_threats(other) == 0);
+  other.find_pawn(50)->frozen = false;
+  other.find_pawn(50)->type = intern("SomeDeployable");  // not an objective
+  CHECK(count_unit_threats(other) == 0);
+
+  ScoreOptions on;
+  on.threat_tier = true;
+  on.objectives_first = true;
+  CHECK(score_turn(b, b, nullptr, nullptr, on)[ScoreKey::Threat] == -kUnitThreatWeight - 1);
+  // One unit threat outweighs any objective progress at kObjectivesFirstWeight.
+  CHECK(kUnitThreatWeight > kObjectivesFirstWeight * 4095 + 100);
+}
+
 TEST_CASE("threat: score tier and tier views") {
   Board before;
   building(before, {3, 0});

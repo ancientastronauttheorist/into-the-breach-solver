@@ -18,6 +18,20 @@ namespace itb {
 namespace {
 
 std::string_view type_name(const Pawn& p) { return symbol_name(p.type); }
+
+// Mission_Terraform grass: the grass sprite when the recording has sprites
+// (any of the zone's tiles shows one), else not sand.
+bool grass_sprites(const Board& b, const std::vector<Point>& zone) {
+  for (Point g : zone) {
+    if (b.tile(g).custom_tile != kNoSymbol && symbol_name(b.tile(g).custom_tile) == "ground_grass.png") return true;
+  }
+  return false;
+}
+bool is_grass(const Board& b, Point g, bool sprites) {
+  const Tile& t = b.tile(g);
+  if (!sprites) return t.terrain != Terrain::Sand;
+  return t.custom_tile != kNoSymbol && symbol_name(t.custom_tile) == "ground_grass.png";
+}
 bool type_is(const Pawn& p, std::string_view t) { return type_name(p) == t; }
 
 // Board:IsPawnAlive.
@@ -418,20 +432,25 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
   } else if (id == "Mission_Terraform") {
     protect("Mission_Terraform unit", mission_unit("Terraformer"));
     if (od.grass_known) {
-      // Terraformed tiles turn to sand (their grass custom tile is cleared by
-      // a script the engine reports, not applies).
+      // A tile is grass while it shows the grass sprite (UpdateMission:
+      // GetCustomTile == "ground_grass.png"); the Terraformer's script clears
+      // it. Terrain is no guide: its sand turns to ground when hit (run 8
+      // replay: two terraformed tiles hit later still counted as grass, so the
+      // last shot that would finish the grass scored nothing). Recordings
+      // without custom tiles fall back to sand.
+      const bool sprites = grass_sprites(before, od.grass);
       int left = 0, turned = 0;
       for (Point g : od.grass) {
-        const bool sand0 = before.tile(g).terrain == Terrain::Sand, sand1 = after.tile(g).terrain == Terrain::Sand;
-        turned += !sand0 && sand1 ? 1 : 0;
-        left += sand1 ? 0 : 1;
+        const bool g0 = is_grass(before, g, sprites), g1 = is_grass(after, g, sprites);
+        turned += g0 && !g1 ? 1 : 0;
+        left += g1 ? 1 : 0;
       }
       // Only the Terraformer terraforms, so the turn it dies with grass left
       // fails this star too (GetCompletedObjectives: both fail).
       const bool orphaned = count_alive(before, mission_unit("Terraformer")) > 0 && died(turn, mission_unit("Terraformer")) > 0;
       const int total = static_cast<int>(od.grass.size());
-      line("Mission_Terraform grass", (ends || orphaned) && left > 0 ? 1 : 0, total ? turned * kStar / total : 0, false,
-           num(left) + " grass tiles left (custom tiles approximated by sand)");
+      line("Mission_Terraform grass", (ends || orphaned) && left > 0 ? 1 : 0, total ? turned * kStar / total : 0, sprites,
+           num(left) + " grass tiles left" + (sprites ? "" : " (no sprites recorded: approximated by sand)"));
     } else {
       line("Mission_Terraform grass", 0, 0, false, "grass tiles not recorded");
     }
@@ -605,8 +624,9 @@ int objective_progress_cap(const Board& before, const TurnContext* ctx) {
     cap += mountains(before) > 0 ? kStar : 0;
   } else if (id == "Mission_Terraform") {
     if (od.grass_known && !od.grass.empty()) {
+      const bool sprites = grass_sprites(before, od.grass);
       int open = 0;
-      for (Point g : od.grass) open += before.tile(g).terrain == Terrain::Sand ? 0 : 1;
+      for (Point g : od.grass) open += is_grass(before, g, sprites) ? 1 : 0;
       cap += open * kStar / static_cast<int>(od.grass.size());
     }
   } else if (id == "Mission_Force") {
