@@ -679,9 +679,12 @@ void check_terrain_dangers(Board& board, Point p, RulesContext& ctx) {
     if (t.terrain == Terrain::Water) {
       if (is_flying(*pawn) && !pawn->frozen) continue;
       if (!is_massive(board, *pawn)) {
-        // Drowns: the living, and the dying that leave no corpse.
+        // Drowns: the living, and the dying that leave no corpse, but only
+        // once idle. A pawn still being pushed does not sink where it
+        // stands: a hit that breaks cracked ice under a unit and pushes it
+        // off sends it to the next tile alive.
         const bool alive = pawn->alive();
-        if ((alive || !is_corpse(board, *pawn)) && (alive || pawn->dying)) {
+        if (!busy(ctx, *pawn) && (alive || !is_corpse(board, *pawn)) && (alive || pawn->dying)) {
           if (detail::type_contains(*pawn, "Train_")) {
             kill_pawn(board, *pawn, ctx);
             pawn->corpse = false;
