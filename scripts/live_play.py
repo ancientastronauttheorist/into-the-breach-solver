@@ -125,6 +125,10 @@ SETTLE_TRIES = 8
 POLL = 0.5
 # Seconds to wait for the phase to change after each End Turn click.
 CLICK_WAIT = 8
+# The bridge's heartbeat comes from Mission.BaseUpdate, so it stops once the
+# game leaves the mission (the Victory screen after the final Cave turn).
+SILENT_AFTER = 15.0
+FINAL_MISSION = "Mission_Final_Cave"
 ACTION_TIMEOUT = 60.0
 
 # The adaptive solve budget's default tier target: the score tiers through
@@ -1046,16 +1050,20 @@ def print_plan(pred: dict) -> None:
         say(f"  warning: {w}")
 
 
-def wait_player_turn(bridge: Bridge, timeout: float, after_turn: int | None = None) -> dict | None:
+def wait_player_turn(bridge: Bridge, timeout: float, after_turn: int | None = None,
+                     mission_id: str | None = None) -> dict | None:
     """The state once it is a player turn with an active mech (the active
-    flags lag the turn change), or a non-combat phase; None on timeout."""
+    flags lag the turn change), or a non-combat phase; None on timeout.
+    after_turn: a later turn of mission_id, or any turn of another mission
+    (Mission_Final goes straight on to the Cave's turn 1)."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         st = bridge.raw_state() or {}
         if st and not in_combat(st):
             return st
-        if (st.get("phase") == "combat_player" and active_mechs(st)
-                and (after_turn is None or int(st.get("turn") or 0) > after_turn)):
+        later = (after_turn is None or int(st.get("turn") or 0) > after_turn
+                 or (mission_id is not None and st.get("mission_id") != mission_id))
+        if st.get("phase") == "combat_player" and active_mechs(st) and later:
             return st
         time.sleep(POLL)
     return None
@@ -1239,14 +1247,20 @@ def click_end_turn(xy: tuple) -> bool:
     return True
 
 
-def phase_left(bridge: Bridge, turn: int, timeout: float) -> bool:
+def phase_left(bridge: Bridge, turn: int, timeout: float) -> str | None:
+    """"left" once the player turn is over, "silent" if the bridge stops
+    (SILENT_AFTER without a heartbeat: the game left the mission), None on
+    timeout."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         st = bridge.raw_state() or {}
         if st.get("phase") != "combat_player" or int(st.get("turn") or 0) > turn:
-            return True
+            return "left"
+        age = bridge.heartbeat_age()
+        if age is not None and age > SILENT_AFTER:
+            return "silent"
         time.sleep(POLL)
-    return False
+    return None
 
 
 def resist_info(pred: dict) -> dict | None:
@@ -1319,16 +1333,24 @@ def end_turn(ctx) -> list:
             # the full timeout before giving up rather than click again.
             say("  End Turn click 3 did not register yet; waiting")
             left = phase_left(bridge, turn, args.timeout)
+    if left == "silent":
+        if state.get("mission_id") == FINAL_MISSION:
+            say("the bridge went silent after End Turn on the final mission: the run is over (Victory)")
+            run.event("run_over", {"mission_id": state.get("mission_id"), "turn": turn})
+            ctx.mission_over = True
+            return anomalies
+        raise Anomaly("the bridge went silent after End Turn (game over screen, or the game stopped?)")
     if not left:
         raise Anomaly("the turn did not end (phase still combat_player)")
 
     say("  enemy phase...")
-    after = wait_player_turn(bridge, args.timeout, after_turn=turn)
+    after = wait_player_turn(bridge, args.timeout, after_turn=turn, mission_id=state.get("mission_id"))
     if after is None:
         raise Anomaly(f"no next player turn within {args.timeout:.0f}s")
-    if not in_combat(after):
+    if not in_combat(after) or after.get("mission_id") != state.get("mission_id"):
         path = run.save_state(after, "after_enemy")
-        say(f"mission over (phase {after.get('phase')}); engine predicted mission end: "
+        say(f"mission over (phase {after.get('phase')}, mission {after.get('mission_id')}); "
+            "engine predicted mission end: "
             f"{pred.get('enemy_phase', {}).get('mission_ended')}")
         ctx.mission_over = True
         return anomalies

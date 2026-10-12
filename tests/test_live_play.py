@@ -197,6 +197,7 @@ class FakeBridge:
         self.refused_deploy = set()
         self.export_moved = True
         self.next_turn = None  # function(state) -> next player-turn state
+        self.silent = False  # the game left the mission: no more heartbeats
         self.stop = threading.Event()
         self.write_state()
         self.thread = threading.Thread(target=self.loop, daemon=True)
@@ -275,7 +276,8 @@ class FakeBridge:
 
     def loop(self):
         while not self.stop.is_set():
-            (BRIDGE / "itb_bridge_heartbeat").write_text("1")
+            if not self.silent:
+                (BRIDGE / "itb_bridge_heartbeat").write_text("1")
             if lv.CMD.exists():
                 text = lv.CMD.read_text().strip()
                 lv.CMD.unlink()
@@ -721,6 +723,52 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(self.clicks), 3)
         self.assertEqual(self.fb.state["turn"], 2)
+
+    def go_silent(self, xy):
+        """An End Turn click after which the game leaves the mission."""
+        self.clicks.append(xy)
+        self.fb.silent = True
+        old = time.time() - 60
+        os.utime(BRIDGE / "itb_bridge_heartbeat", (old, old))
+        return True
+
+    def test_end_turn_on_the_final_mission_ends_the_run_when_the_bridge_goes_silent(self):
+        st = base_state()
+        st["mission_id"] = "Mission_Final_Cave"
+        self.bridge(st)
+        old = lp.SILENT_AFTER
+        lp.SILENT_AFTER = 0.3
+        self.addCleanup(setattr, lp, "SILENT_AFTER", old)
+        rc = lp.main(["mission", "--new-run"], engine=FakeEngine(), click=self.go_silent)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.clicks), 1)
+        events = (self.run_dir() / "events.jsonl").read_text()
+        self.assertIn('"run_over"', events)
+
+    def test_end_turn_stops_when_the_bridge_goes_silent_elsewhere(self):
+        self.bridge()
+        old = lp.SILENT_AFTER
+        lp.SILENT_AFTER = 0.3
+        self.addCleanup(setattr, lp, "SILENT_AFTER", old)
+        rc = lp.main(["end-turn", "--new-run"], engine=FakeEngine(), click=self.go_silent)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(self.clicks), 1)
+
+    def test_end_turn_follows_the_final_mission_into_the_cave(self):
+        # Mission_Final's last turn goes straight on to the Cave's turn 1.
+        st = base_state()
+        st["mission_id"], st["turn"] = "Mission_Final", 4
+        self.bridge(st)
+
+        def cave(s):
+            s = FakeBridge.default_next(s)
+            s["mission_id"], s["turn"] = "Mission_Final_Cave", 1
+            return s
+
+        self.fb.next_turn = cave
+        self.assertEqual(self.run_cmd(["mission"]), 0)
+        self.assertEqual(self.acting().count("END_TURN"), 1)
+        self.assertEqual(self.fb.state["mission_id"], "Mission_Final_Cave")
 
     def test_end_turn_without_a_click_when_the_bridge_ends_it(self):
         self.bridge()
