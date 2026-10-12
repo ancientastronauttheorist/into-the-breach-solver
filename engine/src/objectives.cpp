@@ -319,9 +319,13 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
         break;
       }
       case BonusId::Block: {
+        // Mission:GetSpawnCount() queues nothing on the final turn
+        // (IsFinalTurn: turn == TurnLimit - 1), so the spawns emerging in the
+        // enemy phase before it are the last ones to block.
         const bool known = od.blocked_spawns >= 0;
         const int so_far = known ? od.blocked_spawns : 0;
-        line(name, ends && known && so_far + r.spawns_blocked < 3 ? 1 : 0, toward(so_far, r.spawns_blocked, 3),
+        const bool last = ends || before.turn >= before.total_turns - 1;
+        line(name, last && known && so_far + r.spawns_blocked < 3 ? 1 : 0, toward(so_far, r.spawns_blocked, 3),
              known, num(r.spawns_blocked) + " blocked" + (known ? "" : " (BlockedSpawns not recorded)"));
         break;
       }
@@ -422,8 +426,11 @@ ObjectiveReport evaluate_objectives(const Board& before, const Board& after, con
         turned += !sand0 && sand1 ? 1 : 0;
         left += sand1 ? 0 : 1;
       }
+      // Only the Terraformer terraforms, so the turn it dies with grass left
+      // fails this star too (GetCompletedObjectives: both fail).
+      const bool orphaned = count_alive(before, mission_unit("Terraformer")) > 0 && died(turn, mission_unit("Terraformer")) > 0;
       const int total = static_cast<int>(od.grass.size());
-      line("Mission_Terraform grass", ends && left > 0 ? 1 : 0, total ? turned * kStar / total : 0, false,
+      line("Mission_Terraform grass", (ends || orphaned) && left > 0 ? 1 : 0, total ? turned * kStar / total : 0, false,
            num(left) + " grass tiles left (custom tiles approximated by sand)");
     } else {
       line("Mission_Terraform grass", 0, 0, false, "grass tiles not recorded");

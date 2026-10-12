@@ -315,6 +315,11 @@ TEST_CASE("objectives: BONUS_BLOCK counts blocked spawns") {
   CHECK(l->progress == kStar / 3);  // only the third block counts
   o.blocked_spawns = 0;
   t.phase.events.clear();
+  CHECK(find(t.eval(t.before), "BONUS_BLOCK")->failed == 0);
+  t.before.total_turns = 4;
+  t.before.turn = 3;  // no spawns are queued in the final turn
+  CHECK(find(t.eval(t.before), "BONUS_BLOCK")->failed == 1);
+  t.before.turn = 2;
   t.phase.mission_ended = true;
   CHECK(find(t.eval(t.before), "BONUS_BLOCK")->failed == 1);
 }
@@ -529,6 +534,12 @@ TEST_CASE("objectives: Mission_Terraform") {
   r = t.eval(after);
   CHECK(find(r, "Mission_Terraform unit")->failed == 1);
   CHECK(find(r, "Mission_Terraform grass")->progress == kStar / 2);
+  CHECK(find(r, "Mission_Terraform grass")->failed == 1);  // nothing left to terraform it
+  after.tile({2, 3}).terrain = Terrain::Sand;
+  CHECK(find(t.eval(after), "Mission_Terraform grass")->failed == 0);  // done as it died
+  after.tile({2, 3}).terrain = t.before.tile({2, 3}).terrain;
+  after.find_pawn(5)->hp = 2;
+  CHECK(find(t.eval(after), "Mission_Terraform grass")->failed == 0);  // alive: not decided yet
 }
 
 TEST_CASE("objectives: Mission_AcidTank counts acid kills, 2 stars") {
