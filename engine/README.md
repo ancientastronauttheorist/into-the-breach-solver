@@ -283,6 +283,12 @@ Done so far (build order from the decompile):
    - Fire, smoke, acid and freeze interactions, terrain dangers, and the
      game's per-frame tile and pawn rules, either one frame at a time for the
      executor (skipping busy pawns) or until the board stops changing.
+   - Drowning (`BoardSpace::CheckTerrainDangers` @00926090) takes only an
+     idle pawn. A pawn mid-push still gets the rest of the tile's dangers, but
+     it does not sink: a hit that breaks cracked ice (or melts ice with fire,
+     the Flamethrower) under a unit and pushes it sends it to the next tile
+     alive (live 2026-10-11 m26 turn 2: a Bouncer's hit on a Centipede). If
+     the push is blocked, the pawn drowns once the push ends.
    - Grid Defense resists are a chance node: the caller resolves each roll, and
      every roll is logged. Pushes, spawns and Lua scripts are recorded for the
      later stages.

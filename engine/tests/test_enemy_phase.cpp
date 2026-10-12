@@ -1751,3 +1751,114 @@ TEST_CASE("live: an unused walking bomb is gone after the enemy phase (2026-10-1
     CHECK(hp_of(b, p.uid) == game->hp);
   }
 }
+
+// ---- Ice broken under a pawn that is being pushed ------------------------------
+// CheckTerrainDangers drowns a pawn only when it is idle: one whose push is
+// still running is not sunk on the tile it is leaving.
+
+namespace {
+
+void cracked_ice(Board& b, Point p) {
+  Tile& t = b.tile(p);
+  t.terrain = Terrain::Ice;
+  t.hp = 1;
+  t.max_hp = 2;
+}
+
+}  // namespace
+
+TEST_CASE("a Vek on cracked ice hit with a push lands on the next tile alive") {
+  NEED_ENGINE();
+  // BouncerAtk1 on (2,3): 1 damage, push up. The hit turns the ice to water
+  // under the Scorpion, but its push has started: it arrives at (2,2) alive.
+  Board b;
+  mech(b, {6, 6});
+  const int32_t bouncer = place(b, "Bouncer1", {2, 4});
+  queue(b, bouncer, {2, 3});
+  const int32_t s = place(b, "Scorpion1", {2, 3});
+  cracked_ice(b, {2, 3});
+  const PhaseResult r = E.end_turn(b, context());
+  CHECK(fired(r).count(bouncer) == 1);
+  CHECK(b.tile({2, 3}).terrain == Terrain::Water);
+  CHECK_FALSE(dead(b, s));
+  CHECK(P(b, s).pos == Point{2, 2});
+  CHECK(hp_of(b, s) == 2);
+}
+
+TEST_CASE("a Vek on cracked ice hit without a push drowns") {
+  NEED_ENGINE();
+  // Firefly1's projectile (no push) breaks the ice: the Scorpion sinks.
+  Board b;
+  mech(b, {6, 6});
+  const int32_t f = place(b, "Firefly1", {2, 5});
+  queue(b, f, {2, 4});
+  const int32_t s = place(b, "Scorpion1", {2, 3});
+  cracked_ice(b, {2, 3});
+  const PhaseResult r = E.end_turn(b, context());
+  CHECK(fired(r).count(f) == 1);
+  CHECK(b.tile({2, 3}).terrain == Terrain::Water);
+  CHECK(dead(b, s));
+}
+
+TEST_CASE("a Vek on broken ice whose push is blocked drowns once the push ends") {
+  NEED_ENGINE();
+  // The same Bouncer hit, but a mountain stops the push: the Scorpion takes
+  // the hit and the bump, then sinks into the water it stayed on.
+  Board b;
+  mech(b, {6, 6});
+  const int32_t bouncer = place(b, "Bouncer1", {2, 4});
+  queue(b, bouncer, {2, 3});
+  const int32_t s = place(b, "Scorpion1", {2, 3});
+  hp(b, s, 5, 5);
+  cracked_ice(b, {2, 3});
+  set_mountain(b, {2, 2});
+  E.end_turn(b, context());
+  CHECK(b.tile({2, 3}).terrain == Terrain::Water);
+  CHECK(b.tile({2, 2}).hp == 1);
+  CHECK(dead(b, s));
+}
+
+TEST_CASE("live: a Centipede pushed off the cracked ice the hit broke survives and fires (2026-10-11 m26)") {
+  NEED_ENGINE();
+  // Mission_Shields turn 2, End Turn. Bouncer1 #4211 (6,5) bounces into the
+  // Blobber2 at (6,6) (both bumped) and hits the Centipede2 #4429 on cracked
+  // ice at (6,4): the ice breaks and the Centipede is pushed to (6,3) alive
+  // (4 -> 3 HP), its queued shot moving with it. Bouncer2 #4213 bounces from
+  // (5,4) into the new water at (6,4) and drowns; Bouncer1, at 1 HP, dies
+  // blocking the spawn on (6,5). The Centipede fires from (6,3) along the
+  // row: (0,3) cracks to a chasm, (0,2) and (0,4) get ACID. The game's turn 3
+  // board shows all of it (the Centipede then moved to (4,3) in the AI phase).
+  const Recording before = live_fixture("live_shields_t2_end_turn.json");
+  const Recording after = live_fixture("live_shields_t3_after_enemy.json");
+  const int32_t centipede = 4429, bouncer1 = 4211, bouncer2 = 4213, blobber = 4430;
+  REQUIRE(before.board.tile({6, 4}).terrain == Terrain::Ice);
+  REQUIRE(before.board.tile({6, 4}).hp == 1);
+  REQUIRE(after.board.find_pawn(centipede) != nullptr);
+  REQUIRE(after.board.find_pawn(centipede)->alive());
+  Board b = before.board;
+  const PhaseResult r = E.end_turn(b, turn_context(before, Visibility::Full));
+  CHECK(fired(r).count(bouncer1) == 1);
+  CHECK(fired(r).count(bouncer2) == 1);
+  CHECK(fired(r).count(centipede) == 1);
+  CHECK(r.count(PhaseEventType::ShotCancelled) == 0);
+  CHECK_FALSE(dead(b, centipede));
+  CHECK(P(b, centipede).pos == Point{6, 3});
+  CHECK(hp_of(b, centipede) == after.board.find_pawn(centipede)->hp);
+  CHECK(dead(b, bouncer1));
+  CHECK(dead(b, bouncer2));
+  CHECK(after.board.find_pawn(bouncer1) == nullptr);
+  CHECK(after.board.find_pawn(bouncer2) == nullptr);
+  CHECK(hp_of(b, blobber) == after.board.find_pawn(blobber)->hp);
+  for (Point p : {Point{6, 4}, Point{4, 4}, Point{5, 4}, Point{0, 3}, Point{0, 2}, Point{0, 4}}) {
+    CAPTURE(p.x);
+    CAPTURE(p.y);
+    CHECK(b.tile(p).terrain == after.board.tile(p).terrain);
+    CHECK(b.tile(p).acid == after.board.tile(p).acid);
+    if (b.tile(p).terrain == Terrain::Ice) CHECK(b.tile(p).hp == after.board.tile(p).hp);
+  }
+  for (const Pawn& p : before.board.pawns()) {
+    if (!p.alive() || p.team != Team::Player) continue;
+    CAPTURE(p.uid);
+    CHECK(hp_of(b, p.uid) == after.board.find_pawn(p.uid)->hp);
+  }
+}
