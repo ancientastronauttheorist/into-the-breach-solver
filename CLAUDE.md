@@ -64,11 +64,12 @@ Rust fallback, after editing `rust_solver/src/*.rs`:
   patched weapon scripts). The old bot's emulations are opt-in:
   `ITB_BRIDGE_EXEC_MODE=legacy` (sent by `writer.py`).
 - **Engine live play:** `python3 scripts/live_play.py status | deploy | turn |
-  end-turn | mission` (engine/README.md "Live play"). Solves with the C++
+  end-turn | mission | restore` (engine/README.md "Live play"). Solves with the C++
   engine (`engine/build/itb_live`), executes each sub-action through the
   bridge, checks it against the prediction, re-solves on a mismatch; `mission`
   stops at the first anomaly. `--dry-run` never acts. Runs are archived in
-  `recordings/live/<time>/`.
+  `recordings/live/<time>/`, with the game's save files at every turn start;
+  `restore --mission MM --turn TT` loads one back into the game.
 - **Old bot combat:** `python3 game_loop.py auto_turn --time-limit N` reads the board,
   solves with the C++ engine (`ITB_SOLVER=cpp`, the default; `rust` is the
   fallback), executes each sub-action, verifies it against the prediction and

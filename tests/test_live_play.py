@@ -295,16 +295,18 @@ class FakeBridge:
 class LivePlayTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="itb_live_play_"))
-        self._roots = (lp.LIVE_ROOT, lp.CURRENT)
+        self._roots = (lp.LIVE_ROOT, lp.CURRENT, lp.PROFILE, lp.RESTORE_BACKUPS)
         lp.LIVE_ROOT = self.tmp / "live"
         lp.CURRENT = self.tmp / "current.json"
+        lp.PROFILE = self.tmp / "profile_Alpha"
+        lp.RESTORE_BACKUPS = self.tmp / "restore_backups"
         self.clicks = []
         self.fb = None
 
     def tearDown(self):
         if self.fb:
             self.fb.close()
-        lp.LIVE_ROOT, lp.CURRENT = self._roots
+        lp.LIVE_ROOT, lp.CURRENT, lp.PROFILE, lp.RESTORE_BACKUPS = self._roots
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def bridge(self, state=None) -> FakeBridge:
@@ -395,6 +397,86 @@ class LivePlayTest(unittest.TestCase):
         wrapper = json.loads((run / "m00_turn_01_solve_input.json").read_text())
         self.assertEqual(wrapper["data"]["bridge_state"]["mission_id"], "Mission_Test")
         self.assertEqual(wrapper["run_id"], run.name)
+
+    def test_turn_checkpoints_the_save_files_once_per_turn(self):
+        self.bridge()
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text('["iCurrentTurn"] = 1')
+        (lp.PROFILE / "undoSave.lua").write_text("undo 1")
+        self.assertEqual(self.run_cmd(["turn"]), 0)
+        run = self.run_dir()
+        self.assertEqual((run / "m00_turn_01_saveData.lua").read_text(), '["iCurrentTurn"] = 1')
+        self.assertEqual((run / "m00_turn_01_undoSave.lua").read_text(), "undo 1")
+        # A re-run of `turn` later in the same turn keeps the turn-start copy.
+        (lp.PROFILE / "saveData.lua").write_text("later")
+        self.fb.state = base_state()
+        self.fb.write_state()
+        self.assertEqual(self.run_cmd(["turn", "--run", str(run)]), 0)
+        self.assertEqual((run / "m00_turn_01_saveData.lua").read_text(), '["iCurrentTurn"] = 1')
+        events = [json.loads(line) for line in (run / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([e["detail"]["save_turns"] for e in events if e["kind"] == "checkpoint"], [[1]])
+
+    def test_dry_run_takes_no_checkpoint(self):
+        self.bridge()
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text("save")
+        self.assertEqual(self.run_cmd(["turn", "--dry-run"]), 0)
+        self.assertEqual(list(self.run_dir().glob("*.lua")), [])
+
+    def test_restore_puts_the_checkpoint_back_and_continues(self):
+        st = base_state()
+        self.bridge(st)
+        run = self.tmp / "live" / "old"
+        run.mkdir(parents=True)
+        (run / "m03_turn_02_saveData.lua").write_text("checkpoint")
+        (run / "m03_turn_02_solve_input.json").write_text(json.dumps({"data": {"bridge_state": st}}))
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text("current")
+        (lp.PROFILE / "undoSave.lua").write_text("current undo")
+        calls = []
+        saved = (lp.game_running, lp.quit_game, lp.launch_game, lp.CONTINUE_DELAY)
+        lp.game_running = lambda: True
+        lp.quit_game = lambda: calls.append("quit")
+        lp.launch_game = lambda: calls.append("launch")
+        # The bridge is silent on the title screen.
+        self.fb.close()
+        lp.CONTINUE_DELAY = 0.0
+        try:
+            # Continue loads the save: the bridge starts and writes the turn's board.
+            def click(xy):
+                self.clicks.append(xy)
+                self.fb = FakeBridge(copy.deepcopy(st))
+                return True
+            rc = lp.main(["restore", "--run", str(run), "--mission", "3", "--turn", "2", "--timeout", "10"],
+                         engine=FakeEngine(), click=click)
+        finally:
+            lp.game_running, lp.quit_game, lp.launch_game, lp.CONTINUE_DELAY = saved
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, ["quit", "launch"])
+        self.assertEqual(self.clicks, [lp.TITLE_CONTINUE])
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "checkpoint")
+        # No undoSave in the checkpoint: the current one (another moment) is removed.
+        self.assertFalse((lp.PROFILE / "undoSave.lua").exists())
+        backups = list(lp.RESTORE_BACKUPS.iterdir())
+        self.assertEqual((backups[0] / "saveData.lua").read_text(), "current")
+        self.assertEqual((backups[0] / "undoSave.lua").read_text(), "current undo")
+        # The current run is not switched to the restored one.
+        self.assertFalse(lp.CURRENT.exists())
+
+    def test_checkpoint_diffs(self):
+        a, b = base_state(), base_state()
+        self.assertEqual(lp.checkpoint_diffs(a, b), [])
+        unit(b, 100)["hp"] = 2
+        b["turn"] = 2
+        b["units"].append({"uid": 101, "type": "Firefly1", "x": 4, "y": 4, "hp": 3, "team": 6})
+        self.assertEqual(lp.checkpoint_diffs(a, b), ["turn 1 -> 2", "Scorpion1#100: hp 3 -> 2",
+                                                     "Firefly1#101 only in the game"])
+
+    def test_restore_refuses_a_missing_checkpoint(self):
+        self.bridge()
+        run = self.tmp / "live" / "old"
+        run.mkdir(parents=True)
+        self.assertEqual(lp.main(["restore", "--run", str(run), "--mission", "0", "--turn", "1"]), 2)
 
     def test_a_mismatch_re_solves_from_the_live_board(self):
         self.bridge()

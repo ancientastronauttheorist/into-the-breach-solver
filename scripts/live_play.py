@@ -53,6 +53,17 @@ mission: turn + end-turn until the mission ends; stops at the first anomaly
 (a step mismatch, a bridge error, an enemy-phase difference, a refused plan)
 without ending the turn, so the board can be inspected.
 
+Checkpoints: at each turn start `turn` copies the game's own save files
+(profile_Alpha/saveData.lua, undoSave.lua) beside the solve input as
+m<MM>_turn_<TT>_saveData.lua / _undoSave.lua. `restore --mission MM --turn TT`
+puts them back: it quits the game (the copy happens after it has exited, so
+its exit save cannot overwrite it), backs up the profile's current save files
+under .local_runs/live_play/restore_backups/, relaunches the game through the
+offline Steam client, clicks Continue on the title screen and compares the
+loaded board with that turn's solve input (mission, turn, grid, buildings,
+units). Continue resumes the run at the
+start of that turn.
+
 deploy: places the mechs on the bridge's exported drop zone (tiles the deploy
 UI refuses are not in it, and DEPLOY refuses them anyway) with a simple
 heuristic, or on --tiles; verifies every mech's tile from the state. Confirm
@@ -92,6 +103,21 @@ LIVE_ROOT = REPO / "recordings" / "live"
 CURRENT = REPO / ".local_runs" / "live_play" / "current.json"
 
 HEARTBEAT = lv.BRIDGE / "itb_bridge_heartbeat"
+
+# The game's save files (macOS profile; ITB_SAVE_DIR overrides the root, as in
+# src/itb_paths.py). Continue resumes from saveData.lua; undoSave.lua backs
+# Reset Turn.
+SAVE_ROOT = Path(os.environ.get("ITB_SAVE_DIR") or Path.home() / "Library" / "Application Support" / "IntoTheBreach")
+PROFILE = SAVE_ROOT / "profile_Alpha"
+SAVE_FILES = ("saveData.lua", "undoSave.lua")
+RESTORE_BACKUPS = REPO / ".local_runs" / "live_play" / "restore_backups"
+GAME_PROCESS = "Into the Breach"
+# Launch through the (offline) Steam client: it must stay offline.
+STEAM_RUN = "steam://run/590380"
+# Title screen Continue, fullscreen 1360x768.
+TITLE_CONTINUE = (140, 233)
+CONTINUE_DELAY = 15.0
+CONTINUE_RETRY = 30.0
 
 # Timings (seconds). Tests shrink them.
 SETTLE_INTERVAL = 0.4
@@ -406,6 +432,21 @@ class Run:
         path.write_text(json.dumps(self.wrap(state, label, extra)))
         return path
 
+    def save_checkpoint(self, state: dict) -> list:
+        """Copies the game's save files at a turn start, once per turn (the
+        first copy is the turn start); `restore` puts them back."""
+        pre = self.prefix(state)
+        out = []
+        for name in SAVE_FILES:
+            src, dst = PROFILE / name, self.path / f"{pre}_{name}"
+            if src.exists() and not dst.exists():
+                shutil.copy2(src, dst)
+                out.append(dst)
+        if out:
+            self.event("checkpoint", {"files": [p.name for p in out],
+                                      "save_turns": save_turns(out[0].read_text(errors="replace"))})
+        return out
+
     def engine_queued(self, state: dict) -> dict:
         """The engine's queued shots tracked during this state's turn
         ({uid: shot or None}; see track_queued), kept across commands (turn,
@@ -444,6 +485,11 @@ class Run:
     def event(self, kind: str, detail) -> None:
         with open(self.path / "events.jsonl", "a") as f:
             f.write(json.dumps({"t": now_iso(), "kind": kind, "detail": detail}) + "\n")
+
+
+def save_turns(text: str) -> list:
+    """The save's iCurrentTurn values (one per mission it holds)."""
+    return [int(v) for v in re.findall(r'\["iCurrentTurn"\]\s*=\s*(\d+)', text)]
 
 
 def prediction_path(state_path: Path) -> Path:
@@ -1054,6 +1100,8 @@ def play_turn(ctx) -> list:
     if not in_combat(state):
         raise Refused(f"not in combat (phase {state.get('phase')})")
     state = bridge.settled_state()
+    if not args.dry_run:
+        run.save_checkpoint(state)
     check_loadout(state, ctx.loadout)
     # Burrowers underground (a re-run of `turn` mid-turn, or one that dove in
     # an earlier turn and is still down): turn-start units too.
@@ -1496,6 +1544,118 @@ def mission(ctx) -> list:
     return []
 
 
+def game_running() -> bool:
+    return subprocess.run(["pgrep", "-x", GAME_PROCESS], capture_output=True).returncode == 0
+
+
+def quit_game(timeout: float = 20.0) -> None:
+    """Ends the game process: SIGTERM, then SIGKILL."""
+    for sig in ("-TERM", "-KILL"):
+        subprocess.run(["pkill", sig, "-x", GAME_PROCESS], capture_output=True)
+        deadline = time.time() + timeout
+        while time.time() < deadline and game_running():
+            time.sleep(POLL)
+        if not game_running():
+            return
+    raise Anomaly("the game did not exit")
+
+
+def checkpoint_diffs(want: dict, got: dict) -> list:
+    """Bridge state against bridge state: mission, turn, grid, building HP
+    and every unit's type, tile and HP."""
+    out = [f"{k} {want.get(k)} -> {got.get(k)}" for k in ("mission_id", "turn", "grid_power")
+           if want.get(k) != got.get(k)]
+    wb = {(t["x"], t["y"]): t.get("building_hp") for t in want.get("tiles", []) if t.get("terrain") == "building"}
+    gb = {(t["x"], t["y"]): t.get("building_hp") for t in got.get("tiles", []) if t.get("terrain") == "building"}
+    out += [f"building {visual(*xy)} hp {wb.get(xy)} -> {gb.get(xy)}" for xy in sorted(set(wb) | set(gb))
+            if wb.get(xy) != gb.get(xy)]
+    wu = {u["uid"]: u for u in units(want)}
+    gu = {u["uid"]: u for u in units(got)}
+    for uid in sorted(set(wu) | set(gu)):
+        a, b = wu.get(uid), gu.get(uid)
+        if a is None or b is None:
+            out.append(f"{describe_unit(a or b)} only in the {'game' if a is None else 'checkpoint'}")
+            continue
+        fields = [f for f in ("type", "x", "y", "hp") if a.get(f) != b.get(f)]
+        if fields:
+            out.append(f"{describe_unit(a)}: " + ", ".join(f"{f} {a.get(f)} -> {b.get(f)}" for f in fields))
+    return out
+
+
+def launch_game() -> None:
+    subprocess.run(["open", STEAM_RUN], capture_output=True, check=False)
+
+
+def restore(ctx) -> list:
+    """Puts a turn's checkpoint back and resumes the run there (see the
+    module docstring). Returns the differences between the loaded board and
+    that turn's solve input."""
+    args, run = ctx.args, ctx.run
+    pre = f"m{args.mission:02d}_turn_{args.turn:02d}"
+    files = {name: run.path / f"{pre}_{name}" for name in SAVE_FILES}
+    if not files["saveData.lua"].exists():
+        raise Refused(f"no checkpoint {files['saveData.lua']}")
+    want = None
+    solve_input = run.path / f"{pre}_solve_input.json"
+    if solve_input.exists():
+        want = json.loads(solve_input.read_text())["data"]["bridge_state"]
+    say(f"restore {run.path.name} {pre}" + (f": {want.get('mission_id')} turn {want.get('turn')}" if want else ""))
+    if args.dry_run:
+        return []
+    if game_running():
+        say("  quitting the game")
+        quit_game()
+    backup = RESTORE_BACKUPS / time.strftime("%Y%m%d_%H%M%S")
+    backup.mkdir(parents=True, exist_ok=True)
+    for name in SAVE_FILES:
+        if (PROFILE / name).exists():
+            shutil.copy2(PROFILE / name, backup / name)
+        if files[name].exists():
+            shutil.copy2(files[name], PROFILE / name)
+        elif (PROFILE / name).exists():
+            (PROFILE / name).unlink()
+    say(f"  save files in place (previous ones in {backup})")
+    t0 = time.time()
+    launch_game()
+    deadline = t0 + args.timeout
+    while time.time() < deadline and not game_running():
+        time.sleep(POLL)
+    if not game_running():
+        raise Anomaly(f"the game did not start within {args.timeout:.0f}s")
+    # The bridge is silent on the title screen (no heartbeat, no state), so
+    # Continue is clicked after a delay and again every CONTINUE_RETRY s until
+    # a state written after the click shows the player turn (the state file
+    # can be the old session's).
+    state, clicked = None, 0.0
+    while time.time() < deadline:
+        if time.time() - clicked > CONTINUE_RETRY:
+            time.sleep(CONTINUE_DELAY)
+            say("  clicking Continue")
+            clicked = time.time()
+            ctx.click(args.continue_xy)
+        time.sleep(POLL)
+        try:
+            fresh = lv.STATE.stat().st_mtime > clicked
+        except OSError:
+            fresh = False
+        st = (ctx.bridge.raw_state() or {}) if fresh else {}
+        if in_combat(st) and st.get("phase") == "combat_player" and active_mechs(st):
+            state = st
+            break
+    if state is None:
+        raise Anomaly(f"no player turn within {args.timeout:.0f}s of the launch")
+    state = ctx.bridge.settled_state()
+    say(f"  loaded {state.get('mission_id')} turn {state.get('turn')}")
+    if want is None:
+        return []
+    diffs = checkpoint_diffs(want, state)
+    for d in diffs:
+        say(f"  differs from the checkpoint's solve input: {d}")
+    if not diffs:
+        say("  board matches the checkpoint's solve input")
+    return diffs
+
+
 class Context:
     def __init__(self, args, bridge=None, engine=None, run=None, click=None):
         self.args = args
@@ -1507,7 +1667,8 @@ class Context:
         self.mission_over = False
 
 
-COMMANDS = {"turn": play_turn, "end-turn": end_turn, "mission": mission, "deploy": deploy, "status": status}
+COMMANDS = {"turn": play_turn, "end-turn": end_turn, "mission": mission, "deploy": deploy, "status": status,
+            "restore": restore}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1557,6 +1718,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("deploy", parents=[common], help="place the mechs in the drop zone")
     p.add_argument("--tiles", help="tiles in mech uid order: C5,D6,E5 or 3,5;2,4;4,4")
     p.add_argument("--uids", help="mech uids when they aren't on the board yet, e.g. 0,1,2")
+    p = sub.add_parser("restore", parents=[common], help="load a turn's checkpoint into the game")
+    p.add_argument("--mission", type=int, required=True, help="mission index MM of m<MM>_turn_<TT>")
+    p.add_argument("--turn", type=int, required=True)
+    p.add_argument("--timeout", type=float, default=180.0, help="wait for the loaded player turn (s)")
+    p.add_argument("--continue-xy", type=lambda s: tuple(int(v) for v in s.split(",")),
+                   default=TITLE_CONTINUE, help="title screen Continue point (default: fullscreen 1360x768)")
     return ap
 
 
@@ -1564,7 +1731,13 @@ def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
     args = build_parser().parse_args(argv)
     # status only reads, except that `status --new-run` starts the new run
     # directory (recordings/live/<time>) that later commands then use.
-    run = None if args.command == "status" and not args.new_run else Run.open(args.run, args.new_run)
+    # restore reads a run's checkpoints and leaves the current run as it is.
+    if args.command == "restore":
+        path = (Path(args.run) if os.path.isabs(args.run) else LIVE_ROOT / args.run) if args.run else \
+            Path(json.loads(CURRENT.read_text())["run"])
+        run = Run(path, Run._read_meta(path))
+    else:
+        run = None if args.command == "status" and not args.new_run else Run.open(args.run, args.new_run)
     ctx = Context(args, bridge=bridge, engine=engine, run=run, click=click)
     if ctx.engine is None and args.command in ("turn", "end-turn", "mission"):
         ctx.engine = Engine(args.threads, args.game, run.path / "itb_live.log")

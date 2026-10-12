@@ -84,7 +84,20 @@ python3 scripts/live_play.py deploy [--tiles C5,D6,E5]
 python3 scripts/live_play.py turn --time 30 --max-time 120 --min-tiers 5 --threads 8
 python3 scripts/live_play.py end-turn
 python3 scripts/live_play.py mission --max-turns 10  # turn + end-turn, stops at the first anomaly
+python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1  # back to a turn start
 ```
+
+- **Checkpoints and restore.** At each turn start `turn` copies the game's
+  own save files (`profile_Alpha/saveData.lua`, `undoSave.lua`) into the run
+  as `m<MM>_turn_<TT>_saveData.lua` / `_undoSave.lua`. `restore` quits the
+  game, backs up the profile's current save files
+  (`.local_runs/live_play/restore_backups/`), puts the checkpoint back,
+  relaunches through the offline Steam client and clicks Continue on the
+  title screen (the bridge is silent there), then compares the loaded board
+  with that turn's solve input. Continue resumes the run at the start of
+  that turn, Vek intents and spawn points included, so the same turn can be
+  replayed with another plan or other solver settings, and the game referees
+  the outcome.
 
 - **turn** solves the live board (`Visibility::Player`), then executes the
   plan one sub-action at a time (`MOVE_NATIVE`; `ATTACK` /
