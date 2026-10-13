@@ -815,7 +815,11 @@ root) raises every alpha.
 - A beam pre-pass over whole unit turns (optional move, then optional
   action) keeps the best states for every set of units that have played
   and seeds the incumbent; plans whose value appears only once every unit
-  has played survive it.
+  has played survive it. With helper threads, thread 0 widens it (x3 per
+  round, up to width 1000) for up to 40% of the time limit, or of
+  `max_time_s` under the adaptive budget (live m41 turn 6: cut off at 12 s
+  of a 30 s base, the search spent 300 s without finding the round that
+  saves every building; given 40% of the cap, it finds it at 56 s).
 - Threads (`SolveOptions::helper_engines`, one engine and Lua state per
   thread) share the table, the memo and the incumbent; a child another
   thread is searching waits for a second pass.

@@ -599,7 +599,11 @@ class Worker {
       // (x3 per round) for up to 40% of the time limit: wider beams find
       // plans whose first unit turns look bad on their own.
       size_t width = static_cast<size_t>(o_.beam_width);
-      const double until = o_.time_limit_s > 0 ? 0.4 * o_.time_limit_s : 0;
+      // With the adaptive budget the search may run on to max_time_s (it
+      // stops at the base time only once its first tiers are proven), so the
+      // widening may too.
+      const double budget = sh_.adaptive ? o_.max_time_s : o_.time_limit_s;
+      const double until = budget > 0 ? 0.4 * budget : 0;
       beam(width, until);
       while (sh_.threads > 1 && until > 0 && width < 1000 && !budget_exceeded() &&
              seconds_since(sh_.start) < until) {
