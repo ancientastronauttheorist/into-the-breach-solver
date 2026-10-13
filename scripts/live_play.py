@@ -481,6 +481,20 @@ class Run:
                                            "units": {str(uid): u for uid, u in sorted(under.items())}}
         self.save_meta()
 
+    def unit_actions(self, state: dict) -> dict:
+        """What each unit did this state's turn through this driver ({uid:
+        "MA"}: M a move, A a weapon or Repair; see ui_limit_errors), kept
+        across commands in the manifest; {} for another mission or turn."""
+        rec = self.meta.get("unit_actions") or {}
+        if rec.get("mission") != self.mission_index(state) or rec.get("turn") != int(state.get("turn") or 0):
+            return {}
+        return {int(uid): seq for uid, seq in (rec.get("units") or {}).items()}
+
+    def save_unit_actions(self, state: dict, history: dict) -> None:
+        self.meta["unit_actions"] = {"mission": self.mission_index(state), "turn": int(state.get("turn") or 0),
+                                     "units": {str(uid): seq for uid, seq in sorted(history.items())}}
+        self.save_meta()
+
     def save_json(self, name: str, obj) -> Path:
         path = self.path / name
         path.write_text(json.dumps(obj, indent=1))
@@ -742,8 +756,101 @@ def logged_teleporter_pairs(log_path: Path = Path("/tmp/itb_bridge.log")) -> lis
     return list(reversed(pairs))
 
 
+# ------------------------------------------------------------------ UI action limits
+#
+# What the game's UI lets a unit do in a turn. Arming a weapon or Repair
+# needs Pawn::IsActable (PawnBox::SwapSkill / OnKeyAction / OnMouseAction /
+# Update), which is false while a bonus move is pending; engine/README.md
+# "Action model" has the rule. A unit moves, then acts once (a weapon or
+# Repair); acting ends its turn. Pilot skills:
+#   Shifty (Sidestep), Post_Move (Fire-and-Forget): one more move after
+#     acting (Shifty 1 tile, Post_Move a full move), never a second action;
+#   Double_Shot: a second action if it has not moved, and no move after.
+# The native Pawn:FireWeapon the bridge calls checks none of this (live
+# 2026-10-12, run 20261012_172449: plans had one Shifty mech fire and repair
+# up to 44 times and the game took every one), so the driver refuses a plan
+# that breaks it, on top of the engine's own rule.
+
+PILOT_SKILLS = {"Pilot_Leader": "Shifty", "Pilot_Aquatic": "Post_Move", "Pilot_Miner": "Double_Shot"}
+UI_SEQUENCES = {
+    None: (r"M?A?",),
+    "Shifty": (r"M?(AM?)?",),
+    "Post_Move": (r"M?(AM?)?",),
+    "Double_Shot": (r"M?A?", r"AA"),
+}
+UI_RULE_TEXT = {
+    None: "move, then one weapon or Repair",
+    "Shifty": "move, one weapon or Repair, then a 1-tile move",
+    "Post_Move": "move, one weapon or Repair, then a move",
+    "Double_Shot": "move then one action, or two actions without moving",
+}
+
+
+SMOKE_IMMUNE_PILOTS = {"Pilot_Soldier"}  # Disable_Immunity
+FLYING_PILOTS = {"Pilot_Recycler"}  # Flying
+
+
+def ui_blocked(state: dict, uid) -> str | None:
+    """Why the UI would not arm a weapon or Repair for this unit now (the
+    rest of Pawn::IsActable): on smoke ("Units in Smoke cannot attack or
+    repair") or submerged ("Weapons do not work when submerged in Water");
+    None if neither."""
+    u = next((x for x in units(state) if x.get("uid") == uid), None)
+    if u is None:
+        return None
+    t = next((x for x in state.get("tiles") or [] if (x.get("x"), x.get("y")) == (u.get("x"), u.get("y"))), {})
+    traits = u.get("traits") or {}
+    pid = u.get("pilot_id") or (u.get("pilot") or {}).get("id")
+    if t.get("smoke") and not (traits.get("ignore_smoke") or pid in SMOKE_IMMUNE_PILOTS):
+        return "on smoke"
+    flying = u.get("flying") or traits.get("flying") or pid in FLYING_PILOTS
+    # Water and lava are terrain 3 (old bridges named terrain 5, ice, "lava").
+    if (t.get("terrain_id") == 3 or t.get("terrain") == "water") and not flying:
+        return "submerged"
+    return None
+
+
+def state_unit_value(state: dict, uid, key: str):
+    return next((u.get(key) for u in units(state) if u.get("uid") == uid), None)
+
+
+def pilot_skill(u: dict) -> str | None:
+    """The movement/action pilot skill of a bridge unit (PILOT_SKILLS), or None."""
+    pid = u.get("pilot_id") or (u.get("pilot") or {}).get("id")
+    return PILOT_SKILLS.get(pid)
+
+
+def ui_sequence_ok(seq: str, skill: str | None) -> bool:
+    return any(re.fullmatch(p, seq) for p in UI_SEQUENCES.get(skill, UI_SEQUENCES[None]))
+
+
+def ui_limit_errors(steps: list, history: dict, state: dict, names: dict | None = None) -> list:
+    """The units whose sub-actions this turn (`history`, then `steps`) break
+    the UI's limits; one message per unit."""
+    skills = {u["uid"]: pilot_skill(u) for u in units(state)}
+    seqs: dict = {}
+    for s in steps:
+        uid = s["uid"]
+        seqs[uid] = seqs.get(uid, history.get(uid, "")) + ("M" if s["sub"] == "move" else "A")
+    out = []
+    for uid, seq in sorted(seqs.items()):
+        skill = skills.get(uid)
+        if ui_sequence_ok(seq, skill):
+            continue
+        who = f"{(names or {}).get(uid, 'unit')}#{uid}"
+        done = history.get(uid, "")
+        acts = seq.count("A")
+        out.append(f"{who} ({skill or 'no action pilot skill'}) would "
+                   + " / ".join("move" if c == "M" else "act" for c in seq)
+                   + f" ({acts} weapon/repair actions"
+                   + (f", {len(done)} already done this turn" if done else "")
+                   + f"); the game allows: {UI_RULE_TEXT.get(skill, UI_RULE_TEXT[None])}")
+    return out
+
+
 def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = None,
-                notes: list | None = None, underground: dict | None = None) -> tuple[dict, dict]:
+                notes: list | None = None, underground: dict | None = None,
+                history: dict | None = None) -> tuple[dict, dict]:
     """The solver's input: the live state, plus --loadout weapons for units
     the bridge gives no exact ids, plus moved flags the bridge does not
     export, plus the engine's queued shots (`queued`, see track_queued) where
@@ -753,8 +860,9 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
     loss during the player's turn left the end-turn prediction one high),
     plus the Burrowers underground (`underground`, see track_underground)
     that the bridge omits, as units with "underground": true at the tile they
-    dove from. Returns (state, patches); queued-shot and underground notes go
-    to `notes`."""
+    dove from, plus the pilot bonus of a unit that acted this turn and is
+    active again (`history`, see ui_limit_errors). Returns (state, patches);
+    queued-shot and underground notes go to `notes`."""
     out = json.loads(json.dumps(state))
     patches = {}
     # The bridge's "web" passes through a legacy guess that clears a web when
@@ -784,6 +892,25 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
         if u["uid"] in moved and "moved" not in u:
             u["moved"] = True
             patches[f"{u['uid']}.moved"] = True
+        # A unit that acted this turn and is active again holds a pilot's
+        # bonus, which the bridge cannot read: a bonus move (the engine's
+        # "bonus_shift", Pawn+0xac4: Shifty 1, Post_Move the base move) or
+        # Double_Shot's second action (moved, so no move). Anything else
+        # active after acting is taken as done.
+        seq = (history or {}).get(u["uid"], "")
+        if "A" in seq and u.get("active"):
+            skill = pilot_skill(u)
+            if skill == "Shifty" and seq.endswith("A"):
+                u["bonus_shift"] = 1
+            elif skill == "Post_Move" and seq.endswith("A"):
+                u["bonus_shift"] = int(u.get("base_move") or u.get("move") or 0)
+            elif skill == "Double_Shot" and seq == "A":
+                u["moved"] = True
+            else:
+                u["active"] = False
+            for k in ("bonus_shift", "moved", "active"):
+                if k in u and u[k] != state_unit_value(state, u["uid"], k):
+                    patches[f"{u['uid']}.{k}"] = u[k]
     if queued:
         found = override_queued(out, queued)
         for uid, (text, value) in found.items():
@@ -1133,7 +1260,10 @@ def play_turn(ctx) -> list:
     known = {u["uid"] for u in units(state)} | set(under)
     names = {u["uid"]: u.get("type", "?") for u in units(state)}
     names.update({uid: d.get("type", "?") for uid, d in under.items()})
-    moved: set = set()
+    # Each unit's moves and actions this turn (a re-run of `turn` mid-turn
+    # continues from them): the UI limits and the pilot bonuses.
+    history = run.unit_actions(state)
+    moved: set = {uid for uid, seq in history.items() if "M" in seq}
     anomalies: list = []
     # The engine's queued shots this turn (a re-run of `turn` mid-turn
     # continues from the ones tracked so far).
@@ -1144,7 +1274,7 @@ def play_turn(ctx) -> list:
 
     def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
-        solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under)
+        solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history)
         for n in notes:
             say(f"  note: {n}")
         path = run.save_state(solver_input, label, {"patches": patches} if patches else None)
@@ -1163,6 +1293,17 @@ def play_turn(ctx) -> list:
                             "time_s": (pred.get("stats") or {}).get("time_s")})
         return path, pred
 
+    def check_limits(pred: dict, st: dict) -> None:
+        errors = ui_limit_errors(pred.get("steps") or [], history, st, names)
+        if not errors:
+            return
+        run.event("ui_limits", errors)
+        text = "the plan breaks the game's per-turn action limits: " + "; ".join(errors)
+        if args.dry_run:
+            say(f"  REFUSED PLAN: {text}")
+            return
+        raise Anomaly(text)
+
     start = state
     given = load_plan(args.plan) if getattr(args, "plan", None) else None
     if given is not None:
@@ -1170,6 +1311,7 @@ def play_turn(ctx) -> list:
     _, pred = solve(state, "start", given)
     pred0 = pred
     print_plan(pred)
+    check_limits(pred, state)
     if args.dry_run:
         say("dry run: nothing executed")
         return anomalies
@@ -1191,9 +1333,15 @@ def play_turn(ctx) -> list:
             step = dict(step, uid=uid_map[step["uid"]])
             names.setdefault(step["uid"], names.get(steps[i]["uid"], "unit"))
         text = step_text(step, names)
+        if step["sub"] != "move":
+            blocked = ui_blocked(state, step["uid"])
+            if blocked:
+                raise Anomaly(f"{text}: the unit is {blocked}; the game's UI allows no weapon or Repair there")
         execute_step(bridge, step, state, ctx.loadout, None if getattr(ctx.args, "no_click", False) else ctx.click)
         if step["sub"] == "move":
             moved.add(step["uid"])
+        history[step["uid"]] = history.get(step["uid"], "") + ("M" if step["sub"] == "move" else "A")
+        run.save_unit_actions(state, history)
         executed.append((plan_id, step))
         state = bridge.settled_state()
         path = run.save_state(state, f"step{len(executed)}")
@@ -1226,6 +1374,7 @@ def play_turn(ctx) -> list:
         print_plan(pred)
         if pred.get("refused", -1) >= 0:
             raise Anomaly(f"the engine refused the plan: {pred.get('refused_reason')}")
+        check_limits(pred, state)
         steps, i, plan_id = pred["steps"], 0, plan_id + 1
         uid_map.clear()
     write_executed_plan(run, start, pred0, executed, resolves > 0)

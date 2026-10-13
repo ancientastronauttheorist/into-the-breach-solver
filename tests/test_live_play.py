@@ -575,6 +575,57 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual(self.run_cmd(["turn"]), 2)
         self.assertEqual(self.acting(), [])
 
+    # ---------------------------------------------------------------- UI action limits
+    # Live 2026-10-12 (run 20261012_172449): the engine took a Shifty
+    # mech's re-activation for a fresh action and planned it firing and
+    # repairing dozens of times; native FireWeapon accepted every one.
+
+    def test_a_plan_over_the_ui_limits_is_refused_before_acting(self):
+        st = base_state()
+        unit(st, 0)["pilot_id"] = "Pilot_Leader"  # Shifty
+        self.bridge(st)
+        plan = [
+            {"sub": "weapon", "uid": 0, "weapon": "Prime_Punchmech_B", "target": [5, 6], "target2": None,
+             "action": 0},
+            {"sub": "move", "uid": 0, "to": [6, 5], "action": 1},
+            {"sub": "weapon", "uid": 0, "weapon": "Prime_Punchmech_B", "target": [5, 5], "target2": None,
+             "action": 2},
+        ]
+        code, out = self.quiet(["turn"], FakeEngine(plan=plan))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.acting(), [])
+        self.assertIn("per-turn action limits", out)
+        self.assertIn("PunchMech#0 (Shifty) would act / move / act", out)
+        # The dry run reports it and still acts on nothing.
+        code, out = self.quiet(["turn", "--dry-run"], FakeEngine(plan=plan))
+        self.assertEqual(code, 0)
+        self.assertIn("REFUSED PLAN", out)
+        self.assertEqual(self.acting(), [])
+
+    def test_an_attack_from_smoke_is_refused(self):
+        st = base_state()
+        next(t for t in st["tiles"] if (t["x"], t["y"]) == (3, 4))["smoke"] = True
+        self.bridge(st)
+        code, out = self.quiet(["turn"], FakeEngine())
+        self.assertEqual(code, 1)
+        # The move into the smoke is played, the shot from it is not.
+        self.assertEqual(self.acting(), ["MOVE_NATIVE 0 3 4"])
+        self.assertIn("PunchMech#0 Prime_Lasermech_A at E5: the unit is on smoke", out)
+
+    def test_a_shifty_step_after_attacking_is_played(self):
+        st = base_state()
+        unit(st, 0)["pilot_id"] = "Pilot_Leader"
+        self.bridge(st)
+        plan = [
+            {"sub": "weapon", "uid": 0, "weapon": "Prime_Punchmech_B", "target": [5, 6], "target2": None,
+             "action": 0},
+            {"sub": "move", "uid": 0, "to": [6, 5], "action": 1},
+        ]
+        self.assertEqual(self.run_cmd(["turn"], FakeEngine(plan=plan)), 0)
+        self.assertEqual(self.acting(), ["ATTACK 0 0 5 6", "MOVE_NATIVE 0 6 5"])
+        meta = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertEqual(meta["unit_actions"]["units"], {"0": "AM"})
+
     def test_old_bridge_moved_flags_are_tracked(self):
         self.bridge()
         self.fb.damage = 2
@@ -1046,6 +1097,74 @@ class PatchStateGridTest(unittest.TestCase):
             fixed, patches = lp.patch_state(state, {}, set())
             self.assertEqual(fixed["grid_power"], 7)
             self.assertNotIn("grid_power", patches)
+
+
+class UiLimitTest(unittest.TestCase):
+    STATE = {"units": [{"uid": 0, "pilot_id": "Pilot_Leader"}, {"uid": 1, "pilot": {"id": "Pilot_Miner"}},
+                       {"uid": 2, "pilot_id": "Pilot_Aquatic"}, {"uid": 3, "pilot_id": "Pilot_Rust"}]}
+
+    @staticmethod
+    def steps(uid, seq):
+        return [{"uid": uid, "sub": "move" if c == "M" else "weapon"} for c in seq]
+
+    def errors(self, uid, seq, history=None):
+        return lp.ui_limit_errors(self.steps(uid, seq), history or {}, self.STATE)
+
+    def test_sequences(self):
+        ok = {0: ("", "M", "A", "MA", "AM", "MAM"), 1: ("MA", "A", "AA", "M"), 2: ("MAM", "AM"),
+              3: ("MA", "A", "M")}
+        bad = {0: ("AA", "AMA", "MAA", "MM"), 1: ("MAA", "AAA", "AM", "AAM"), 2: ("AA", "AMA"),
+               3: ("AA", "AM", "MM", "AMA")}
+        for uid, seqs in ok.items():
+            for seq in seqs:
+                self.assertEqual(self.errors(uid, seq), [], f"{uid} {seq}")
+        for uid, seqs in bad.items():
+            for seq in seqs:
+                self.assertEqual(len(self.errors(uid, seq)), 1, f"{uid} {seq}")
+
+    def test_history_counts(self):
+        # One action already done: the plan may not add another.
+        self.assertEqual(len(self.errors(0, "A", {0: "MA"})), 1)
+        self.assertEqual(self.errors(0, "M", {0: "MA"}), [])
+        self.assertIn("1 already done", self.errors(3, "A", {3: "A"})[0])
+        # A unit the plan leaves alone is not judged.
+        self.assertEqual(lp.ui_limit_errors([], {0: "AAA"}, self.STATE), [])
+
+    def test_ui_blocked_on_smoke_and_in_water(self):
+        def state(tile, **unit_fields):
+            u = {"uid": 0, "x": 1, "y": 1, "flying": False, "traits": {}}
+            u.update(unit_fields)
+            return {"units": [u], "tiles": [dict({"x": 1, "y": 1, "terrain": "ground", "terrain_id": 0}, **tile)]}
+        self.assertIsNone(lp.ui_blocked(state({}), 0))
+        self.assertEqual(lp.ui_blocked(state({"smoke": True}), 0), "on smoke")
+        self.assertIsNone(lp.ui_blocked(state({"smoke": True}, traits={"ignore_smoke": True}), 0))
+        self.assertIsNone(lp.ui_blocked(state({"smoke": True}, pilot_id="Pilot_Soldier"), 0))
+        self.assertEqual(lp.ui_blocked(state({"terrain": "water", "terrain_id": 3}), 0), "submerged")
+        self.assertIsNone(lp.ui_blocked(state({"terrain": "water", "terrain_id": 3}, flying=True), 0))
+        self.assertIsNone(lp.ui_blocked(state({"terrain": "lava", "terrain_id": 5}), 0))  # old name for ice
+        self.assertIsNone(lp.ui_blocked(state({}), 7))
+
+    def test_patch_state_restores_the_pilot_bonus(self):
+        state = {"units": [
+            {"uid": 0, "team": 1, "active": True, "moved": False, "pilot_id": "Pilot_Leader"},
+            {"uid": 1, "team": 1, "active": True, "moved": False, "pilot_id": "Pilot_Miner"},
+            {"uid": 2, "team": 1, "active": True, "moved": True, "base_move": 4, "move": 4,
+             "pilot_id": "Pilot_Aquatic"},
+            {"uid": 3, "team": 1, "active": True, "moved": False, "pilot_id": "Pilot_Rust"},
+            {"uid": 4, "team": 1, "active": True, "moved": False, "pilot_id": "Pilot_Leader"},
+        ]}
+        history = {0: "A", 1: "A", 2: "MA", 3: "A"}
+        fixed, patches = lp.patch_state(state, {}, {2}, history=history)
+        u = {x["uid"]: x for x in fixed["units"]}
+        self.assertEqual(u[0]["bonus_shift"], 1)
+        self.assertTrue(u[0]["active"])
+        self.assertTrue(u[1]["moved"])  # Double_Shot: one more action, no move
+        self.assertEqual(u[2]["bonus_shift"], 4)
+        self.assertFalse(u[3]["active"])  # no pilot bonus: done
+        self.assertNotIn("bonus_shift", u[4])  # has not acted
+        self.assertEqual(patches["0.bonus_shift"], 1)
+        self.assertEqual(patches["3.active"], False)
+        self.assertNotIn("bonus_shift", state["units"][0])
 
 
 class PatchStateWebTest(unittest.TestCase):
