@@ -77,11 +77,12 @@ constexpr uint32_t kLuaSeed = 1;
 
 // ScoreKey order (score.hpp). Until the threat tier was added, ObjectivesFailed
 // and MechHpLost were labelled the other way round here.
-const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "threat",
+const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "next_turn", "threat",
                                       "mech_hp", "objectives",  "kills", "vek_hp",            "position"};
 
-// The tiers in use: "threat" only with the threat tier.
-json score_json(const Score& s, bool threat = false) {
+// The tiers in use: "threat" only with the threat tier, "next_turn" only
+// with the lookahead.
+json score_json(const Score& s, TierSet threat = 0) {
   json j = json::object();
   for (int i = 0; i < kScoreKeys; ++i) {
     if (!tier_used(i, threat)) continue;
@@ -91,7 +92,7 @@ json score_json(const Score& s, bool threat = false) {
   return j;
 }
 
-json score_vector(const Score& s, bool threat = false) {
+json score_vector(const Score& s, TierSet threat = 0) {
   json v = json::array();
   for (int i = 0; i < kScoreKeys; ++i) {
     if (!tier_used(i, threat)) continue;
@@ -380,7 +381,7 @@ json phase_json(const PhaseResult& pr) {
 // and every action, after the player's turn and after the enemy phase.
 json simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& plan,
               const ScoreOptions& score_options = {}) {
-  const bool threat = score_options.tier_on();
+  const TierSet threat = tier_set(score_options);
   Board b = l.board;
   const ActionOptions opts = sim_options(l.ctx);
   json steps = json::array();
@@ -542,8 +543,8 @@ class PyEngine {
     const std::optional<Score> s = evaluate_plan(*main_, l.board, l.ctx, plan, so, &why);
     json out{{"ok", s.has_value()}};
     if (s) {
-      out["worst_case"] = score_json(*s, so.tier_on());
-      out["worst_case_vector"] = score_vector(*s, so.tier_on());
+      out["worst_case"] = score_json(*s, so.tiers());
+      out["worst_case_vector"] = score_vector(*s, so.tiers());
     } else {
       out["refused"] = why;
     }
@@ -580,12 +581,12 @@ class PyEngine {
     json plan = json::array();
     for (const PlayerAction& a : r.best.actions) plan.push_back(action_json(cur, a));
     out["plan"] = plan;
-    out["worst_case"] = score_json(r.best.worst_case, so.tier_on());
-    out["worst_case_vector"] = score_vector(r.best.worst_case, so.tier_on());
+    out["worst_case"] = score_json(r.best.worst_case, so.tiers());
+    out["worst_case_vector"] = score_vector(r.best.worst_case, so.tiers());
     out["contingent"] = r.best.contingent;
     out["proven_optimal"] = r.proven_optimal;
-    out["upper_bound"] = r.upper_bound ? score_json(*r.upper_bound, so.tier_on()) : json(nullptr);
-    out["upper_bound_vector"] = r.upper_bound ? score_vector(*r.upper_bound, so.tier_on()) : json(nullptr);
+    out["upper_bound"] = r.upper_bound ? score_json(*r.upper_bound, so.tiers()) : json(nullptr);
+    out["upper_bound_vector"] = r.upper_bound ? score_vector(*r.upper_bound, so.tiers()) : json(nullptr);
     out["proven_components"] = r.proven_components;
     out["chance_exact"] = r.chance_exact;
     out["timed_out"] = r.timed_out;
@@ -610,6 +611,14 @@ class PyEngine {
     so.objectives_first = opt.value("objectives_first", so.objectives_first);
     so.mech_grid = opt.value("mech_grid", so.mech_grid);
     so.mech_grid_turns = opt.value("mech_grid_turns", so.mech_grid_turns);
+    so.mech_grid_pilot = opt.value("mech_grid_pilot", so.mech_grid_pilot);
+    so.lookahead = opt.value("lookahead", so.lookahead);
+    so.lookahead_options.samples = std::max(1, opt.value("lookahead_samples", so.lookahead_options.samples));
+    if (opt.value("lookahead_reply", std::string("greedy")) == "idle") {
+      so.lookahead_options.reply = LookaheadOptions::Reply::Idle;
+    }
+    so.lookahead_options.sum = opt.value("lookahead_fold", std::string("worst")) == "sum";
+    so.lookahead_options.repair_skills = l.repair_skills;
     so.beam_width = opt.value("beam_width", so.beam_width);
     so.extra_death_seeds = opt.value("extra_death_seeds", so.extra_death_seeds);
     so.max_chance_leaves = opt.value("max_chance_leaves", so.max_chance_leaves);
@@ -653,7 +662,8 @@ PYBIND11_MODULE(itb_engine, m) {
            "Load a bridge state (JSON text): the board as the engine sees it, plus loader warnings.")
       .def("solve", &PyEngine::solve, py::arg("bridge_json"), py::arg("options_json") = "{}",
            "Perfect-turn search. Options: time_limit, max_time, min_tiers, node_limit, threads, beam_width, "
-           "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), mech_grid (default -1: off), mech_grid_turns, "
+           "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), mech_grid (default -1: off), mech_grid_turns, mech_grid_pilot, "
+           "lookahead, lookahead_samples, lookahead_reply ('greedy' | 'idle'), "
            "simulate (default true).")
       .def("simulate", &PyEngine::simulate_plan, py::arg("bridge_json"), py::arg("plan_json"),
            py::call_guard<py::gil_scoped_release>(),

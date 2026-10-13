@@ -50,6 +50,7 @@
 #include "ai_tool.hpp"
 #include "predict_tool.hpp"
 #include "replay.hpp"
+#include "lookahead_tool.hpp"
 #include "solve_tool.hpp"
 
 namespace fs = std::filesystem;
@@ -60,7 +61,8 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
-               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns]] [--threat-eval] | "
+               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] [--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle]] [--threat-eval] | "
+               "--lookahead-study (<recording.json> | DIR) [--time S] [--next-time S] [--threads N] [--samples N] [--seed N] [--compare [--skip-base] [--la-samples N] [--la-reply greedy|idle] [--la-sum]] [--no-spawns] [--json FILE] [--verbose] | "
                "--threat-check DIR | --ai DIR [--samples N] [--show N] | "
                "--predict <state.json> [--actions JSON|@FILE] [--no-enemy] [--branches [N]] [--json FILE] | "
                "--diff-weapons [DIR] [--random N] [--seed S] [--weapon ID] [--all-tables] [--ports])\n";
@@ -439,6 +441,16 @@ int main(int argc, char** argv) {
         o.mech_grid = std::stoi(args[++i]);
       } else if (args[i] == "--mech-grid-turns") {
         o.mech_grid_turns = true;
+      } else if (args[i] == "--mech-grid-pilot") {
+        o.mech_grid_pilot = true;
+      } else if (args[i] == "--lookahead") {
+        o.lookahead = true;
+      } else if (args[i] == "--lookahead-samples" && i + 1 < args.size()) {
+        o.lookahead_samples = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--lookahead-reply" && i + 1 < args.size()) {
+        o.lookahead_idle = args[++i] == "idle";
+      } else if (args[i] == "--lookahead-fold" && i + 1 < args.size()) {
+        o.lookahead_sum = args[++i] == "sum";
       } else if (args[i] == "--kills-tier") {
         o.kills_tier = true;
       } else if (args[i] == "--threat-eval") {
@@ -448,6 +460,46 @@ int main(int argc, char** argv) {
       }
     }
     return tools::run_solve(o);
+  }
+  if (args[0] == "--lookahead-study") {
+    if (args.size() < 2) return usage();
+    tools::LookaheadStudyOptions o;
+    o.target = args[1];
+    o.game = game;
+    for (size_t i = 2; i < args.size(); ++i) {
+      if (args[i] == "--time" && i + 1 < args.size()) {
+        o.time = std::stod(args[++i]);
+      } else if (args[i] == "--next-time" && i + 1 < args.size()) {
+        o.next_time = std::stod(args[++i]);
+      } else if (args[i] == "--threads" && i + 1 < args.size()) {
+        o.threads = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--samples" && i + 1 < args.size()) {
+        o.samples = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--seed" && i + 1 < args.size()) {
+        o.seed = static_cast<uint32_t>(std::stoul(args[++i]));
+      } else if (args[i] == "--compare") {
+        o.compare = true;
+      } else if (args[i] == "--no-spawns") {
+        o.la.sample_spawns = false;
+        o.solver_la.sample_spawns = false;
+      } else if (args[i] == "--verbose") {
+        o.verbose = true;
+      } else if (args[i] == "--skip-base") {
+        o.skip_base = true;
+      } else if (args[i] == "--la-sum") {
+        o.solver_la.sum = true;
+      } else if (args[i] == "--la-samples" && i + 1 < args.size()) {
+        o.solver_la.samples = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--la-reply" && i + 1 < args.size()) {
+        const std::string v = args[++i];
+        o.solver_la.reply = v == "idle" ? LookaheadOptions::Reply::Idle : LookaheadOptions::Reply::Greedy;
+      } else if (args[i] == "--json" && i + 1 < args.size()) {
+        o.json_out = args[++i];
+      } else {
+        return usage();
+      }
+    }
+    return tools::run_lookahead_study(o);
   }
   if (args[0] == "--diff-weapons") {
     tools::DiffWeaponsOptions o;

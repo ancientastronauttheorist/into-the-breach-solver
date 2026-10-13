@@ -7,8 +7,10 @@
 //
 //   1. grid and buildings: grid power lost, then building HP lost
 //   2. mech survival:      mechs destroyed, then objective stars failed
-//                          (objectives.hpp), then [next-turn threat, only
-//                          with ScoreOptions::threat_tier], then mech HP lost
+//                          (objectives.hpp), then [next-turn loss, only with
+//                          the lookahead (lookahead.hpp)], then [next-turn
+//                          threat, only with ScoreOptions::threat_tier], then
+//                          mech HP lost
 //   3. objective progress  (objectives.hpp)
 //   4. kills and damage:   Vek killed, then Vek HP removed
 //   5. position:           end-of-turn position quality (objectives.hpp)
@@ -35,6 +37,11 @@ enum class ScoreKey : int {
   BuildingHpLost,    // -(building HP lost, populated or not)
   MechsLost,         // -(mechs destroyed) (+1 for a revived corpse)
   ObjectivesFailed,  // -(objective stars lost this turn)
+  // The next turn's forced loss as the lookahead estimates it
+  // (lookahead.hpp next_turn_value: grid, then mechs, then building HP).
+  // Never set by score_turn (it needs the engine): the solver fills it in
+  // with SolveOptions::lookahead. Off: 0 and left out like Threat.
+  NextTurn,
   // -(enemies able to attack a building next turn, threat.hpp). Always 0
   // unless ScoreOptions::threat_tier is set; when it is not, the tier is left
   // out of every printed score and tier count (score_tiers).
@@ -76,7 +83,25 @@ struct ScoreOptions {
   // one), so on a mission's last turn a mech only outranks building HP.
   bool mech_grid_turns = false;
   bool mech_exchange() const { return mech_grid >= 0; }
+  // With mech_grid: a mech's rate is at least min(mech_grid, its pilot's
+  // level) (pilot_level 0-2), turns left or not. A pilot dies with its mech
+  // for the rest of the run (the mech comes back pilotless next mission), so
+  // on a mission's last turns a levelled pilot is worth more than the turns
+  // left say. Rates then differ per mech (mech_rate); see mech_grid_slot_w.
+  bool mech_grid_pilot = false;
+  // The NextTurn tier is in use (the solver fills it in; score_turn leaves
+  // it at 0). Only tier counts and printing read this.
+  bool next_turn = false;
 };
+
+// Optional tiers in use, as a bit set: Threat (threat_tier or threat_kills)
+// and NextTurn (the lookahead). Every other tier is always in use.
+using TierSet = unsigned;
+inline constexpr TierSet kTierThreat = 1u;
+inline constexpr TierSet kTierNextTurn = 2u;
+inline TierSet tier_set(const ScoreOptions& o) {
+  return (o.tier_on() ? kTierThreat : 0u) | (o.next_turn ? kTierNextTurn : 0u);
+}
 
 // Larger than any spread of the threat / kills part of the slot (threats and
 // kills are each below 100 on an 8x8 board, so that part lies in
@@ -96,25 +121,40 @@ inline constexpr int kGridOutPenalty = 1 << 20;
 // The exchange rate on this board (the board at the start of the turn): -1
 // when off, else mech_grid, capped by the turns left with mech_grid_turns.
 int mech_grid_rate(const Board& before, const ScoreOptions& options);
+// The rate of one mech on the board at the start of the turn: the board's
+// rate, raised to min(mech_grid, pilot level) with mech_grid_pilot. -1 when
+// the exchange is off.
+int mech_rate(const Board& before, const Pawn& mech, const ScoreOptions& options);
 // The GridLost slot with the exchange at `rate` (>= 0): grid and mechs are
 // net changes (ScoreKey::GridLost, MechsLost), grid_after the grid power at
 // the end of the turn.
 inline int32_t mech_grid_slot(int rate, int grid, int mechs, int grid_after) {
   return 2 * grid + (2 * rate + 1) * mechs - (grid_after <= 0 ? kGridOutPenalty : 0);
 }
+// The same with per-mech rates: `weighted_mechs` is the sum over the mechs
+// at the start of (2 * rate + 1) * (alive after - alive before). Equal to
+// mech_grid_slot when every mech has the same rate.
+inline int32_t mech_grid_slot_w(int grid, int weighted_mechs, int grid_after) {
+  return 2 * grid + weighted_mechs - (grid_after <= 0 ? kGridOutPenalty : 0);
+}
 
 // The tiers in use, in rank order, as ScoreKey indices: every key, minus
-// Threat when the threat tier is off. Tier counts (SolveOptions::
-// min_proven_tiers, SolveResult::proven_components) and printed scores
-// count these.
-inline bool tier_used(int key, bool threat_tier) {
-  return threat_tier || key != static_cast<int>(ScoreKey::Threat);
+// Threat when the threat tier is off and NextTurn when the lookahead is off
+// (a bool argument means the threat tier alone, as before NextTurn). Tier
+// counts (SolveOptions::min_proven_tiers, SolveResult::proven_components)
+// and printed scores count these.
+inline bool tier_used(int key, TierSet tiers) {
+  if (key == static_cast<int>(ScoreKey::Threat)) return (tiers & kTierThreat) != 0;
+  if (key == static_cast<int>(ScoreKey::NextTurn)) return (tiers & kTierNextTurn) != 0;
+  return true;
 }
-inline int used_tier_count(bool threat_tier) { return threat_tier ? kScoreKeys : kScoreKeys - 1; }
+inline int used_tier_count(TierSet tiers) {
+  return kScoreKeys - ((tiers & kTierThreat) ? 0 : 1) - ((tiers & kTierNextTurn) ? 0 : 1);
+}
 // The number of leading ScoreKey components that hold the first `tiers`
-// tiers in use (Threat, constant when off, is only counted when it is used
-// or lies before a used tier).
-int components_for_tiers(int tiers, bool threat_tier);
+// tiers in use (an unused optional tier, constant, is only counted when it
+// lies before a used tier).
+int components_for_tiers(int tiers, TierSet used);
 // Short tier names ("grid", "bldg_hp", ...), by ScoreKey index.
 const char* score_key_name(int key);
 
@@ -129,7 +169,7 @@ struct Score {
   bool operator==(const Score&) const = default;
 
   // "grid=0 bldg_hp=-1 ...": the tiers in use.
-  std::string describe(bool threat_tier = false) const;
+  std::string describe(TierSet tiers = 0) const;
 };
 
 // Scores the turn from `before` (start of the player's turn) to `after` (end

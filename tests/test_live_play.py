@@ -578,6 +578,56 @@ class LivePlayTest(unittest.TestCase):
                       lp.plan_summary({"worst_case": {"grid": -2}, "mech_grid_rate": 1, "stats": {}}))
         self.assertNotIn("mech exchange", lp.plan_summary({"worst_case": {"grid": -2}, "stats": {}}))
 
+    def test_lookahead_is_passed_to_every_solve(self):
+        self.bridge()
+        self.fb.damage = 2  # a mismatch: re-solve
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--lookahead", "--lookahead-samples", "4", "--lookahead-reply", "idle",
+                      "--mech-grid", "2", "--mech-grid-turns", "--mech-grid-pilot"], eng)
+        want = {"mech_grid": 2, "mech_grid_turns": True, "mech_grid_pilot": True, "lookahead": True,
+                "lookahead_samples": 4, "lookahead_reply": "idle"}
+        self.assertEqual(eng.tiers, [want] * 2)
+
+    def test_lookahead_defaults_send_only_the_switch(self):
+        self.bridge()
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--lookahead"], eng)
+        self.assertEqual(eng.tiers, [{"lookahead": True}])
+
+    def test_pilot_floor_needs_the_exchange(self):
+        self.bridge()
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--mech-grid-pilot"], eng)
+        self.assertEqual(eng.tiers, [{}])
+
+    def test_lookahead_request(self):
+        sent = []
+        eng = lp.Engine.__new__(lp.Engine)
+        eng.threads = 4
+        eng.request = lambda req: sent.append(req) or {"ok": True}
+        eng.solve(Path("s.json"), 10)
+        eng.solve(Path("s.json"), 10, lookahead=True)
+        eng.solve(Path("s.json"), 10, lookahead=True, lookahead_samples=3, lookahead_reply="greedy",
+                  lookahead_fold="sum")
+        eng.solve(Path("s.json"), 10, mech_grid=2, mech_grid_turns=True, mech_grid_pilot=True)
+        eng.solve(Path("s.json"), 10, mech_grid_pilot=True)
+        for key in ("lookahead", "lookahead_samples", "lookahead_reply", "mech_grid_pilot"):
+            self.assertNotIn(key, sent[0])
+        self.assertEqual(sent[1]["lookahead"], True)
+        self.assertNotIn("lookahead_samples", sent[1])
+        self.assertEqual((sent[2]["lookahead_samples"], sent[2]["lookahead_reply"], sent[2]["lookahead_fold"]),
+                         (3, "greedy", "sum"))
+        self.assertTrue(sent[3]["mech_grid_pilot"])
+        self.assertNotIn("mech_grid_pilot", sent[4])  # only with the exchange
+        summary = lp.plan_summary({"worst_case": {"grid": 0, "next_turn": -1025}, "stats": {},
+                                   "next_turn": {"grid": 1, "mechs": 0, "building_hp": 1, "mission_over": False,
+                                                 "samples": [{}, {}]}})
+        self.assertIn("next_turn=-1025", summary)
+        self.assertIn("next turn, worst of 2 AI samples: grid -1", summary)
+        self.assertIn("per mech #0 1, #1 3", lp.plan_summary(
+            {"worst_case": {"grid": -2}, "mech_grid_rate": 0, "mech_rates": {"0": 0, "1": 1}, "stats": {}}))
+        self.assertEqual(lp.SCORE_TIERS.index("next_turn"), lp.SCORE_TIERS.index("objectives_failed") + 1)
+
     def test_native_only_execution(self):
         self.bridge()
         self.assertEqual(self.run_cmd(["turn"]), 0)
@@ -1106,6 +1156,23 @@ class ItbLiveTest(unittest.TestCase):
             self.skipTest("no game install (set ITB_GAME_DIR)")
         self.assertTrue(out["ok"], out)
         return out
+
+    def test_solve_with_the_lookahead(self):
+        """itb_live solve --lookahead on an archived live state: the
+        next_turn tier, its estimate of the plan's end board and the
+        lookahead's counters; off, none of them."""
+        state = REPO / "engine" / "tests" / "fixtures" / "live_filler_t2_solve_input.json"
+        off = self.itb_live("solve", str(state), "--time", "1", "--threads", "1")
+        self.assertNotIn("next_turn", off["worst_case"])
+        self.assertNotIn("next_turn", off)
+        self.assertNotIn("lookahead_evals", off["stats"])
+        on = self.itb_live("solve", str(state), "--time", "2", "--threads", "1", "--lookahead",
+                           "--lookahead-samples", "2")
+        self.assertIn("next_turn", on["worst_case"])
+        self.assertLessEqual(on["worst_case"]["next_turn"], 0)
+        self.assertIn("lookahead_evals", on["stats"])
+        self.assertEqual(len(on["next_turn"]["samples"]), 2)
+        self.assertIn("next_turn", on["predicted_score"])
 
     def test_end_of_turn_prediction_uses_the_engines_queued_shots(self):
         """Live 2026-10-10 m36 turn 2 (Mission_Filler), end to end: the

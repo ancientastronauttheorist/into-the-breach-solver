@@ -17,6 +17,7 @@
 #include "itb/board_hash.hpp"
 #include "itb/engine.hpp"
 #include "itb/game_data.hpp"
+#include "itb/lookahead.hpp"
 #include "itb/lua_host.hpp"
 #include "itb/movement.hpp"
 #include "itb/recording.hpp"
@@ -135,6 +136,9 @@ struct Naive {
   const Board& root;
   const TurnContext& base;
   ScoreOptions score_options{};
+  // With the lookahead: the NextTurn tier of every chance outcome (the
+  // definition: lookahead_loss, worst over its samples).
+  const LookaheadOptions* lookahead = nullptr;
   uint64_t evaluations = 0;
 
   void hooks(Choices& c, ActionOptions& o, TurnContext* tc) {
@@ -164,7 +168,9 @@ struct Naive {
       e.lua().seed(1);
       const PhaseResult pr = e.end_turn(after, tc);
       ++evaluations;
-      worst = std::min(worst, score_turn(root, after, &tc, &pr, score_options));
+      Score s = score_turn(root, after, &tc, &pr, score_options);
+      if (lookahead) s[ScoreKey::NextTurn] = lookahead_value(e, root, after, &pr, tc, *lookahead);
+      worst = std::min(worst, s);
     });
     return worst;
   }
@@ -821,6 +827,114 @@ TEST_CASE("solver: tiny boards with the mech exchange match a naive exhaustive e
   CHECK(checked == kTrials);
   MESSAGE("mech exchange brute-force boards: " << checked << ", a mech lost by the plain order: " << lost
                                               << ", kept for grid with mech_grid 1: " << traded);
+}
+
+TEST_CASE("solver: tiny boards with the lookahead match a naive exhaustive enumeration") {
+  NEED_ENGINE();
+  // The NextTurn tier is a function of the end board; with it the search's
+  // lazy evaluation, per-sample cutoffs, caches and the tier's cap (0) must
+  // still give the exhaustive value.
+  std::mt19937 rng(20261013);
+  int checked = 0, nonzero = 0;
+  constexpr int kTrials = 24;
+  LookaheadOptions la;
+  la.samples = 2;
+  for (int trial = 0; trial < kTrials; ++trial) {
+    la.sum = trial % 2 == 1;  // both folds
+    Board b = tiny_board(rng);
+    // Fewer answers, so that next turns lose something: one more Vek, no
+    // queued attack yet, and the first mech done for this turn.
+    for (int i = 0; i < kTileCount; ++i) {
+      const Point p = Point::from_index(i);
+      if (p.x < 4 && p.y < 4 && !b.pawn_at(p) && b.tile(p).terrain != Terrain::Building) {
+        place(b, "Firefly1", p);
+        break;
+      }
+    }
+    for (Pawn& p : b.pawns()) {
+      if (p.mech) {
+        p.active = false;
+        break;
+      }
+    }
+    const TurnContext ctx = context();
+    Naive naive{E, b, ctx};
+    naive.lookahead = &la;
+    naive.score_options.next_turn = true;
+    const Score want = naive.value(b);
+    if (want[ScoreKey::NextTurn] < 0) ++nonzero;
+    for (bool tt : {true, false}) {
+      SolveOptions o = quick(300);
+      o.lookahead = true;
+      o.lookahead_options = la;
+      o.use_tt = tt;
+      o.use_bounds = tt;
+      o.order_children = tt;
+      o.beam_width = tt ? 6 : 0;
+      const SolveResult r = solve_turn(E, b, ctx, o);
+      INFO("trial " << trial << " tt " << tt << " naive " << want.describe(kTierNextTurn) << " solver "
+                    << r.best.worst_case.describe(kTierNextTurn));
+      CHECK(r.proven_optimal);
+      CHECK(r.best.worst_case == want);
+    }
+    ++checked;
+  }
+  CHECK(checked == kTrials);
+  MESSAGE("lookahead brute-force boards: " << checked << ", with a next-turn loss: " << nonzero);
+}
+
+TEST_CASE("solver: tiny boards with the pilot floor match a naive exhaustive enumeration") {
+  NEED_ENGINE();
+  // The mission's last turn, mech_grid 2 capped by the turns left (0), each
+  // mech's pilot at level 0-2: per-mech rates in the slot and in its bound.
+  std::mt19937 rng(20261014);
+  int checked = 0;
+  constexpr int kTrials = 12;
+  for (int trial = 0; trial < kTrials; ++trial) {
+    Board b = tiny_board(rng);
+    b.turn = b.total_turns;
+    b.grid_power = 2 + static_cast<int>(rng() % 2u);
+    std::vector<Point> mechs;
+    for (Pawn& p : b.pawns()) {
+      if (!p.mech) continue;
+      p.hp = static_cast<int8_t>(1 + rng() % 2u);
+      p.pilot_level = static_cast<int8_t>(rng() % 3u);
+      mechs.push_back(p.pos);
+    }
+    for (Pawn& p : b.pawns()) {
+      if (p.team != Team::Enemy) continue;
+      for (auto it = mechs.begin(); it != mechs.end(); ++it) {
+        if (std::abs(it->x - p.pos.x) + std::abs(it->y - p.pos.y) == 1) {
+          p.queued = QueuedShot{0, p.pos, *it};
+          mechs.erase(it);
+          break;
+        }
+      }
+    }
+    const TurnContext ctx = context();
+    Naive naive{E, b, ctx};
+    naive.score_options.mech_grid = 2;
+    naive.score_options.mech_grid_turns = true;
+    naive.score_options.mech_grid_pilot = true;
+    const Score want = naive.value(b);
+    for (bool tt : {true, false}) {
+      SolveOptions o = quick(120);
+      o.mech_grid = 2;
+      o.mech_grid_turns = true;
+      o.mech_grid_pilot = true;
+      o.use_tt = tt;
+      o.use_bounds = tt;
+      o.order_children = tt;
+      o.beam_width = tt ? 6 : 0;
+      const SolveResult r = solve_turn(E, b, ctx, o);
+      INFO("trial " << trial << " tt " << tt << " naive " << want.describe() << " solver "
+                    << r.best.worst_case.describe());
+      CHECK(r.proven_optimal);
+      CHECK(r.best.worst_case == want);
+    }
+    ++checked;
+  }
+  CHECK(checked == kTrials);
 }
 
 // ---- Threads and recorded boards ----------------------------------------------------
