@@ -69,7 +69,11 @@ Rust fallback, after editing `rust_solver/src/*.rs`:
   bridge, checks it against the prediction, re-solves on a mismatch; `mission`
   stops at the first anomaly. `--dry-run` never acts. Runs are archived in
   `recordings/live/<time>/`, with the game's save files at every turn start;
-  `restore --mission MM --turn TT` loads one back into the game.
+  `restore --mission MM --turn TT` loads one back into the game. `deploy`
+  places the mechs with a heuristic, then moves them to the tiles the
+  engine's deployment search picks (`itb_live deploy`: the enemy phase and
+  AI before turn 1 for sampled AI seeds, each turn-1 board solved;
+  `--heuristic` skips it).
 - **Old bot combat:** `python3 game_loop.py auto_turn --time-limit N` reads the board,
   solves with the C++ engine (`ITB_SOLVER=cpp`, the default; `rust` is the
   fallback), executes each sub-action, verifies it against the prediction and

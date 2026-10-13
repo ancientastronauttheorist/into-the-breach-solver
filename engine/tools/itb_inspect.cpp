@@ -17,6 +17,8 @@
 //               [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns]]
 //               [--threat-eval]
 //                                               the perfect-turn search vs the recorded plan
+//   itb_inspect [--game DIR] --ai DIR [--samples N] [--show N]
+//                                               the enemy AI's planning vs the live recordings
 //   itb_inspect [--game DIR] --threat-check DIR
 //                                               the next-turn threat proxy vs the engine, and its cost
 //   itb_inspect [--game DIR] --predict <state.json> [--actions JSON|@FILE] [--no-enemy]
@@ -45,6 +47,7 @@
 #include "itb/lua_host.hpp"
 #include "itb/movement.hpp"
 #include "itb/recording.hpp"
+#include "ai_tool.hpp"
 #include "predict_tool.hpp"
 #include "replay.hpp"
 #include "solve_tool.hpp"
@@ -58,7 +61,7 @@ int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
                "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns]] [--threat-eval] | "
-               "--threat-check DIR | "
+               "--threat-check DIR | --ai DIR [--samples N] [--show N] | "
                "--predict <state.json> [--actions JSON|@FILE] [--no-enemy] [--branches [N]] [--json FILE] | "
                "--diff-weapons [DIR] [--random N] [--seed S] [--weapon ID] [--all-tables] [--ports])\n";
   return 2;
@@ -367,6 +370,24 @@ int main(int argc, char** argv) {
       }
     }
     return tools::run_replay(o);
+  }
+  if (args[0] == "--ai") {
+    if (args.size() < 2) return usage();
+    tools::AiToolOptions o;
+    o.dir = args[1];
+    o.game = game;
+    for (size_t i = 2; i < args.size(); ++i) {
+      if (args[i] == "--samples" && i + 1 < args.size()) {
+        o.samples = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--show" && i + 1 < args.size()) {
+        o.show = std::stoi(args[++i]);
+      } else if (args[i] == "--verbose") {
+        o.verbose = true;
+      } else {
+        return usage();
+      }
+    }
+    return tools::run_ai_check(o);
   }
   if (args[0] == "--threat-check") {
     if (args.size() < 2) return usage();

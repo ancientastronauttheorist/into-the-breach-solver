@@ -225,6 +225,19 @@ class LuaHost {
                            std::optional<uint32_t> seed = std::nullopt,
                            const Pawn* selected = nullptr, LuaCall* call = nullptr);
 
+  // Enemy AI scoring (ai_phase.hpp). Skill::GetTargetScore's Lua part:
+  // CallMethod(weapon, "GetTargetScore", origin, target) with `shooter`
+  // selected (the Lua `Pawn` global is the planning pawn), as an int
+  // (lua_tointeger). 0 with call->ok false on a Lua error or a result that
+  // is not a number (luabind would throw).
+  int target_score(const Board& board, const Pawn& shooter, std::string_view weapon, Point origin,
+                   Point target, LuaCall* call = nullptr);
+  // AiPlanner::ScorePositioning's Lua part: the global
+  // ScorePositioning(point, pawn) with `pawn` selected. The native wrapper
+  // returns 0 without calling Lua for a pawn whose move speed is 0; that
+  // check is the caller's. 0 with call->ok false on an error.
+  int score_positioning(const Board& board, const Pawn& pawn, Point point, LuaCall* call = nullptr);
+
   // LuaEnv::DirectLua for a SpaceDamage sScript. The board is read-only;
   // mutations come back as LuaCall::writes for the executor to apply.
   LuaCall run_script(const Board& board, std::string_view code, const Pawn* selected = nullptr);
@@ -258,6 +271,10 @@ class LuaHost {
   std::string native_binding(std::string_view weapon);
   // Calls answered by a port so far.
   uint64_t native_calls() const;
+  // Temporary pawns Board:GetDeployLocScore has created so far (one per call
+  // on a free tile). Natively each is a constructed Pawn, which draws from the
+  // C library's rand() (Pawn::Pawn's sub_rand): the AI phase accounts for it.
+  uint64_t temp_pawns() const;
 
   // Profiling: count every CallMethod(table, method) dispatched to Lua.
   void set_call_counting(bool on);

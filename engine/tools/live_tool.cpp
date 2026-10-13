@@ -5,6 +5,9 @@
 //            [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] [--out FILE] [--pretty]
 //   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--threat-tier] [--out FILE] [--pretty]
 //   itb_live [--game DIR] board <state.json> [--pretty]
+//   itb_live [--game DIR] deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N]
+//            [--screen-samples N] [--solve-time S] [--solve-nodes N] [--seed N]
+//            [--placements JSON|@FILE] [--always JSON|@FILE] [--out FILE] [--pretty]
 //   itb_live [--game DIR] serve [--threads N]
 //
 // `serve` loads the engines once, prints {"ok": true, "ready": true, ...},
@@ -27,6 +30,7 @@
 #include <thread>
 #include <utility>
 
+#include "itb/deploy.hpp"
 #include "itb/engine.hpp"
 #include "itb/environment.hpp"
 #include "itb/game_data.hpp"
@@ -332,6 +336,74 @@ std::vector<PlayerAction> parse_plan(const json& j) {
   return plan;
 }
 
+// The bridge's drop zone (drop_zone, else deployment_zone) of a state file.
+std::vector<Point> read_drop_zone(const fs::path& path) {
+  std::ifstream in(path);
+  json j = json::parse(in, nullptr, false);
+  if (j.is_discarded()) throw std::invalid_argument("state is not valid JSON");
+  const json* st = &j;
+  if (j.contains("data") && j["data"].is_object()) {
+    st = &j["data"];
+    if (st->contains("bridge_state")) st = &(*st)["bridge_state"];
+  }
+  std::vector<Point> zone;
+  for (const char* key : {"drop_zone", "deployment_zone"}) {
+    if (!st->contains(key) || !(*st)[key].is_array() || (*st)[key].empty()) continue;
+    for (const json& p : (*st)[key]) {
+      if (p.is_array() && p.size() >= 2) zone.push_back(Point{p[0].get<int>(), p[1].get<int>()});
+    }
+    break;
+  }
+  return zone;
+}
+
+// [[[x,y], ...], ...]: placements, one tile per mech (ascending uid).
+std::vector<std::vector<Point>> parse_placements(const json& j) {
+  if (!j.is_array()) throw std::invalid_argument("placements must be a list of tile lists");
+  std::vector<std::vector<Point>> out;
+  for (const json& pl : j) {
+    if (!pl.is_array()) throw std::invalid_argument("a placement must be a list of [x, y] tiles");
+    std::vector<Point> tiles;
+    for (const json& p : pl) {
+      const Point q = json_point(p);
+      if (!q.valid()) throw std::invalid_argument("placement tiles must be [x, y] on the board");
+      tiles.push_back(q);
+    }
+    out.push_back(std::move(tiles));
+  }
+  return out;
+}
+
+json summary_json(const DeploySummary& s) {
+  json mean = json::object();
+  for (int i = 0; i < kScoreKeys && i < static_cast<int>(s.mean.size()); ++i) {
+    if (i == static_cast<int>(ScoreKey::Threat)) continue;
+    mean[kTierNames[i]] = s.mean[static_cast<size_t>(i)];
+  }
+  return json{{"worst_case", score_json(s.worst)},
+              {"tier_min", score_json(s.tier_min)},
+              {"mean", mean},
+              {"outcomes", s.outcomes},
+              {"seeds", s.seeds}};
+}
+
+json candidate_json(const DeployCandidate& c, const std::vector<int32_t>& mechs) {
+  json tiles = json::array();
+  json by_uid = json::object();
+  for (size_t i = 0; i < c.tiles.size(); ++i) {
+    tiles.push_back(point_json(c.tiles[i]));
+    if (i < mechs.size()) by_uid[std::to_string(mechs[i])] = point_json(c.tiles[i]);
+  }
+  json visual = json::array();
+  for (Point p : c.tiles) visual.push_back(to_visual(p));
+  return json{{"tiles", tiles},
+              {"visual", visual},
+              {"by_uid", by_uid},
+              {"screen", summary_json(c.screen)},
+              {"value", c.value ? summary_json(*c.value) : json(nullptr)},
+              {"all_proven", c.all_proven}};
+}
+
 }  // namespace
 
 json live_board_json(const Board& b) {
@@ -433,8 +505,8 @@ json LiveSession::handle(const json& request) {
     if (!request.is_object()) throw std::invalid_argument("a request must be a JSON object");
     const std::string cmd = request.value("cmd", std::string());
     if (cmd == "ping") return json{{"ok", true}, {"format", kLiveFormat}, {"cmd", cmd}, {"threads", threads()}};
-    if (cmd != "board" && cmd != "solve" && cmd != "predict") {
-      throw std::invalid_argument("unknown cmd '" + cmd + "' (board, solve, predict, ping)");
+    if (cmd != "board" && cmd != "solve" && cmd != "predict" && cmd != "deploy") {
+      throw std::invalid_argument("unknown cmd '" + cmd + "' (board, solve, predict, deploy, ping)");
     }
     if (!request.contains("state") || !request["state"].is_string()) {
       throw std::invalid_argument("'state' must be the path of a bridge state file");
@@ -444,6 +516,50 @@ json LiveSession::handle(const json& request) {
     json out = header(l, cmd, state);
     if (cmd == "board") {
       out["board"] = live_board_json(l.board);
+      return out;
+    }
+    if (cmd == "deploy") {
+      // Deployment search (deploy.hpp): the mechs must be on the board (a
+      // provisional placement), the drop zone comes from the state.
+      const std::vector<Point> zone = read_drop_zone(state);
+      if (zone.empty()) throw std::invalid_argument("the state has no drop_zone / deployment_zone");
+      std::vector<std::string> warnings;
+      if (l.board.turn != 0) warnings.push_back("the state is not at deployment (turn " + std::to_string(l.board.turn) + ")");
+      DeployOptions o;
+      o.time_limit_s = request.value("time_limit", o.time_limit_s);
+      o.screen_samples = request.value("screen_samples", o.screen_samples);
+      o.finalists = request.value("finalists", o.finalists);
+      o.samples = request.value("samples", o.samples);
+      o.solve_time_s = request.value("solve_time", o.solve_time_s);
+      o.solve_nodes = request.value("solve_nodes", o.solve_nodes);
+      o.seed = request.value("seed", o.seed);
+      if (request.contains("placements")) o.placements = parse_placements(request["placements"]);
+      if (request.contains("always")) o.always = parse_placements(request["always"]);
+      o.solve.repair_skills = l.repair_skills;
+      const int beam = request.value("beam_width", -1);
+      if (beam >= 0) o.solve.beam_width = beam;
+      const int want = request.value("threads", threads());
+      ensure_threads(want);
+      for (int i = 0; i < want - 1 && i < static_cast<int>(helpers_.size()); ++i) {
+        o.helper_engines.push_back(helpers_[static_cast<size_t>(i)].get());
+      }
+      const DeployResult r = deploy_search(*main_, l.board, l.ctx, zone, o);
+      for (const std::string& w : r.warnings) warnings.push_back(w);
+      out["ok"] = r.ok;
+      if (!r.ok) out["error"] = r.error;
+      out["mechs"] = r.mechs;
+      json z = json::array();
+      for (Point p : r.zone) z.push_back(point_json(p));
+      out["zone"] = z;
+      out["sets"] = r.sets;
+      out["solves"] = r.solves;
+      out["timed_out"] = r.timed_out;
+      out["time"] = json{{"screen_s", r.screen_s}, {"finalists_s", r.finalist_s}, {"total_s", r.total_s}};
+      out["best"] = r.best ? candidate_json(*r.best, r.mechs) : json(nullptr);
+      json fin = json::array();
+      for (const DeployCandidate& c : r.finalists) fin.push_back(candidate_json(c, r.mechs));
+      out["finalists"] = fin;
+      out["warnings"] = warnings;
       return out;
     }
     std::vector<std::string> warnings;
@@ -516,7 +632,10 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
                "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] | "
-               "predict <state.json> --plan JSON|@FILE | board <state.json> | serve [--threads N]) "
+               "predict <state.json> --plan JSON|@FILE | board <state.json> | "
+               "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
+               "[--solve-time S] [--solve-nodes N] [--seed N] [--placements JSON|@FILE] [--always JSON|@FILE] | "
+               "serve [--threads N]) "
                "[--out FILE] [--pretty]\n";
   return 2;
 }
@@ -563,7 +682,7 @@ int run_live(int argc, char** argv) {
   bool pretty = false;
   fs::path out_path;
   size_t i = 1;
-  if (cmd == "solve" || cmd == "predict" || cmd == "board") {
+  if (cmd == "solve" || cmd == "predict" || cmd == "board" || cmd == "deploy") {
     if (args.size() < 2) return usage();
     request["state"] = args[1];
     i = 2;
@@ -573,8 +692,24 @@ int run_live(int argc, char** argv) {
   try {
     for (; i < args.size(); ++i) {
       const bool more = i + 1 < args.size();
-      if (args[i] == "--time" && more && cmd == "solve") {
+      if (args[i] == "--time" && more && (cmd == "solve" || cmd == "deploy")) {
         request["time_limit"] = std::stod(args[++i]);
+      } else if (args[i] == "--samples" && more && cmd == "deploy") {
+        request["samples"] = std::stoi(args[++i]);
+      } else if (args[i] == "--finalists" && more && cmd == "deploy") {
+        request["finalists"] = std::stoi(args[++i]);
+      } else if (args[i] == "--screen-samples" && more && cmd == "deploy") {
+        request["screen_samples"] = std::stoi(args[++i]);
+      } else if (args[i] == "--solve-time" && more && cmd == "deploy") {
+        request["solve_time"] = std::stod(args[++i]);
+      } else if (args[i] == "--solve-nodes" && more && cmd == "deploy") {
+        request["solve_nodes"] = std::stoull(args[++i]);
+      } else if (args[i] == "--seed" && more && cmd == "deploy") {
+        request["seed"] = std::stoul(args[++i]);
+      } else if (args[i] == "--placements" && more && cmd == "deploy") {
+        request["placements"] = json::parse(read_text_arg(args[++i]));
+      } else if (args[i] == "--always" && more && cmd == "deploy") {
+        request["always"] = json::parse(read_text_arg(args[++i]));
       } else if (args[i] == "--nodes" && more && cmd == "solve") {
         request["node_limit"] = std::stoull(args[++i]);
       } else if (args[i] == "--max-time" && more && cmd == "solve") {
@@ -591,9 +726,9 @@ int run_live(int argc, char** argv) {
         request["mech_grid"] = std::stoi(args[++i]);
       } else if (args[i] == "--mech-grid-turns" && (cmd == "solve" || cmd == "predict")) {
         request["mech_grid_turns"] = true;
-      } else if (args[i] == "--beam" && more && cmd == "solve") {
+      } else if (args[i] == "--beam" && more && (cmd == "solve" || cmd == "deploy")) {
         request["beam_width"] = std::stoi(args[++i]);
-      } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve")) {
+      } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve" || cmd == "deploy")) {
         threads = std::max(1, std::stoi(args[++i]));
         request["threads"] = threads;
       } else if (args[i] == "--plan" && more && cmd == "predict") {

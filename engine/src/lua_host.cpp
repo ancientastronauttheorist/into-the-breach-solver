@@ -133,6 +133,9 @@ struct LuaHost::Impl {
   bool native_weapons = true;
   lua::WeaponPortTable ports;
   uint64_t native_calls = 0;  // calls answered by a port
+  // Temporary pawns Board:GetDeployLocScore created (a native Pawn is
+  // constructed for each, which draws from the C library's rand()).
+  uint64_t temp_pawns = 0;
 };
 
 namespace {
@@ -448,6 +451,7 @@ bool host_is_targeted(lua_State* L, Point p) {
 // temporary team-6 "Wall" pawn standing on p.
 int host_deploy_score(lua_State* L, Point p) {
   LuaHost::Impl& im = impl_of(L);
+  ++im.temp_pawns;
   Board scratch = *im.ctx.board;
   Pawn wall;
   wall.type = intern("Wall");
@@ -629,6 +633,47 @@ SkillEffect LuaHost::queued_effect(const Board& board, const Pawn& shooter, std:
   return to_engine(queued_effect_raw(board, shooter, weapon, target, call));
 }
 
+int LuaHost::target_score(const Board& board, const Pawn& shooter, std::string_view weapon, Point origin,
+                          Point target, LuaCall* call) {
+  LuaCall local;
+  LuaCall& c = call ? *call : local;
+  Scope scope(*impl_, &board, &c);
+  set_selected(*impl_, &shooter);
+  if (!call_method(*impl_, weapon, "GetTargetScore", c, [&](lua_State* L) {
+        lua::push_point(L, origin);
+        lua::push_point(L, target);
+        return 2;
+      })) {
+    return 0;
+  }
+  if (lua_type(impl_->L, -1) != LUA_TNUMBER) {
+    fail(c, weapon, "GetTargetScore", "cast_failed: did not return a number");
+    return 0;
+  }
+  return lua::to_int(impl_->L, -1);
+}
+
+int LuaHost::score_positioning(const Board& board, const Pawn& pawn, Point point, LuaCall* call) {
+  LuaCall local;
+  LuaCall& c = call ? *call : local;
+  Scope scope(*impl_, &board, &c);
+  set_selected(*impl_, &pawn);
+  flush_selected(*impl_);
+  lua_State* L = impl_->L;
+  lua_getglobal(L, "ScorePositioning");
+  lua::push_point(L, point);
+  lua::push_pawn(L, &pawn);
+  if (lua_pcall(L, 2, 1, 0) != 0) {
+    fail(c, "global", "ScorePositioning", lua::to_str(L, -1));
+    return 0;
+  }
+  if (lua_type(L, -1) != LUA_TNUMBER) {
+    fail(c, "global", "ScorePositioning", "cast_failed: did not return a number");
+    return 0;
+  }
+  return lua::to_int(L, -1);
+}
+
 bool LuaHost::is_two_click(std::string_view weapon, LuaCall* call) {
   const std::string name(weapon);
   if (auto it = impl_->two_click.find(name); it != impl_->two_click.end()) return it->second;
@@ -806,6 +851,8 @@ std::string LuaHost::native_port(std::string_view weapon, std::string_view metho
 }
 
 uint64_t LuaHost::native_calls() const { return impl_->native_calls; }
+
+uint64_t LuaHost::temp_pawns() const { return impl_->temp_pawns; }
 
 std::string LuaHost::native_binding(std::string_view weapon) {
   const lua::WeaponPort* port = impl_->ports.find(impl_->L, weapon);

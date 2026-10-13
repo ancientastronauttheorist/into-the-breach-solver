@@ -43,6 +43,8 @@ engine/build/itb_inspect --solve recordings --sample 60 --time 120 --threads 8 -
 engine/build/itb_inspect --solve recordings --threat-tier --threat-eval --json on.jsonl  # experimental threat tier
 engine/build/itb_inspect --threat-check recordings                       # threat proxy vs engine and games, cost
 engine/build/itb_inspect --predict state.json --actions @actions.json --branches   # live validation
+engine/build/itb_inspect --ai recordings [--samples 64] [--show N] [--verbose]       # enemy AI planning vs the live saves
+engine/build/itb_live deploy deployed_state.json --time 45 --threads 8            # deployment search (JSON)
 engine/build/itb_live solve state.json --time 10 --threads 8                      # live play (JSON)
 engine/build/itb_inspect --diff-weapons recordings --random 300   # C++ weapon ports vs their Lua
 engine/build/itb_inspect --diff-weapons --ports                   # which weapon methods run natively
@@ -171,8 +173,18 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   unit: one that resurfaces after the enemy phase is matched by uid (type
   and HP; a note, not a spawn).
 - **deploy** uses the bridge's `drop_zone` (refused tiles are already left
-  out, and `DEPLOY` refuses them anyway), checks every mech's tile in the
-  state, and leaves Confirm to you.
+  out, and `DEPLOY` refuses them anyway). It places the mechs with the
+  heuristic first (unplaced mechs are not in the bridge's dump; once placed,
+  the board lists them with their weapons, HP and pilots), then runs the
+  engine's deployment search on that board (`itb_live deploy`, below; the
+  heuristic placement is one of its candidates; `--search-time`, default
+  45 s, `--threads`) and moves the mechs to the tiles it picks (a mech whose
+  tile another mech still holds waits; a swap goes through a free tile). If
+  the engine cannot search the board (no engine, an error) the heuristic
+  placement stays, with a note. `--heuristic` skips the search, `--tiles`
+  places by hand. It checks every mech's tile in the state (the final board
+  is `m<MM>_turn_00_deployed_02.json` when the search moved them) and leaves
+  Confirm to you.
 - Bridges without `weapons_exact` (before the extension) need
   `--loadout FILE` (`{"PunchMech": ["Prime_Punchmech_B", ...]}`); without
   `moved` the driver marks the units it moved.
@@ -194,6 +206,8 @@ The engine side is `itb_live` (`tools/live_tool.hpp`), JSON in and out:
 engine/build/itb_live solve state.json --time 10 [--max-time 120 --min-tiers 5] --threads 8 [--out FILE] [--pretty]
 engine/build/itb_live predict state.json --plan @plan.json
 engine/build/itb_live board state.json
+engine/build/itb_live deploy state.json [--time 45] [--threads 8] [--samples 12] [--finalists 3]
+          [--screen-samples 3] [--solve-time 0.5] [--seed 1] [--placements @p.json] [--always @p.json]
 engine/build/itb_live serve --threads 8   # one JSON request per stdin line (what live_play.py uses)
 ```
 
@@ -475,6 +489,14 @@ Done so far (build order from the decompile):
      sub-actions of every unit, chance adversarial and enumerated; anytime
      with sound upper bounds, proven optimal when the search completes.
    - `itb_inspect --solve`: plans on recorded boards against the old bot's.
+- **Stage 10: the enemy AI's planning and the deployment search**
+  (`ai_phase.hpp`, `deploy.hpp`; "Enemy AI planning and deployment" below).
+   - `Engine::ai_phase`: every Vek's move and queued attack after the enemy
+     phase (AiController / AiPlanner and the Lua scoring), seeded like the
+     game; `itb_inspect --ai` checks it against the live saves.
+   - `deploy_search` / `itb_live deploy`: where to drop the mechs, through
+     the enemy phase before turn 1 and the AI's sampled answers, each turn-1
+     board solved.
 
 ### Environments and mission hooks
 
@@ -1221,6 +1243,116 @@ count and a Regen pilot's turn-start heal is predicted.
 `itb_inspect --predict <state> [--actions ...] [--branches]` prints the
 engine's outcomes for a bridge state; `scripts/live_validate.py` runs a
 scenario end to end against the game. See `LIVE_TEST_PLAN.md`.
+
+### Enemy AI planning and deployment (stage 10)
+
+Between the end of the spawns (where `Engine::end_turn` stops) and the next
+player turn the game's AI plans (`AiController`, state 2): `StartTurn` makes
+every enemy-team or neutral pawn active; `NextPawn` takes the first active
+pawn in board-list order (a frozen one is just made inactive); it plans,
+moves (`Pawn::ManualMove`) and fires its weapon (`SkillManager::FireWeapon`:
+a queued weapon telegraphs, the instant part resolves now: webs, eggs,
+blobs, smoke), then is made inactive. `Engine::ai_phase(board, options)`
+(`ai_phase.hpp`) does the same on the board `end_turn` left. Planning
+(`AiPlanner`), in our words:
+
+- Candidates: `GetReachablePoints` from the move origin minus blocked
+  tiles, then the pawn's own tile; a tile is scored if it is enterable for
+  the pawn's profile (`IsEnterable`) or is its own tile.
+- `ScoreLocation(tile)`, with the pawn temporarily on that tile: the
+  position score is Lua `ScorePositioning(tile, pawn)` (0 without calling
+  Lua when the pawn's move speed is 0; at most 0 for an injured 1-HP pawn
+  that moves); the target score is the best `SkillManager::GetTargetScore`
+  over the armed weapon's target area from that tile (none when the pawn
+  could not act there, `Pawn::IsActable`: smoke, water). That is Lua
+  `Skill:GetTargetScore` (`GetSkillEffect` + `ScoreList`; several Vek
+  override it), minus 5 for the target the pawn shot at last (save
+  `targetHistory`; a positive Lua score stays at least 1). Ties for the
+  best positive score: `random(n)`. Once a non-edge tile has a positive
+  target score and a non-negative position score, edge tiles are skipped.
+- `SelectPlan`: plans below -10 position (and edge tiles, as above) are
+  out; the order is positive position over negative, then target score,
+  then position score. Ties: `random(n)`. Then `random_bool(4)`: one time in
+  four, when there was a group of best plans before the last improvement, a
+  random one of those that is off the edge with a positive target score and
+  a non-negative position score is taken instead.
+- The weapon is the pawn type's Lua `Weapon` (skill index; skill 0 is Move).
+
+Randomness. `random_seed(aiSeed)` before each pawn plans, and the next
+pawn's seed is `unique_rand(seed)` drawn after its planning. The live game
+is the macOS build, whose libc `rand()` is the Park-Miller minimal standard
+generator (not glibc's, which the Lua host's stream copies): its state is
+its last output, so a whole AI phase is one stream from the seed the game
+saved at the start of the turn (`aiSeed` of the mission's region in
+`saveData.lua`). Besides the planner's own draws, each
+`Board:GetDeployLocScore` on a free tile (Spider, Blobber, Shaman scoring)
+constructs a temporary `Pawn`, whose constructor draws three numbers
+(measured: 1, 2 or 4 fit far worse). The live seed is hidden: replays use
+the saved one, the deployment search samples seeds.
+
+Not modelled: `SetPlanPoints`' extra Lua calls (no shipped enemy weapon
+draws there), priority targets (tutorial only), the "IsFast" timing
+shortcut.
+
+Validation (`itb_inspect --ai recordings`, the live runs to 2026-10-13):
+
+| AI phase | phases | all Vek exact | Vek exact (tile and target) | phase seed chain |
+|---|---|---|---|---|
+| after turns 1+ (the turn's saved seed; Grid Defense as the next board shows) | 258 | 72.9% | 89.2% of 622 on the board, 83.4% of 541 spawned in the phase | 150/258 end on the next turn's saved seed |
+| before turn 1, seed from an earlier save (the island's boards are built ahead, each with its seed) | 24 | 62.5% | 82.0% of 111 | 12/24 |
+| before turn 1, hidden seed (64 sampled seeds) | 202 | the game's outcome among the samples: 48.0%; the most common sample: 7.4% | most common sample: 40.1% | - |
+
+The first pawn to plan matches 217 of 228 times (95%); errors compound
+because a different draw count shifts every later pawn's seed. Known gaps:
+Spider/Shaman/Blobber scores (their `GetDeployLocScore` scoring), and
+boards where the enemy phase itself differs. The turn-0 AI is the same code:
+its outcomes are many and close to equally likely (the most common sampled
+outcome matches the game 7% of the time), which is why the deployment
+search samples seeds.
+
+Deployment (`deploy.hpp`). Confirming the deployment runs that enemy phase
+(`BoardPlayer::FinalizeDeployment` -> `StartState(1)`, then state 2 and the
+AI) before turn 1. `deploy_search(engine, deployed_board, ctx, drop_zone,
+options)`:
+
+1. Screen: every set of free drop-zone tiles, one per mech, the mechs in
+   uid order (the AI scores a mech by its tile, not by which mech it is),
+   played through `end_turn` + `ai_phase` for `screen_samples` sampled
+   seeds; each turn-1 board valued by ending turn 1 at once.
+2. Finalists: every assignment of the mechs to the best `finalists` sets,
+   plus `always` (live_play passes its heuristic placement), `samples`
+   seeds each; every distinct turn-1 board solved (`solve_turn`,
+   `solve_time` each), valued as what the phase itself cost plus the
+   plan's worst case.
+3. Ranking: per tier in the solver's order, the worst value over the
+   sampled outcomes, then the mean; the AI's choice is chance, taken worst
+   case over the sample.
+
+The turn-1 boards have no spawn markers and keep the deployment's
+environment data (both decided during that phase and hidden). Budget:
+`time_limit` (the screen takes at most half). Cost: a 14-tile zone has 364
+sets; 2 seeds each screened in 17 s on 2 threads (about 23 ms per AI phase
+and turn-1 end), and a turn-1 solve needs about 0.5 s to find the beam's
+plan, so 3 finalist sets (18 placements) x 12 seeds is about 200 solves:
+roughly 4 + 13 s on 8 threads.
+
+Offline (the 202 live deployments to 2026-10-13, 201 searchable: the search on
+2 threads with 2 finalist sets, 8 seeds and 0.3 s solves; then the chosen
+and live_play's heuristic placement re-valued with 16 fresh seeds each):
+the chosen placement's worst sampled outcome is better in 121, equal in 27
+and worse in 53 (by the search's own ranking: 140 / 22 / 39); the worst grid
+loss is smaller in 60 and larger in 15; expected grid loss per deployment
+0.57 against 0.81; every sampled outcome keeps all grid in 67 against 50.
+Mechs lost hardly change (expected 0.063 against 0.066).
+
+`itb_live deploy <state>` takes a bridge state with the mechs on the board
+and its `drop_zone` / `deployment_zone`: `{"cmd": "deploy", "state",
+"time_limit", "threads", "screen_samples", "finalists", "samples",
+"solve_time", "solve_nodes", "seed", "placements": [[[x, y], ...], ...],
+"always": [...]}`, tiles in ascending mech uid order. It returns `mechs`,
+`zone`, `sets`, `best` and the ranked `finalists` (each `tiles`, `visual`,
+`by_uid`, `screen` and `value`: `worst_case`, `tier_min`, `mean`,
+`outcomes`, `seeds`), `solves`, `time`, `timed_out` and `warnings`.
 
 ### Open questions for live-game testing
 

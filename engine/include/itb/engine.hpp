@@ -42,6 +42,8 @@
 namespace itb {
 
 class GameData;
+struct AiPhaseOptions;
+struct AiPhaseResult;
 
 struct EngineOptions {
   LuaHostOptions lua;
@@ -186,6 +188,11 @@ class Engine {
   // end_turn. Stops before the enemy phase at the first refused action.
   TurnResult play_turn(Board& board, const std::vector<PlayerAction>& actions,
                        const TurnContext& ctx);
+
+  // The enemy AI's planning after the enemy phase (ai_phase.hpp): every
+  // enemy moves and queues its attack, one at a time. `board` is the board
+  // end_turn leaves (or a deployed board before the first turn).
+  AiPhaseResult ai_phase(Board& board, const AiPhaseOptions& options);
 
   // Resolves a ready effect with the Lua hooks wired (scripts, death
   // effects), e.g. an environment effect. `out` collects Lua diagnostics.

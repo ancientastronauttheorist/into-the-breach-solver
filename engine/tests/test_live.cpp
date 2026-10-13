@@ -292,6 +292,39 @@ TEST_CASE("live: boards carry each unit's queued shot; smoke clears it (live 202
   fs::remove(fixed);
 }
 
+TEST_CASE("live: deploy searches the drop zone of a deployed board (live 20261012_231559 m00)") {
+  NEED_SESSION();
+  const std::string state = std::string(ITB_FIXTURE_DIR) + "/live_volatile_t0_deployed.json";
+  // Given placements (uid order): the heuristic's and another, two AI seeds
+  // each, tiny solves.
+  const json placements = json::array({json::array({{2, 2}, {2, 5}, {3, 1}}), json::array({{3, 2}, {3, 6}, {2, 1}})});
+  const json r = S.handle({{"cmd", "deploy"},
+                           {"state", state},
+                           {"placements", placements},
+                           {"samples", 2},
+                           {"time_limit", 0},
+                           {"solve_time", 0},
+                           {"solve_nodes", 20}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  CHECK(r["cmd"] == "deploy");
+  CHECK(r["mechs"] == json::array({0, 1, 2}));
+  CHECK(r["zone"].size() == 14);
+  REQUIRE(r["finalists"].size() == 2);
+  const json& best = r["best"];
+  CHECK((best["tiles"] == placements[0] || best["tiles"] == placements[1]));
+  CHECK(best["by_uid"]["0"] == best["tiles"][0]);
+  CHECK(best["visual"].size() == 3);
+  CHECK(best["value"]["seeds"] == 2);
+  CHECK(best["value"]["worst_case"].contains("grid"));
+  CHECK(best["value"]["mean"].contains("mechs"));
+  CHECK(r["finalists"][0]["tiles"] == best["tiles"]);
+  // Malformed placements and a board without mechs are errors, not crashes.
+  const json bad = S.handle({{"cmd", "deploy"}, {"state", state}, {"placements", json::array({json::array({{2, 2}})})}});
+  CHECK_FALSE(bad["ok"].get<bool>());
+  const json none = S.handle({{"cmd", "deploy"}, {"state", std::string(ITB_FIXTURE_DIR) + "/board_m07_turn01.json"}});
+  CHECK_FALSE(none["ok"].get<bool>());
+}
+
 TEST_CASE("live: the dam's second tile is occupied (live 2026-10-10 m46 turn 1)") {
   NEED_SESSION();
   // Mission_Dam: Dam_Pawn#2335 at H4 (4,0) with ExtraSpaces {(1,0)} also

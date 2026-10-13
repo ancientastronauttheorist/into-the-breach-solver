@@ -24,6 +24,14 @@
 //       after the player's turn and after the enemy phase
 //   {"cmd": "predict", "state": "...", "plan": [actions]}
 //       the same simulation for a given plan
+//   {"cmd": "deploy", "state": "...", "time_limit": 45, "threads": N,
+//    "screen_samples": 3, "finalists": 3, "samples": 12, "solve_time": 0.5,
+//    "solve_nodes": 0, "seed": 1, "placements": [[[x,y], ...], ...],
+//    "always": [...]}
+//       the deployment search (itb/deploy.hpp) on a state with the mechs on
+//       the board and a drop_zone (or deployment_zone): "best" and the ranked
+//       "finalists", tiles in ascending mech uid order ("placements": only
+//       those; "always": also those)
 //   {"cmd": "ping"}
 //
 // The state is a bridge dump (bare, or a recording wrapper with

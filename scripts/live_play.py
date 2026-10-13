@@ -66,8 +66,13 @@ start of that turn.
 
 deploy: places the mechs on the bridge's exported drop zone (tiles the deploy
 UI refuses are not in it, and DEPLOY refuses them anyway) with a simple
-heuristic, or on --tiles; verifies every mech's tile from the state. Confirm
-the deployment in the game afterwards.
+heuristic, then (unless --tiles or --heuristic) runs the engine's deployment
+search (itb_live deploy: the enemy phase before turn 1 and the AI's moves for
+sampled seeds, each turn-1 board solved; the heuristic placement is one of
+its candidates) on that board, which now lists the mechs, and moves the mechs
+to the tiles it picks. If the engine cannot search the board the heuristic
+placement stays, with a note. Verifies every mech's tile from the state.
+Confirm the deployment in the game afterwards.
 
 Every bridge state and engine prediction is archived under
 recordings/live/<run>/ (git-ignored; force-add a run to keep it): the
@@ -341,6 +346,14 @@ class Engine:
 
     def board(self, path: Path) -> dict:
         return self.request({"cmd": "board", "state": str(path)})["board"]
+
+    def deploy(self, path: Path, time_limit: float, always: list | None = None) -> dict:
+        """The engine's deployment search (itb_live deploy) on a state with
+        the mechs on the board: the best tiles, in ascending uid order."""
+        req = {"cmd": "deploy", "state": str(path), "time_limit": time_limit, "threads": self.threads}
+        if always:
+            req["always"] = [[list(p) for p in tiles] for tiles in always]
+        return self.request(req)
 
     def close(self) -> None:
         if self.proc is not None:
@@ -1607,6 +1620,61 @@ def choose_deploy_tiles(state: dict, zone: list, count: int) -> list:
     return chosen + [p for p in ranked if p not in chosen]
 
 
+def place_mechs(ctx, plan: list, spare: list, fixed: bool) -> dict:
+    """DEPLOY each (mech, tile) of `plan`, a refused tile replaced by the next
+    spare one unless `fixed`. Returns {uid: tile}."""
+    bridge = ctx.bridge
+    used = set()
+    spare = list(spare)
+    placed = {}
+    for m, p in plan:
+        while True:
+            if p in used:
+                p = spare.pop(0) if spare else None
+            if p is None:
+                raise Anomaly(f"no drop-zone tile left for {describe_unit(m)}")
+            ack = bridge.send(f"DEPLOY {m['uid']} {p[0]} {p[1]}", 15)
+            if ack.startswith("OK"):
+                used.add(p)
+                placed[m["uid"]] = p
+                break
+            say(f"  DEPLOY {describe_unit(m)} at {visual(*p)} refused: {ack}")
+            if fixed or not spare:
+                raise Anomaly(f"DEPLOY refused: {ack}")
+            used.add(p)
+            p = spare.pop(0)
+    return placed
+
+
+def move_mechs(ctx, where: dict, target: dict, zone: list) -> dict:
+    """Re-places deployed mechs: uid -> tile. A mech goes once its target is
+    free; a cycle of mechs swapping tiles goes through a free zone tile."""
+    bridge = ctx.bridge
+    where = dict(where)
+    todo = {uid: t for uid, t in target.items() if where.get(uid) != t}
+    while todo:
+        occupied = set(where.values())
+        ready = [uid for uid, t in todo.items() if t not in occupied]
+        if not ready:
+            # Every target is held by another mech still to move: park one.
+            uid = sorted(todo)[0]
+            park = next((p for p in zone if p not in occupied and p not in todo.values()), None)
+            if park is None:
+                raise Anomaly("no free drop-zone tile to swap mechs through")
+            ack = bridge.send(f"DEPLOY {uid} {park[0]} {park[1]}", 15)
+            if not ack.startswith("OK"):
+                raise Anomaly(f"DEPLOY refused: {ack}")
+            where[uid] = park
+            continue
+        for uid in sorted(ready):
+            t = todo.pop(uid)
+            ack = bridge.send(f"DEPLOY {uid} {t[0]} {t[1]}", 15)
+            if not ack.startswith("OK"):
+                raise Anomaly(f"DEPLOY refused: {ack}")
+            where[uid] = t
+    return where
+
+
 def deploy(ctx) -> list:
     bridge, run, args = ctx.bridge, ctx.run, ctx.args
     state = preflight(bridge, args)
@@ -1626,7 +1694,7 @@ def deploy(ctx) -> list:
     if not mechs:
         raise Refused("no mechs found on the board (unplaced mechs aren't in the state); "
                       "pass --uids, e.g. --uids 0,1,2")
-    run.save_state(state, "deploy")
+    path = run.save_state(state, "deploy")
     source = state.get("drop_zone_source") or ("deployment_zone" if not state.get("drop_zone") else "?")
     say(f"== deployment: {len(mechs)} mech(s), drop zone ({source}): " + " ".join(visual(*p) for p in zone))
     if args.tiles:
@@ -1643,38 +1711,76 @@ def deploy(ctx) -> list:
     else:
         ranked = choose_deploy_tiles(state, zone, len(mechs))
     plan = list(zip(mechs, ranked))
+    search = not args.tiles and not args.heuristic
     for m, p in plan:
-        say(f"  {describe_unit(m)} -> {visual(*p)} {p}")
+        say(f"  {describe_unit(m)} -> {visual(*p)} {p}" + ("  (heuristic; the engine's search follows)" if search else ""))
+    on_board = all(0 <= int(m.get("x", -1)) < 8 and 0 <= int(m.get("y", -1)) < 8 for m in mechs)
     if args.dry_run:
+        if search and on_board:
+            # The mechs are on the board already: the search can run as is.
+            best = engine_deploy(ctx, path, [p for _, p in plan])
+            if best:
+                for uid, p in sorted(best.items()):
+                    say(f"  engine: #{uid} -> {visual(*p)} {p}")
+        elif search:
+            say("  (the engine's search needs the mechs on the board: it runs after the provisional placement)")
         say("dry run: nothing placed")
         return []
-    used = set()
-    spare = [p for p in ranked[len(mechs):]] if not args.tiles else []
-    placed = {}
-    for m, p in plan:
-        while True:
-            if p in used:
-                p = spare.pop(0) if spare else None
-            if p is None:
-                raise Anomaly(f"no drop-zone tile left for {describe_unit(m)}")
-            ack = bridge.send(f"DEPLOY {m['uid']} {p[0]} {p[1]}", 15)
-            if ack.startswith("OK"):
-                used.add(p)
-                placed[m["uid"]] = p
-                break
-            say(f"  DEPLOY {describe_unit(m)} at {visual(*p)} refused: {ack}")
-            if args.tiles or not spare:
-                raise Anomaly(f"DEPLOY refused: {ack}")
-            used.add(p)
-            p = spare.pop(0)
+    placed = place_mechs(ctx, plan, [p for p in ranked[len(mechs):]] if not args.tiles else [], bool(args.tiles))
     state = bridge.settled_state()
-    run.save_state(state, "deployed")
+    path = run.save_state(state, "deployed")
+    check_placed(state, placed)
+    if search:
+        heuristic = [placed[m["uid"]] for m in mechs]
+        best = engine_deploy(ctx, path, heuristic)
+        if best and best != placed:
+            for uid, p in sorted(best.items()):
+                say(f"  #{uid} {visual(*placed[uid])} -> {visual(*p)} {p}")
+            move_mechs(ctx, placed, best, zone)
+            state = bridge.settled_state()
+            run.save_state(state, "deployed")
+            check_placed(state, best)
+        elif best:
+            say("  the engine keeps the heuristic placement")
+    say("deployed and verified. Confirm the deployment in the game.")
+    return []
+
+
+def check_placed(state: dict, placed: dict) -> None:
     where = {u["uid"]: (u["x"], u["y"]) for u in units(state)}
     wrong = [f"{uid} at {where.get(uid)} (wanted {p})" for uid, p in placed.items() if where.get(uid) != p]
     if wrong:
         raise Anomaly("deployment not reflected in the state: " + ", ".join(wrong))
-    say("deployed and verified. Confirm the deployment in the game.")
-    return []
+
+
+def engine_deploy(ctx, path: Path, heuristic: list) -> dict | None:
+    """The engine's deployment search on the state at `path` (mechs on the
+    board): {uid: tile}, or None (and a note) when the engine cannot model
+    the board, in which case the heuristic placement stays."""
+    args, run = ctx.args, ctx.run
+    if ctx.engine is None:
+        ctx.engine = Engine(args.threads, args.game, run.path / "itb_live.log")
+    say(f"  engine deployment search ({args.search_time:.0f} s, {args.threads} thread(s))...")
+    try:
+        reply = ctx.engine.deploy(path, args.search_time, always=[heuristic])
+    except (Refused, Anomaly) as e:
+        say(f"  NOTE: the engine could not search this deployment ({e}); keeping the heuristic placement")
+        run.event("deploy_search", {"error": str(e)})
+        return None
+    run.event("deploy_search", {k: reply.get(k) for k in ("best", "mechs", "sets", "solves", "time", "warnings",
+                                                         "timed_out")})
+    for w in reply.get("warnings") or []:
+        say(f"  engine note: {w}")
+    best = reply.get("best")
+    if not best or not best.get("tiles"):
+        say("  NOTE: the engine's search returned no placement; keeping the heuristic placement")
+        return None
+    value = best.get("value") or {}
+    tm, mean = value.get("tier_min") or {}, value.get("mean") or {}
+    say(f"  engine: {' '.join(best.get('visual', []))}  over {value.get('outcomes', 0)} AI outcome(s): "
+        f"worst grid {tm.get('grid', '?')} buildings {tm.get('building_hp', '?')} mechs {tm.get('mechs', '?')}, "
+        f"mean grid {mean.get('grid', 0):.2f} mechs {mean.get('mechs', 0):.2f}")
+    return {int(uid): tuple(p) for uid, p in zip(reply.get("mechs", []), best["tiles"])}
 
 
 def parse_tiles(text: str) -> list:
@@ -1919,6 +2025,12 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("deploy", parents=[common], help="place the mechs in the drop zone")
     p.add_argument("--tiles", help="tiles in mech uid order: C5,D6,E5 or 3,5;2,4;4,4")
     p.add_argument("--uids", help="mech uids when they aren't on the board yet, e.g. 0,1,2")
+    p.add_argument("--heuristic", action="store_true",
+                   help="keep the heuristic placement (no engine search)")
+    p.add_argument("--search-time", type=float, default=45.0,
+                   help="the engine's deployment search budget (s)")
+    p.add_argument("--threads", type=int, default=8)
+    p.add_argument("--game", help="game install for the engine (default: ITB_GAME_DIR / build default)")
     p = sub.add_parser("restore", parents=[common], help="load a turn's checkpoint into the game")
     p.add_argument("--mission", type=int, required=True, help="mission index MM of m<MM>_turn_<TT>")
     p.add_argument("--turn", type=int, required=True)

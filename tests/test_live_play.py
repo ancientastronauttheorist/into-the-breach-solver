@@ -7,8 +7,10 @@ the game or the desktop: clicks go to a recorder.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import importlib
+import io
 import json
 import os
 import shutil
@@ -124,6 +126,10 @@ class FakeEngine:
         # None: boards without "queued" (an itb_live from before it).
         self.clears = clears
         self.solves = []
+        # Deployment search: None = keep the first `always` placement;
+        # {uid: (x, y)} = these tiles; an exception = the engine fails.
+        self.deploy_tiles = None
+        self.deploys = []  # (state, time_limit, always) per deploy request
         self.budgets = []  # (time_limit, max_time, min_tiers) per solve
         self.tiers = []  # ranking options (threat_tier, mech_grid, ...) per solve
         self.predicts = []
@@ -179,6 +185,21 @@ class FakeEngine:
 
     def board(self, path):
         return compact(self._state(path))
+
+    def deploy(self, path, time_limit, always=None):
+        st = self._state(path)
+        self.deploys.append((st, time_limit, always))
+        if isinstance(self.deploy_tiles, Exception):
+            raise self.deploy_tiles
+        mechs = sorted(u["uid"] for u in st["units"] if u.get("team") == 1 and u.get("mech"))
+        if self.deploy_tiles is None:
+            tiles = [list(p) for p in always[0]]
+        else:
+            tiles = [list(self.deploy_tiles[uid]) for uid in mechs]
+        value = {"tier_min": {"grid": 0, "building_hp": 0, "mechs": 0}, "mean": {"grid": 0.0, "mechs": 0.0},
+                 "outcomes": 3}
+        return {"ok": True, "cmd": "deploy", "mechs": mechs, "warnings": [],
+                "best": {"tiles": tiles, "visual": [lp.visual(*p) for p in tiles], "value": value}}
 
     def close(self):
         pass
@@ -269,6 +290,9 @@ class FakeBridge:
             uid, x, y = (int(v) for v in args)
             if (x, y) in self.refused_deploy:
                 return f"ERROR: DEPLOY refused: {x},{y} reserved tile (pylons)"
+            other = [v for v in self.state["units"] if (v["x"], v["y"]) == (x, y) and v["uid"] != uid]
+            if other:
+                return f"ERROR: DEPLOY refused: {x},{y} occupied by pawn {other[0]['uid']}"
             u = unit(self.state, uid)
             u["x"], u["y"] = x, y
             return f"OK DEPLOY {uid} at {x},{y}"
@@ -965,6 +989,56 @@ class LivePlayTest(unittest.TestCase):
         placed = {(u["x"], u["y"]) for u in self.fb.state["units"] if u["team"] == 1}
         self.assertNotIn(ranked[0], placed)
         self.assertTrue(placed <= {tuple(p) for p in self.fb.state["drop_zone"]})
+
+    def placed_tiles(self):
+        return {u["uid"]: (u["x"], u["y"]) for u in self.fb.state["units"] if u["team"] == 1}
+
+    def test_deploy_engine_search_moves_the_mechs(self):
+        self.bridge(self.deploy_state())
+        zone = [tuple(p) for p in self.fb.state["drop_zone"]]
+        h = lp.choose_deploy_tiles(self.fb.state, zone, 2)[:2]
+        free = next(p for p in zone if p not in h)
+        engine = FakeEngine()
+        # Mech 0 takes mech 1's heuristic tile: mech 1 has to move first.
+        engine.deploy_tiles = {0: h[1], 1: free}
+        self.assertEqual(self.run_cmd(["deploy"], engine=engine), 0)
+        self.assertEqual(self.placed_tiles(), {0: h[1], 1: free})
+        state, budget, always = engine.deploys[0]
+        self.assertEqual(always, [[h[0], h[1]]])  # the heuristic is a candidate
+        self.assertEqual(sorted(u["uid"] for u in state["units"] if u.get("mech")), [0, 1])  # mechs on the board
+        self.assertEqual(budget, 45.0)
+        deploys = [c for c in self.acting() if c.startswith("DEPLOY")]
+        self.assertEqual(deploys[2:], [f"DEPLOY 1 {free[0]} {free[1]}", f"DEPLOY 0 {h[1][0]} {h[1][1]}"])
+        names = [p.name for p in self.run_dir().iterdir()]
+        self.assertIn("m00_turn_00_deployed_02.json", names)
+
+    def test_deploy_engine_search_swaps_through_a_free_tile(self):
+        self.bridge(self.deploy_state())
+        zone = [tuple(p) for p in self.fb.state["drop_zone"]]
+        h = lp.choose_deploy_tiles(self.fb.state, zone, 2)[:2]
+        engine = FakeEngine()
+        engine.deploy_tiles = {0: h[1], 1: h[0]}
+        self.assertEqual(self.run_cmd(["deploy"], engine=engine), 0)
+        self.assertEqual(self.placed_tiles(), {0: h[1], 1: h[0]})
+
+    def test_deploy_keeps_the_heuristic_when_the_engine_cannot_search(self):
+        self.bridge(self.deploy_state())
+        engine = FakeEngine()
+        engine.deploy_tiles = lp.Anomaly("itb_live deploy: no mech on the board")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.run_cmd(["deploy"], engine=engine), 0)
+        self.assertIn("keeping the heuristic placement", out.getvalue())
+        self.assertEqual(len([c for c in self.acting() if c.startswith("DEPLOY")]), 2)
+        h = lp.choose_deploy_tiles(self.deploy_state(), [tuple(p) for p in self.fb.state["drop_zone"]], 2)[:2]
+        self.assertEqual(self.placed_tiles(), {0: h[0], 1: h[1]})
+
+    def test_deploy_heuristic_only(self):
+        self.bridge(self.deploy_state())
+        engine = FakeEngine()
+        self.assertEqual(self.run_cmd(["deploy", "--heuristic"], engine=engine), 0)
+        self.assertEqual(engine.deploys, [])
+        self.assertEqual(len([c for c in self.acting() if c.startswith("DEPLOY")]), 2)
 
     def test_deploy_tiles_override(self):
         self.bridge(self.deploy_state())
