@@ -421,3 +421,78 @@ TEST_CASE("pilot xp: the kill that levels Gana up gives DStrikeMech +2 HP at onc
   CHECK(d2.pilot_level == 2);
   CHECK(d2.pilot_xp == 0);
 }
+
+// ---- Mission hooks inside a shot ------------------------------------------------------
+
+// Mission_Dam:UpdateMission (missions/grass/mission_dam.lua) floods the two
+// columns below a dead dam with a plain SkillEffect(): Board:AddEffect keeps
+// its iOwner, -1, and Board::ApplyEffect leaves a recorded shooter in place
+// for owner -1. The flood is queued while the shot that killed the dam is
+// still on the stack (the shooter is only cleared once nothing is active),
+// so the Vek it drowns are that mech's kills, not the squad's (ENV_EFFECT).
+TEST_CASE("pilot xp: Vek drowned by the dam flood are the dam killer's kills") {
+  NEED_ENGINE();
+  Board b;
+  b.tile({4, 0}).terrain = Terrain::Water;
+  b.tile({5, 0}).terrain = Terrain::Water;
+  const int32_t m = place(b, "ChargeMech", {4, 1}, true);
+  const int32_t m2 = place(b, "PunchMech", {0, 7}, true);
+  const int32_t m3 = place(b, "PunchMech", {1, 7}, true);
+  const int32_t dam = place(b, "Dam_Pawn", {4, 0});
+  const int32_t v1 = place(b, "Scorpion1", {5, 1});
+  const int32_t v2 = place(b, "Scorpion1", {4, 6});
+  REQUIRE(P(b, v1).max_hp == 3);
+  pilot(P(b, m), 0, 0, LevelSkill::Health, LevelSkill::Move);
+  pilot(P(b, m2), 0, 0, LevelSkill::Health, LevelSkill::Move);
+  pilot(P(b, m3), 0, 0, LevelSkill::Health, LevelSkill::Move);
+  TurnContext ctx;
+  ctx.mission.mission_id = "Mission_Dam";
+  const ActionResult r = E.fire_weapon(b, m, "Brute_Beetle", {4, 0}, std::nullopt, action_options(ctx));
+  REQUIRE(r.ok());
+  REQUIRE(r.mission_events.size() == 1);
+  CHECK(dead(b, dam));
+  CHECK(dead(b, v1));
+  CHECK(dead(b, v2));
+  CHECK(P(b, m).pilot_xp == 6);
+  CHECK(P(b, m2).pilot_xp == 0);
+  CHECK(P(b, m3).pilot_xp == 0);
+}
+
+TEST_CASE("pilot xp: the dam flood's kills level up the ChargeMech that broke the dam (live)") {
+  // Live 2026-10-13 run 18 (Unfair, m04 Mission_Dam, turn 1): ChargeMech#1
+  // on G4, pilot Pilot_Archive level 0 with 17 XP (skill1 Skilled), rams the
+  // dam on H4 with Brute_Beetle (2 damage, 1 self damage: 3 -> 2 HP). The
+  // flood drowns Burnbug1, Burnbug2 and Scarab1 (3 + 4 + 2 XP): 26 XP, level
+  // 1, Skilled +2 max HP and +2 HP. The game showed 4 HP; with the flood's
+  // kills split over the squad the engine had 2.
+  NEED_ENGINE();
+  const Recording before = live_fixture("live_dam_t1_step3.json");
+  const Recording after = live_fixture("live_dam_t1_step4.json");
+  const TurnContext ctx = turn_context(before, Visibility::Player);
+  const int32_t cm = 1;
+  const Pawn& c0 = *before.board.find_pawn(cm);
+  REQUIRE(symbol_name(c0.type) == "ChargeMech");
+  CHECK(c0.pilot_level == 0);
+  CHECK(c0.pilot_xp == 17);
+  CHECK(c0.pilot_skill1 == static_cast<int8_t>(LevelSkill::Skilled));
+  CHECK(c0.hp == 3);
+
+  Board b = before.board;
+  const ActionResult r = E.fire_weapon(b, cm, "Brute_Beetle", {4, 0}, std::nullopt, action_options(ctx));
+  REQUIRE(r.ok());
+  const Pawn& c1 = P(b, cm);
+  CHECK(c1.pilot_level == 1);
+  CHECK(c1.pilot_xp == 0);
+  CHECK(c1.max_hp == 5);
+  CHECK(c1.hp == 4);
+  // The other pilots got nothing from the flood.
+  CHECK(P(b, 0).pilot_xp == before.board.find_pawn(0)->pilot_xp);
+  CHECK(P(b, 2).pilot_xp == before.board.find_pawn(2)->pilot_xp);
+  for (const Pawn& q : after.board.pawns()) {
+    const Pawn* p = b.find_pawn(q.uid);
+    REQUIRE(p != nullptr);
+    CHECK_MESSAGE(p->hp == q.hp, symbol_name(q.type));
+    CHECK(p->pos == q.pos);
+  }
+  CHECK(after.board.find_pawn(cm)->max_hp == 5);
+}

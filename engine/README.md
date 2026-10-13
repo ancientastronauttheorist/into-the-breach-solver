@@ -495,7 +495,9 @@ Done so far (build order from the decompile):
      `update` on every frame of the action (the environment re-reads the
      pawns it watches from the board first, `Environment::bind`). A repair
      under a living Storm Generator keeps ACID; a dam the player destroys
-     floods at once; a dead shield generator drops every shield before the
+     floods at once (a hook's effect has the Lua default owner -1, not
+     ENV_EFFECT, so the Vek the flood drowns are the dam killer's kills and
+     XP); a dead shield generator drops every shield before the
      next action. `action_options(TurnContext)` builds these options:
      `play_turn`, the solver, `itb_live`, the Python module, `--predict` and
      `--replay` all play actions with them. Missions without a per-frame

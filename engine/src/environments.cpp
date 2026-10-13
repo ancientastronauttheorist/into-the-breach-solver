@@ -38,11 +38,18 @@ bool adjacent(Point a, Point b) { return std::abs(a.x - b.x) + std::abs(a.y - b.
 // Environment:GetQuarters order: 3x3 blocks at (1,1), (1,4), (4,1), (4,4).
 int quarter(Point p) { return (p.x >= 4 ? 2 : 0) + (p.y >= 4 ? 1 : 0); }
 
+// An environment's attack: the scripts set iOwner = ENV_EFFECT.
 SkillEffect env_effect() {
   SkillEffect fx;
   fx.owner = kEnvOwner;
   return fx;
 }
+
+// A mission hook's effect (UpdateMission's SkillEffect()): Board:AddEffect
+// keeps the script's iOwner, here the default -1. Board::ApplyEffect leaves
+// a recorded shooter in place for an owner of -1, so a hook that fires
+// inside a shot (the dam flood) credits its kills to that shooter.
+SkillEffect hook_effect() { return SkillEffect{}; }
 
 // Board:IsPawnSpace(p): a living pawn or a corpse.
 bool pawn_space(const Board& b, Point p) { return p.valid() && has_pawn(b, p); }
@@ -475,7 +482,7 @@ class FinalCaveEnv final : public AttackEnv {
     const Point at = pool.empty() ? Point{4, 4}
                                   : pool[static_cast<size_t>(
                                         host.choose(ChanceKind::MissionRandom, static_cast<int>(pool.size())))];
-    SkillEffect fx = env_effect();
+    SkillEffect fx = hook_effect();
     SpaceDamage drop = space_damage(at, 0);
     drop.spawn_pawn = intern("BigBomb");
     drop.terrain = static_cast<int>(Terrain::Road);
@@ -799,7 +806,9 @@ class DamMission final : public Environment {
   bool has_update() const override { return true; }
   void update(EnvHost& host) override {
     if (flooded_ || dam_ < 0 || pawn_alive(host.board(), dam_)) return;
-    SkillEffect fx = env_effect();
+    // Queued while the killing shot is still active, so the Vek it drowns
+    // are that shooter's kills (pilot XP).
+    SkillEffect fx = hook_effect();
     for (int y = 1; y <= 7; ++y) {
       for (int x = 0; x <= 1; ++x) {
         SpaceDamage sd = space_damage(pos_ + Point{x, y});
