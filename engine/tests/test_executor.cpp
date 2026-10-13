@@ -167,6 +167,33 @@ TEST_CASE("clock: trackers and delays") {
   CHECK(death.progress(36) == doctest::Approx(0.5f));
 }
 
+TEST_CASE("clock: a death animation's fade-out holds its last frame, tracker looping") {
+  const FrameClock c = FrameClock::steady(60.0);
+  // Pawn::SetupAnimation: SetFadeOut(0.5). The last frame's tracker runs out
+  // on update 72; the 0.5 s countdown starts on that update and the frame
+  // only advances on the 30th decrement.
+  const AnimTimeline death(c, 8, 0.14f, {}, false, 0.5f);
+  CHECK(death.total_updates() == 72 + c.delay_updates(0.5f) - 1);
+  // Meanwhile the tracker loops: progress falls back to 7/8, never below.
+  CHECK(death.progress(71) > 0.98f);
+  CHECK(death.progress(72) < 0.9f);
+  CHECK(death.progress(72) >= 0.875f);
+  // A one-frame animation (the ACID vat's barrel1d, 0.5 s) restarts from 0:
+  // past half way after 16 updates, done with its frame after 31, then
+  // below half way again for the first 15 updates of the hold.
+  const AnimTimeline vat(c, 1, 0.5f, {}, false, 0.5f);
+  CHECK(vat.progress(15) < 0.5f);
+  CHECK(vat.progress(16) >= 0.5f);
+  CHECK(vat.progress(30) > 0.9f);
+  CHECK(vat.progress(31) < 0.05f);
+  CHECK(vat.progress(42) < 0.5f);
+  CHECK(vat.progress(47) >= 0.5f);
+  CHECK(vat.total_updates() == 31 + c.delay_updates(0.5f) - 1);
+  CHECK(vat.progress(vat.total_updates()) == doctest::Approx(1.0f));
+  // Without a fade-out (corpses) nothing changes.
+  CHECK(AnimTimeline(c, 1, 0.5f).total_updates() == 31);
+}
+
 // ---- Stage 3 vectors: pushes ------------------------------------------------------
 
 TEST_CASE("e01 free push") {
@@ -1242,10 +1269,13 @@ TEST_CASE("e61 enemy phase: FULL_DELAY waits for the whole death animation") {
   w.fire(se, wi);
   CHECK(w.pawn(2)->pos == R);
   CHECK(w.pawn(2)->hp == 3);
-  // The second chunk waited for the 72-update death animation.
+  // The second chunk waited for the 72-update death animation and its 0.5 s
+  // fade-out hold on the last frame (30 more updates; Pawn::IsBusy asks
+  // whether the death animation's tracker still runs, and it loops on
+  // through the hold).
   const auto chunks = w.frames(ResolveEventType::ChunkApplied);
   REQUIRE(chunks.size() == 2);
-  CHECK(chunks[1] == 72);
+  CHECK(chunks[1] == 102);
 }
 
 TEST_CASE("e62 artillery shells land together whatever their distance") {

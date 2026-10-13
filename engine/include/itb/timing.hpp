@@ -58,12 +58,20 @@ struct FrameClock {
 
 // Animation timing (Animation::Update / GetTotalProgress) for one animation
 // definition, replayed update by update.
+//
+// `fade_out` is Animation::SetFadeOut (0 = none): once the last frame's
+// tracker runs out, the animation holds that frame for `fade_out` seconds
+// before it is done. The frame tracker loops (its loop flag is always set,
+// Animation::LoadData), so during the hold it keeps running from its
+// overshoot and GetTotalProgress drops back to (n - 1) / n and climbs again:
+// a one-frame animation restarts from 0.
 class AnimTimeline {
  public:
   AnimTimeline() = default;
   AnimTimeline(const FrameClock& clock, int num_frames, float time,
-               const std::vector<float>& lengths = {}, bool loop = false);
-  AnimTimeline(const FrameClock& clock, const AnimDef& def);
+               const std::vector<float>& lengths = {}, bool loop = false,
+               float fade_out = 0.0f);
+  AnimTimeline(const FrameClock& clock, const AnimDef& def, float fade_out = 0.0f);
 
   bool valid() const { return num_frames_ > 0; }
   // Updates until IsDone (the animation then stops). Looping animations
@@ -120,6 +128,10 @@ struct Durations {
   // default: 8 frames of 0.14 s).
   int default_death_frames = 8;
   float default_death_time = 0.14f;
+  // Pawn::SetupAnimation gives the death animation of a pawn that is not a
+  // corpse SetFadeOut(0.5): its last frame is held 0.5 s longer (the body
+  // stays, busy in the enemy phase, and its progress restarts; AnimTimeline).
+  float death_fade_out = 0.5f;
   // Projectile physics (Values in game.lua).
   float x_velocity = 0.7f;
   float y_velocity = 18.0f;

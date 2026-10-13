@@ -101,11 +101,11 @@ int FrameClock::delay_updates(float delay) const {
 
 // ---- AnimTimeline -----------------------------------------------------------
 
-AnimTimeline::AnimTimeline(const FrameClock& clock, const AnimDef& def)
-    : AnimTimeline(clock, def.num_frames, def.time, def.lengths, def.loop) {}
+AnimTimeline::AnimTimeline(const FrameClock& clock, const AnimDef& def, float fade_out)
+    : AnimTimeline(clock, def.num_frames, def.time, def.lengths, def.loop, fade_out) {}
 
 AnimTimeline::AnimTimeline(const FrameClock& clock, int num_frames, float time,
-                           const std::vector<float>& lengths, bool loop)
+                           const std::vector<float>& lengths, bool loop, float fade_out)
     : num_frames_(num_frames) {
   if (num_frames_ <= 0) {
     total_ = 0;
@@ -122,12 +122,29 @@ AnimTimeline::AnimTimeline(const FrameClock& clock, int num_frames, float time,
     total_ = -1;
     return;
   }
-  // Animation::Update: the frame tracker advances by one step; once past the
-  // frame's length the next frame starts from 0 (the overshoot is dropped).
+  // Animation::Update @00795010: the frame tracker advances by one step; once
+  // past the frame's length it loops (elapsed - length) and the next frame
+  // starts from 0 (the overshoot is dropped). On the last frame a fade-out
+  // first holds the frame: the countdown is set to `fade_out` and, like on
+  // every later update, decremented by the step; the frame only advances on
+  // the update that takes it to <= 0, the tracker looping on meanwhile.
   // Done once the frame index reaches the frame count.
+  float countdown = 0.0f;
   for (int n = 1; n <= kMaxUpdates && s.frame < num_frames_; ++n) {
     s.elapsed = 1.0f * clock.step + s.elapsed;
-    if (s.length < s.elapsed) {
+    const bool done = s.length < s.elapsed;
+    if (done) s.elapsed = s.elapsed - s.length;
+    bool advance = false;
+    if (done && fade_out != 0.0f && countdown == 0.0f && s.frame == num_frames_ - 1) {
+      countdown = fade_out;
+    }
+    if (countdown > 0.0f) {
+      countdown = countdown - clock.step;
+      advance = !(0.0f < countdown);
+    } else {
+      advance = done;
+    }
+    if (advance) {
       ++s.frame;
       s.length = frame_length(s.frame);
       s.elapsed = s.length <= 0.0f ? s.length : 0.0f;

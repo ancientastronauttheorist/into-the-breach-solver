@@ -382,6 +382,19 @@ Done so far (build order from the decompile):
    - Pushes and bumps with the game's same-frame ordering, dying bodies that
      block for half their death animation, death effects (ACID pools, Fast
      Decay, Lua hooks), corpse explosions, psion leaders and body removal.
+   - A death animation fades out: `Pawn::SetupAnimation` gives a non-corpse
+     pawn's `<Image>d` animation `SetFadeOut(0.5)`, so `Animation::Update`
+     holds its last frame 0.5 s longer before it is done (the body stays that
+     much longer, and is busy in the enemy phase). The frame tracker always
+     loops (`Animation::LoadData` sets its loop flag), so during the hold it
+     keeps running from its overshoot and `GetTotalProgress` falls back to
+     (n − 1) / n: a one-frame death animation restarts from 0 and its body
+     blocks pushes again for the first half of the hold. Live 2026-10-13
+     run 17 (m36 Mission_Barrels, turn 2): a Pierce Shot killed an ACID vat
+     (`barrel1d`, one frame of 0.5 s) and pushed the shooter's own mech into
+     its tile 42 updates later. The game bumped the mech (the vat's progress
+     was back at 0.37), where a Digger2 in the same spot 42 updates after
+     its death (8 frames) is passed through.
    - Boost and Vek Hormones are baked in when an effect is computed.
    - Outcomes that hinge on two events within one frame are reported as
      timing-sensitive; Grid Defense rolls and spider-egg picks are logged as

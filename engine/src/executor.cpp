@@ -147,7 +147,8 @@ Simulation::Simulation(Resolver& owner, Board& board, ResolveContext& ctx)
     timelines_->data = ctx.data;
     timelines_->clock = clock_;
     timelines_->durations = dur_;
-    timelines_->default_death = AnimTimeline(clock_, dur_.default_death_frames, dur_.default_death_time);
+    timelines_->default_death = AnimTimeline(clock_, dur_.default_death_frames, dur_.default_death_time,
+                                              {}, false, dur_.death_fade_out);
   }
   if (!rules_.data) rules_.data = ctx.data;
   // The caller's hooks are moved aside (and back in the destructor); the
@@ -1117,8 +1118,10 @@ const AnimTimeline* Simulation::timeline(Symbol anim) {
   return stored.valid() ? &stored : nullptr;
 }
 
-// The pawn's death animation ("<Image>d"). Pawn types the game data does not
-// know get the default; known types without one have none.
+// The pawn's death animation ("<Image>d"), with the fade-out
+// Pawn::SetupAnimation gives it (corpses, which skip it, never use the
+// timeline's end). Pawn types the game data does not know get the default;
+// known types without one have none.
 const AnimTimeline* Simulation::death_timeline(const Pawn& pawn) {
   const PawnDef* def = ctx_.data ? ctx_.data->pawn(pawn.type) : nullptr;
   if (!def) return &timelines_->default_death;
@@ -1127,7 +1130,7 @@ const AnimTimeline* Simulation::death_timeline(const Pawn& pawn) {
     return it->second.valid() ? &it->second : nullptr;
   }
   const AnimDef* anim = ctx_.data->animation(def->image + "d");
-  AnimTimeline t = anim ? AnimTimeline(clock_, *anim) : AnimTimeline();
+  AnimTimeline t = anim ? AnimTimeline(clock_, *anim, dur_.death_fade_out) : AnimTimeline();
   auto& stored = cache.emplace(pawn.type, std::move(t)).first->second;
   return stored.valid() && stored.total_updates() > 0 ? &stored : nullptr;
 }

@@ -622,3 +622,43 @@ TEST_CASE("Engine: Pierce Shot's delayed push goes through a body past half its 
   CHECK(b.find_pawn(napalm)->hp == napalm_hp);
   CHECK(r.resolve.quiescent);
 }
+
+TEST_CASE("Engine: a dying ACID vat blocks again while its death animation fades out") {
+  // Live 2026-10-13 run 17 (m36 Mission_Barrels, turn 2): the PierceMech on
+  // G3 fires Brute_PierceShot_A at F3. The first unit in line is its own
+  // NapalmMech on D3; the projectile hits the ACID vat behind it on C3 for
+  // 3 (dead) and pushes the body into the second vat on B3 (bump: that one
+  // dies too). 0.5 s after launch the NapalmMech is pushed towards C3, and
+  // that push lands 42 updates after the vat died. The game bumped the mech
+  // (6 -> 5, still on D3, no ACID): the vat's death animation (barrel1d, one
+  // frame of 0.5 s) had run out after 31 updates, but its fade-out hold
+  // (0.5 s, Pawn::SetupAnimation) keeps the frame tracker looping, so its
+  // progress was back under half way. A Vek in the same spot (8 frames) is
+  // passed through (live 20261013_024040, m34 turn 2: a Digger2).
+  NEED_ENGINE();
+  Board b;
+  const int32_t pierce = place(b, "PierceMech", {5, 1}, true);
+  const int32_t napalm = place(b, "NapalmMech", {5, 4}, true);
+  const int32_t vat1 = place(b, "AcidVat", {5, 5});
+  const int32_t vat2 = place(b, "AcidVat", {5, 6});
+  b.find_pawn(vat2)->hp = 1;
+  Pawn& m = *b.find_pawn(pierce);
+  m.weapons[0] = intern("Brute_PierceShot_A");
+  m.active = true;
+  const int napalm_hp = b.find_pawn(napalm)->hp;
+  const ActionResult r = E.fire_weapon(b, pierce, 0, {5, 2});
+  REQUIRE_MESSAGE(r.ok(), to_string(r.status));
+  CHECK(r.lua_errors.empty());
+  CHECK(gone(b, vat1));
+  CHECK(gone(b, vat2));
+  const Pawn& n = *b.find_pawn(napalm);
+  CHECK(n.pos == Point{5, 4});
+  CHECK(n.hp == napalm_hp - 1);
+  CHECK_FALSE(n.acid);
+  // The vats' death effects: ACID water on both tiles.
+  CHECK(b.tile({5, 5}).terrain == Terrain::Water);
+  CHECK(b.tile({5, 5}).acid);
+  CHECK(b.tile({5, 6}).terrain == Terrain::Water);
+  CHECK_FALSE(r.resolve.timing_sensitive());
+  CHECK(r.resolve.quiescent);
+}
