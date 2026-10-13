@@ -1509,8 +1509,14 @@ def end_turn(ctx) -> list:
             left = phase_left(bridge, turn, args.timeout)
     if left == "silent":
         if state.get("mission_id") == FINAL_MISSION:
-            say("the bridge went silent after End Turn on the final mission: the run is over (Victory)")
-            run.event("run_over", {"mission_id": state.get("mission_id"), "turn": turn})
+            # The bridge stops on both the Victory screen and Timeline Lost
+            # (its last state is from before the enemy phase), so the outcome
+            # is read off the screen, not assumed (live 2026-10-13 run 15: a
+            # Cave lost on its last turn was reported as a Victory).
+            say("the bridge went silent after End Turn on the final mission: the run is over "
+                "(Victory or Timeline Lost: check the screen)")
+            run.event("run_over", {"mission_id": state.get("mission_id"), "turn": turn, "outcome": "unknown",
+                                   "grid_before_enemy_phase": state.get("grid_power")})
             ctx.mission_over = True
             return anomalies
         raise Anomaly("the bridge went silent after End Turn (game over screen, or the game stopped?)")
