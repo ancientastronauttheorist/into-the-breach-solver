@@ -334,6 +334,45 @@ TEST_CASE("solver: one Vek threatens a building; the punch saves it") {
   CHECK(r.warnings.empty());
 }
 
+// Live run 2026-10-12: the Shifty re-activation was taken as a fresh action
+// and the plan fired and repaired one mech dozens of times. In the UI the
+// mech may only step one tile after attacking.
+TEST_CASE("solver: a Shifty mech attacks once, then may only step") {
+  NEED_ENGINE();
+  // Two Hornets (2 HP) in a row east of the mech, each a punch kill; each
+  // threatens a building.
+  Board b;
+  const int32_t m = place(b, "PunchMech", {2, 5}, true);
+  P(b, m).pilot_abilities = kPilotShifty;
+  const int32_t h1 = place(b, "Hornet1", {3, 5});
+  queue(b, h1, {3, 6});
+  set_building(b, {3, 6});
+  const int32_t h2 = place(b, "Hornet1", {3, 4});
+  queue(b, h2, {3, 3});
+  set_building(b, {3, 3});
+  const TurnContext ctx = context();
+  const SolveResult r = solve_turn(E, b, ctx, quick());
+  CHECK(r.proven_optimal);
+  int acts = 0;
+  for (const PlayerAction& a : r.best.actions) {
+    if (a.uid == m && a.kind != PlayerAction::Kind::None) ++acts;
+  }
+  CHECK(acts == 1);
+  CHECK(r.best.worst_case[ScoreKey::VekKilled] <= 1);
+  // Punch, step one tile (the Shifty bonus), punch again: the second punch
+  // is refused, as in the game.
+  PlayerAction punch;
+  punch.uid = m;
+  punch.kind = PlayerAction::Kind::Weapon;
+  punch.weapon = "Prime_Punchmech";
+  punch.target = {3, 5};
+  PlayerAction again = punch;
+  again.move = {2, 4};
+  again.target = {3, 4};
+  CHECK(evaluate_plan(E, b, ctx, {punch}));
+  CHECK_FALSE(evaluate_plan(E, b, ctx, {punch, again}));
+}
+
 TEST_CASE("solver: the greedy first action loses a building later") {
   NEED_ENGINE();
   // The Hornet next to the mech is a free kill, but punching it uses the

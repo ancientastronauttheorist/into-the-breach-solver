@@ -396,6 +396,65 @@ TEST_CASE("Engine: refuses what the game refuses") {
   CHECK(E.fire_weapon(b, mech, 0, {3, 3}, std::nullopt, o).ok());
 }
 
+// The UI arms a weapon or Repair only while Pawn::IsActable (no bonus shift
+// pending); the Shifty / Post_Move re-activation is for the bonus move.
+TEST_CASE("Engine: a Shifty mech that attacked may only step one tile") {
+  NEED_ENGINE();
+  Board b;
+  const int32_t mech = place(b, "PunchMech", {3, 4}, true);
+  place(b, "Scorpion1", {3, 3});
+  b.find_pawn(mech)->active = true;
+  b.find_pawn(mech)->pilot_abilities = kPilotShifty;
+  REQUIRE(E.fire_weapon(b, mech, 0, {3, 3}).ok());
+  CHECK(b.find_pawn(mech)->active);
+  CHECK(E.fire_weapon(b, mech, 0, {3, 3}).status == ActionStatus::CannotAct);
+  CHECK(E.repair(b, mech).status == ActionStatus::CannotAct);
+  CHECK(E.move(b, mech, {5, 4}).status == ActionStatus::NotInArea);
+  REQUIRE(E.move(b, mech, {4, 4}).ok());
+  CHECK_FALSE(b.find_pawn(mech)->active);
+  CHECK(E.repair(b, mech).status == ActionStatus::CannotAct);
+}
+
+TEST_CASE("Engine: Double_Shot acts twice unmoved, once after a move") {
+  NEED_ENGINE();
+  for (bool moved : {false, true}) {
+    Board b;
+    const int32_t mech = place(b, "PunchMech", {3, 4}, true);
+    place(b, "Scorpion1", {3, 2});
+    b.find_pawn(mech)->active = true;
+    b.find_pawn(mech)->pilot_abilities = kPilotDoubleShot;
+    if (moved) REQUIRE(E.move(b, mech, {3, 3}).ok());
+    int acts = 0;
+    for (int i = 0; i < 4; ++i) {
+      const Point at = b.find_pawn(mech)->pos;
+      if (!E.fire_weapon(b, mech, 0, at + Point{1, 0}).ok()) break;
+      ++acts;
+    }
+    INFO("moved " << moved);
+    CHECK(acts == (moved ? 1 : 2));
+    CHECK(E.repair(b, mech).status == ActionStatus::CannotAct);
+    CHECK(E.move(b, mech, {3, 5}).status == ActionStatus::CannotAct);
+  }
+}
+
+TEST_CASE("Engine: a mech on smoke or in water cannot attack or repair") {
+  NEED_ENGINE();
+  Board b;
+  const int32_t mech = place(b, "PunchMech", {3, 4}, true);
+  place(b, "Scorpion1", {3, 3});
+  b.find_pawn(mech)->active = true;
+  b.tile({3, 4}).smoke = true;
+  CHECK(E.fire_weapon(b, mech, 0, {3, 3}).status == ActionStatus::CannotAct);
+  CHECK(E.repair(b, mech).status == ActionStatus::CannotAct);
+  b.tile({3, 4}).smoke = false;
+  b.tile({3, 4}).terrain = Terrain::Water;
+  CHECK(E.fire_weapon(b, mech, 0, {3, 3}).status == ActionStatus::CannotAct);
+  CHECK(E.repair(b, mech).status == ActionStatus::CannotAct);
+  // It may still move out, and attack from there.
+  REQUIRE(E.move(b, mech, {4, 3}).ok());
+  CHECK(E.fire_weapon(b, mech, 0, {3, 3}).ok());
+}
+
 TEST_CASE("Engine: a limited weapon fires while it has uses left") {
   NEED_ENGINE();
   Board b;

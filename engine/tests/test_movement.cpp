@@ -582,6 +582,85 @@ TEST_CASE("S9 Double_Shot: second shot, no move") {
   CHECK_FALSE(p.active);
 }
 
+// Pawn::IsActable gates arming a weapon or Repair in the UI (PawnBox): a
+// pending bonus shift leaves the pawn active for its bonus move only.
+TEST_CASE("S7b Shifty: after attacking, a 1-tile move and nothing else") {
+  Board b;
+  Pawn& p = mech(b, {3, 3});
+  p.pilot_abilities = kPilotShifty;
+  CHECK(can_act(b, p));
+  on_skill_fired(b, p, false);
+  CHECK(p.active);
+  CHECK_FALSE(can_act(b, p));  // no second weapon, no Repair
+  CHECK(can_move(p));
+  CHECK(move_speed(b, p) == 1);
+  REQUIRE(player_move(b, p.uid, {3, 4}));
+  CHECK_FALSE(p.active);
+  CHECK_FALSE(can_act(b, p));
+  CHECK_FALSE(can_move(p));
+}
+
+TEST_CASE("S8b Post_Move: after attacking, a move and nothing else") {
+  Board b;
+  Pawn& p = mech(b, {3, 3});
+  p.pilot_abilities = kPilotPostMove;
+  REQUIRE(player_move(b, p.uid, {3, 5}));
+  CHECK(can_act(b, p));
+  on_skill_fired(b, p, false);
+  CHECK(p.active);
+  CHECK_FALSE(can_act(b, p));
+  CHECK(can_move(p));
+}
+
+TEST_CASE("S9b Double_Shot: two actions unmoved, one after a move") {
+  Board b;
+  Pawn& p = mech(b, {3, 3});
+  p.pilot_abilities = kPilotDoubleShot;
+  int acts = 0;
+  while (can_act(b, p) && acts < 5) {
+    on_skill_fired(b, p, false);
+    ++acts;
+  }
+  CHECK(acts == 2);
+  CHECK_FALSE(can_move(p));
+
+  Board b2;
+  Pawn& q = mech(b2, {3, 3});
+  q.pilot_abilities = kPilotDoubleShot;
+  REQUIRE(player_move(b2, q.uid, {3, 5}));
+  acts = 0;
+  while (can_act(b2, q) && acts < 5) {
+    on_skill_fired(b2, q, false);
+    ++acts;
+  }
+  CHECK(acts == 1);
+}
+
+TEST_CASE("S9c no pilot: one action, then done") {
+  Board b;
+  Pawn& p = mech(b, {3, 3});
+  on_skill_fired(b, p, false);
+  CHECK_FALSE(p.active);
+  CHECK_FALSE(can_act(b, p));
+  CHECK_FALSE(can_move(p));
+}
+
+TEST_CASE("S9d smoke and water: no weapon or Repair, the move stays") {
+  Board b;
+  Pawn& p = mech(b, {3, 3});
+  b.tile({3, 3}).smoke = true;
+  CHECK_FALSE(can_act(b, p));
+  CHECK(can_move(p));
+  p.ignore_smoke = true;
+  CHECK(can_act(b, p));
+  b.tile({3, 3}).smoke = false;
+  b.tile({3, 3}).terrain = Terrain::Water;
+  CHECK_FALSE(can_act(b, p));  // submerged
+  CHECK(can_move(p));
+  p.flying = true;
+  CHECK(can_act(b, p));
+}
+
 TEST_CASE("S10 Kickoff Boosters bonus is assigned, not summed") {
   Board b;
   b.passives = kPassiveKickoff;

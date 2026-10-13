@@ -410,8 +410,10 @@ static ActionResult fire_skill(Engine& engine, Engine::Impl& im, Board& board, i
     return out;
   }
   if (opts.check_legal) {
-    const bool can = move_skill ? can_move(*pawn)
-                                : pawn->alive() && pawn->active && pawn->movement.powered && !pawn->frozen;
+    // A weapon or Repair needs what the UI needs to arm one (can_act:
+    // Pawn::IsActable, so not during a Shifty / Post_Move bonus move);
+    // Pawn::FireWeapon itself only refuses a frozen pawn.
+    const bool can = move_skill ? can_move(*pawn) : can_act(board, *pawn) && !pawn->frozen;
     if (!can) {
       out.status = ActionStatus::CannotAct;
       return out;

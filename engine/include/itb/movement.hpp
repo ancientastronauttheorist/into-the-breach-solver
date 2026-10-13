@@ -71,6 +71,16 @@ int move_speed(const Board& b, const Pawn& p);
 bool can_move(const Pawn& p);
 // Pawn::IsMoved: has moved and has no bonus shift left.
 bool is_moved(const Pawn& p);
+// Pawn::IsActable (0087a200) during the player's turn (nothing is busy): may
+// arm a weapon or Repair in the UI now. Active, alive and powered, not on
+// smoke (unless immune), not submerged (water or lava, not flying) and no
+// bonus shift pending: after a Shifty or Post_Move pilot's attack the pawn is
+// active again for its bonus move only. The UI's weapon box (PawnBox::
+// SwapSkill, OnKeyAction, OnMouseAction, Update) arms nothing else; a frozen
+// pawn is checked separately (weapons, not Repair, in the UI). Not modelled:
+// IsActable's "has a usable weapon" clause (every mech keeps an unlimited
+// weapon or a Repair).
+bool can_act(const Board& b, const Pawn& p);
 
 // Bookkeeping after a skill fires (Pawn::FireWeapon): `move_skill` for the
 // Move skill (slot 0), false for any weapon or repair. Handles moved/active,

@@ -171,6 +171,10 @@ Pawn load_unit(const json& u, const GameData* data, std::vector<std::string>& wa
   p.active = get_or<bool>(u, "active", false);
   // A unit that already used its move this turn (not exported by older bridges).
   p.moved = get_or<bool>(u, "moved", false);
+  // A pending bonus move (the save's iBonusShift): a Shifty (1) or Post_Move
+  // (the base move) pilot's move after attacking. The bridge cannot read it;
+  // the live driver sets it for a unit it saw attack this turn.
+  p.movement.bonus_shift = static_cast<int8_t>(std::clamp(get_or<int>(u, "bonus_shift", 0), 0, 100));
   p.fire = get_or<bool>(u, "fire", false);
   p.frozen = get_or<bool>(u, "frozen", false);
   p.acid = get_or<bool>(u, "acid", false);

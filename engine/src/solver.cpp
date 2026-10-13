@@ -812,7 +812,7 @@ class Worker {
     LuaHost& lua = e_.lua();
     const int32_t uid = p.uid;
     const Point at = p.pos;
-    if (acts && p.active && p.movement.powered && !p.frozen) {
+    if (acts && can_act(b, p) && !p.frozen) {
       for (int slot = 0; slot < kMaxWeapons; ++slot) {
         const Symbol w = p.weapons[static_cast<size_t>(slot)];
         if (w == kNoSymbol || passive(w)) continue;

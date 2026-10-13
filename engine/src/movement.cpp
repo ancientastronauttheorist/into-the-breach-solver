@@ -301,6 +301,17 @@ bool can_move(const Pawn& p) {
 
 bool is_moved(const Pawn& p) { return p.moved && p.movement.bonus_shift < 1; }
 
+bool can_act(const Board& b, const Pawn& p) {
+  if (!(p.active && p.alive() && p.movement.powered)) return false;
+  if (p.movement.bonus_shift > 0) return false;  // a pending bonus move: move only
+  if (!p.pos.valid()) return true;
+  const Tile& t = b.tile(p.pos);
+  // Pawn::IsSmoked / IsSubmerged with nothing busy (tile_status.cpp).
+  if (t.smoke && !p.ignore_smoke && !p.has_pilot(kPilotDisableImmunity)) return false;
+  if (t.terrain == Terrain::Water && !is_flying(p)) return false;
+  return true;
+}
+
 void on_skill_fired(Board& b, Pawn& p, bool move_skill) {
   MoveState& m = p.movement;
   if (move_skill) {

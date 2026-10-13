@@ -123,6 +123,14 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   (default 5: grid, buildings, mechs lost, objectives failed, mech HP);
   otherwise the search goes on, proving only those tiers, up to
   `--max-time` (default 120 s). `--min-tiers 0` always stops at `--time`.
+  Native `Pawn:FireWeapon` does not apply the UI's per-turn limits, so
+  before executing a plan (and each re-solve) the driver refuses one in
+  which a unit does more than the UI allows ("Action model" below): move
+  then one weapon or Repair; Shifty / Post_Move pilots one more move after
+  acting; Double_Shot two actions without moving. Each unit's moves and
+  actions this turn are kept in the run manifest (`unit_actions`); a unit
+  that acted and is active again gets its pilot bonus in re-solves
+  (`bonus_shift`, or `moved` for Double_Shot), which the bridge cannot read.
 - **end-turn** predicts the enemy phase from the board as left, sends
   `END_TURN` (it deactivates the mechs, so the "units can still act" dialog
   never appears; on this build the bridge cannot end the turn itself and
@@ -783,6 +791,37 @@ interleave freely; the engine's `Pawn::FireWeapon` bookkeeping decides what
 a unit may still do (Double_Shot, Shifty, Post_Move) and `check_legal` is
 the ground truth: refused sub-actions and ones with no effect are dropped.
 Move undo is not modelled (an undone move equals not moving).
+
+A weapon or Repair needs `can_act` (`movement.hpp`), the game's
+`Pawn::IsActable` (0087a200): active, alive, powered, not on smoke (unless
+immune), not submerged (water or lava, not flying) and no bonus shift
+pending; and not frozen. That is the UI's gate: the weapon box arms a weapon
+or Repair only while it holds (`PawnBox::SwapSkill`, `OnKeyAction`,
+`OnMouseAction`; `PawnBox::Update` disarms one each frame once it does not),
+and its "blocked" overlay reads `Pawn::IsBonusShift`. `Pawn::FireWeapon`
+itself checks only frozen, so the bridge's native calls are no check. What
+follows for the pilots (FireWeapon's bookkeeping, stage 5 §2.4):
+
+- **Shifty** (Sidestep): a weapon or Repair re-activates the pawn with a
+  bonus shift of 1, which replaces its move: one 1-tile move, never a
+  second action. The move spends the bonus and ends the pawn's turn.
+- **Post_Move** (Fire-and-Forget): the same with a bonus shift of the base
+  move, moved before or not.
+- **Double_Shot**: after a weapon or Repair with no move yet, the pawn is
+  marked moved and active again: exactly one more action, no move. After a
+  move, one action.
+- Every other pawn: one action, which ends its turn.
+
+Before 2026-10-13 the engine checked only `active` for weapons, so a
+re-activated Shifty pawn could fire and repair again without limit, and a
+mech on smoke or in water could attack. The game, through native
+`FireWeapon`, took all of it: live run 20261012_172449 had 20 turns whose
+plan gave one Shifty mech more than one action (up to 44), and the live runs
+of 2026-10-09 to 10-12 executed 249 weapon/Repair steps from smoke (84) or
+water (165), in 148 turns. Not modelled: IsActable's "has a
+usable weapon" clause, and a frozen mech's Repair (the UI allows it:
+`FireWeapon` and `PawnBox::Update` exempt the Repair slot from the frozen
+check; the engine still refuses it).
 
 **Chance.** Every hook the engine exposes (Grid Defense, `choose` for
 environment orders/choices and mission picks, spider eggs, death-effect

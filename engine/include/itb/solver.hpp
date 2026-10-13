@@ -26,6 +26,9 @@
 //   - fire any non-passive weapon slot at any tile of its target area, and
 //     for two-click weapons at any tile of the second target area;
 //   - Repair (mechs; the pilot's repair skill) at any tile of its area.
+//   Weapons and Repair need movement.hpp can_act (the UI's Pawn::IsActable:
+//   not during a Shifty / Post_Move bonus move, not on smoke or in water)
+//   and not frozen.
 // Sub-actions of different units interleave freely (A moves, B shoots, A
 // shoots), and the engine's Pawn::FireWeapon bookkeeping decides what each
 // unit may still do (Double_Shot, Shifty, Post_Move). Move undo is not part
