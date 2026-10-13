@@ -17,6 +17,19 @@ namespace itb {
 struct AnimDef;
 class GameData;
 
+// Real seconds per frame that CFPS::OnLoop (@0079a2a0) does not see. It
+// reads the clock once to measure the frame (against the time it stored the
+// frame before) and again at its end to store the time for the next frame,
+// so the measured frame time is the real one minus the bookkeeping between
+// the two reads, well under a microsecond. Its size hardly matters (10 ns to
+// 10 us give the same frame counts); its sign does. At a steady 60 fps the
+// step is just below 1/60, so a timer that is a whole number of frames long
+// takes one more update than float32(1/60), which rounds up, suggests: a
+// 0.4 s push finishes on update 25, not 24, and a 0.3 s delay fires on the
+// 19th countdown, not the 18th (live 2026-10-13 run 17, m08 turn 1: a Pierce
+// Shot's delayed push of a mech into a dying Moth's tile went through).
+inline constexpr double kCfpsMeasureGap = 1e-7;
+
 // CFPS at a steady frame rate. `speed` is the speed factor s (16 units per
 // game second), `step` the game seconds per frame h = s / 16.
 struct FrameClock {

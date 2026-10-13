@@ -50,7 +50,11 @@ FrameClock FrameClock::steady(double fps, int speed_level) {
   c.speed_level = speed_level;
   // CFPS::OnLoop: real seconds since the last frame times (16 + 7 * level),
   // clamped to [0, 0.5]; the speed factor is the mean of the last five.
-  const double seconds = 1.0 / fps;
+  // The frame it measures runs from its second clock read of the previous
+  // frame to its first read of this one, so each frame misses CFPS's own
+  // bookkeeping between the two reads (kCfpsMeasureGap): at a steady rate
+  // the step is a hair below 1 / fps.
+  const double seconds = 1.0 / fps - kCfpsMeasureGap;
   float raw = static_cast<float>(seconds * static_cast<double>(
                                                static_cast<float>(speed_level * 7) + 16.0f));
   raw = std::clamp(raw, 0.0f, 0.5f);

@@ -132,8 +132,10 @@ constexpr Point R{3, 2};
 
 TEST_CASE("clock: 60 fps steady step") {
   const FrameClock c = FrameClock::steady(60.0);
-  CHECK(c.step == doctest::Approx(1.0 / 60.0).epsilon(1e-6));
-  CHECK(c.speed == doctest::Approx(16.0 / 60.0).epsilon(1e-6));
+  // A hair below 1/60 (kCfpsMeasureGap): 6 ppm.
+  CHECK(c.step == doctest::Approx(1.0 / 60.0).epsilon(1e-5));
+  CHECK(c.speed == doctest::Approx(16.0 / 60.0).epsilon(1e-5));
+  CHECK(c.step < 1.0f / 60.0f);
   // Below 32 fps the per-frame step is clamped (the game slows down).
   CHECK(FrameClock::steady(20.0).step == doctest::Approx(0.5f * 0.0625f));
 }
@@ -149,10 +151,13 @@ TEST_CASE("clock: straight projectiles impact by distance, artillery all togethe
 
 TEST_CASE("clock: trackers and delays") {
   const FrameClock c = FrameClock::steady(60.0);
-  // The steady 60 fps step is 1/60 in float32 (0.016666668, a hair above
-  // 1/60): a push is past 0.4 s after 24 updates, and repeated subtraction
-  // leaves a 0.15 s delay just above zero after 9.
-  CHECK(c.tracker_updates(0.4f) == 24);
+  // CFPS does not measure its own bookkeeping (kCfpsMeasureGap), so the
+  // steady 60 fps step is a hair below 1/60: a timer that is a whole number
+  // of frames takes one more update. A push is past 0.4 s after 25 updates,
+  // a 0.3 s delay runs out on the 19th countdown; 0.15 s takes 10 updates
+  // either way.
+  CHECK(c.tracker_updates(0.4f) == 25);
+  CHECK(c.delay_updates(0.3f) == 19);
   CHECK(c.tracker_updates(0.15f) == 10);
   CHECK(c.delay_updates(0.15f) == 10);
   // A standard Vek death animation: 8 frames of 0.14 s, 9 updates each.
@@ -236,7 +241,7 @@ TEST_CASE("e06 pushed into water: drowns there, death processed after") {
   se.add_damage(push_sd(A, Dir::Right));
   w.fire(se);
   const int64_t moved = w.frame_of(ResolveEventType::PushMoved, 1);
-  CHECK(moved == 23);  // 24 tracker updates, the first on frame 0
+  CHECK(moved == 24);  // 25 tracker updates, the first on frame 0
   CHECK(w.frame_of(ResolveEventType::DeathProcessed, 1) == moved);
   bool killed_on_water = false;
   for (const RulesEvent& e : w.events) {
@@ -255,9 +260,9 @@ TEST_CASE("e07 pushed into a chasm: falls (alive, busy), then dies") {
   w.fire(se);
   const int64_t moved = w.frame_of(ResolveEventType::PushMoved, 1);
   const int64_t died = w.frame_of(ResolveEventType::DeathProcessed, 1);
-  CHECK(moved == 23);
-  // The fall animation (0.4 s) runs first: the death comes 24 frames later.
-  CHECK(died == moved + 24);
+  CHECK(moved == 24);
+  // The fall animation (0.4 s) runs first: the death comes 25 frames later.
+  CHECK(died == moved + 25);
   CHECK(w.count(RulesEventType::PawnFell) == 1);
   CHECK(w.removed(1));
 }
@@ -518,8 +523,8 @@ TEST_CASE("e26 without an animation the FULL_DELAY chunk follows at once: blocke
   CHECK(w.pawn(2)->pos == A);
   CHECK(w.pawn(2)->hp == 2);
   // The chunk fired in the first frame's queue pass; the push it started
-  // ticks from the next frame and is blocked 24 updates later.
-  CHECK(w.frame_of(ResolveEventType::PushBlocked, 2) == 24);
+  // ticks from the next frame and is blocked 25 updates later.
+  CHECK(w.frame_of(ResolveEventType::PushBlocked, 2) == 25);
 }
 
 // Tri-Rocket (Ranged_Crack): three pushing rockets 0.15 s apart, far tile first.
@@ -566,8 +571,8 @@ TEST_CASE("e27 Tri-Rocket: the dying-blocker threshold") {
   // Vek died, against a ~0.56 s threshold. Frame-exact, the death animation
   // is slower than 8 x 0.14 s (each animation frame runs whole update
   // steps), so the push is blocked (rocket + bump: HP 1) with a margin of
-  // frames at 30, 60, 120 and 144 fps; see the report for 50-60 fps.
-  for (double fps : {30.0, 60.0, 120.0, 144.0}) {
+  // frames at 30, 60 and 144 fps; see the report for 50-60 fps.
+  for (double fps : {30.0, 60.0, 144.0}) {
     CAPTURE(fps);
     const TriOutcome o = tri_rocket_at(fps);
     CHECK(o.mid_blocked);
@@ -575,7 +580,11 @@ TEST_CASE("e27 Tri-Rocket: the dying-blocker threshold") {
     CHECK_FALSE(o.sensitive);
   }
   // Where the push lands within a frame of the 50% mark the outcome is
-  // flagged; at 35 fps it even goes through.
+  // flagged (at 120 fps it lands one frame before the mark); at 35 fps it
+  // even goes through.
+  const TriOutcome at120 = tri_rocket_at(120.0);
+  CHECK(at120.mid_blocked);
+  CHECK(at120.sensitive);
   const TriOutcome at34 = tri_rocket_at(34.0);
   CHECK(at34.mid_blocked);
   CHECK(at34.sensitive);
@@ -752,7 +761,7 @@ TEST_CASE("e35 melee: the hit lands after the lunge, the next chunk waits for th
   CHECK(w.frame_of(ResolveEventType::LungeHit, 10) == 9);  // 0.15 s
   // The hit lands in the mech's pawn update; the Vek comes later in the list,
   // so its push ticks in that same frame.
-  CHECK(w.frame_of(ResolveEventType::PushMoved, 1) == 9 + 23);
+  CHECK(w.frame_of(ResolveEventType::PushMoved, 1) == 9 + 24);
   CHECK(w.removed(1));
 }
 
@@ -1288,7 +1297,7 @@ TEST_CASE("resolve_effects keeps one clock across effects") {
   REQUIRE(moves.size() == 2);
   // The second effect fires once the board went idle and then had a frame
   // in which nothing changed.
-  CHECK(moves[1] == moves[0] + 25);
+  CHECK(moves[1] == moves[0] + 26);
 }
 
 TEST_CASE("a frame-rate change shifts timings but not a robust outcome") {
@@ -1430,7 +1439,9 @@ TEST_CASE("timing: an impact landing with a push on its tiles is flagged") {
   w.add(vek(1, A));
   SkillEffect se = effect_from({0, 2});
   se.add_artillery(space_damage(R, 1), "effects/shotup_tank", kNoDelay);
-  se.add_delay(0.4f);
+  // The shell lands on update 48; the delay runs out on update 23 and the
+  // push it starts lands 25 updates later, in the same frame.
+  se.add_delay(0.375f);
   se.add_damage(push_sd(A, Dir::Right));
   w.fire(se);
   CHECK(w.frame_of(ResolveEventType::Impact) == w.frame_of(ResolveEventType::PushMoved, 1));

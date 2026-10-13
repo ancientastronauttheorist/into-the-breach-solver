@@ -363,6 +363,19 @@ Done so far (build order from the decompile):
      phases of the game's frame, an integer frame clock at a fixed frame rate,
      and every timer replayed in the game's float32 arithmetic. Frames where
      nothing can happen are skipped.
+   - The step is what `CFPS::OnLoop` measures, which is a hair less than the
+     real frame time: it takes the frame's length from its second clock read
+     of the frame before to its first read of this one, so it misses its own
+     bookkeeping in between (`kCfpsMeasureGap`, 100 ns; any value from 10 ns
+     to 10 µs gives the same frame counts). At a steady 60 fps the step is
+     just under 1/60, so a timer that is a whole number of frames takes one
+     more update than float32(1/60) (which rounds up) would give: a 0.4 s
+     push lands on update 25 and a 0.3 s delay fires on the 19th countdown.
+     Live 2026-10-13 run 17 (m08 turn 1) shows it: a Pierce Shot pushes the
+     shooter's own mech, 0.3 s after launch, into the tile of a Moth the shot
+     killed. The mech moved in unhurt, so the Moth's body was past half its
+     death animation (36 updates) when the push landed, which only the
+     slower step gives (the old step landed it on update 35: a bump).
    - `Board::ApplyEffect` and the stacked-effect queue (FULL/PROJ/positive
      delays), projectiles, artillery, lasers, melee lunges, walks, leaps,
      charges, teleports and burrows.
@@ -1551,6 +1564,11 @@ Each has a scenario in `LIVE_TEST_PLAN.md`.
   when things happen. Measure them in game.
 - **Frame rate.** Some outcomes depend on the frame rate (the executor flags
   them). Check what frame rate and speed level the game really runs at.
+  The live game (60 Hz display, settings `no_limit = 0`) matched a step a
+  hair below 1/60 on the one recorded tie (run 17 m08 turn 1, above). Real
+  frame times jitter, so a timer that is a whole number of frames long can
+  still land a frame early in the game; the executor only flags outcomes
+  within one frame on its own clock.
 - **Mechs standing in fire (Mission_BurnbugBoss).** Recorded mechs on a
   burning tile were not set on fire, although `CheckAcidFire` runs every
   frame for idle occupants. Find what prevents it.

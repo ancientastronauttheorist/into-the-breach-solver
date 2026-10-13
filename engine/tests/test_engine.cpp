@@ -590,3 +590,35 @@ TEST_CASE("Engine: a train moves with its rear tile and dies to a hit there") {
     CHECK(gone(b, train));
   }
 }
+
+TEST_CASE("Engine: Pierce Shot's delayed push goes through a body past half its death") {
+  // Live 2026-10-13 run 17 (m08 Mission_FireflyBoss, turn 1): a boosted
+  // PierceMech at A4 fires Brute_PierceShot at its own NapalmMech on B4
+  // (ae_weapons.lua: the projectile hits the next unit behind, a Moth on C4,
+  // for 3 and pushes it into the FireflyBoss on D4; 0.3 s after launch the
+  // NapalmMech is pushed towards C4). The Moth dies on impact and its body
+  // slides into the boss (bump: boss -1). Its death animation (8 x 0.14 s)
+  // is past half way when the NapalmMech's push lands, so the mech moves to
+  // C4 unhurt. With the step at float32(1/60) the push landed one update
+  // before the half-way mark: a bump (mech 4 -> 3, staying on B4).
+  NEED_ENGINE();
+  Board b;
+  const int32_t pierce = place(b, "PierceMech", {4, 7}, true);
+  const int32_t napalm = place(b, "NapalmMech", {4, 6}, true);
+  const int32_t moth = place(b, "Moth1", {4, 5});
+  const int32_t boss = place(b, "FireflyBoss", {4, 4});
+  Pawn& m = *b.find_pawn(pierce);
+  m.weapons[0] = intern("Brute_PierceShot");
+  m.boosted = true;
+  m.active = true;
+  const int napalm_hp = b.find_pawn(napalm)->hp;
+  const int boss_hp = b.find_pawn(boss)->hp;
+  const ActionResult r = E.fire_weapon(b, pierce, 0, {4, 6});
+  REQUIRE_MESSAGE(r.ok(), to_string(r.status));
+  CHECK(r.lua_errors.empty());
+  CHECK(gone(b, moth));
+  CHECK(b.find_pawn(boss)->hp == boss_hp - 1);
+  CHECK(b.find_pawn(napalm)->pos == Point{4, 5});
+  CHECK(b.find_pawn(napalm)->hp == napalm_hp);
+  CHECK(r.resolve.quiescent);
+}
