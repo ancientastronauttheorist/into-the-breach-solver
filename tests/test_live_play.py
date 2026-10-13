@@ -1443,6 +1443,18 @@ class DiffBoardsTest(unittest.TestCase):
         diffs, _ = self.psion_case(bonus=2)
         self.assertEqual(len(diffs), 2)
 
+    def test_psion_buffs_mechs_with_the_psionic_receiver(self):
+        # Live 2026-10-13 run 11 Mission_Force: a Jelly_Health1 emerged and
+        # every mech gained 1 HP through Passive_Psions.
+        mech = self.unit(0, "ChargeMech", 1, 2, 3, team=1, mech=True)
+        mech["weapons_exact"] = ["Brute_Beetle", "Passive_Psions"]
+        want = self.board([dict(mech)])
+        buffed = dict(mech, hp=2)
+        got = self.board([buffed, self.unit(577, "Jelly_Health1", 2, 6, 1, leader=1)])
+        diffs, notes = lp.diff_boards(want, got, {0}, enemy_phase=True)
+        self.assertEqual(diffs, [])
+        self.assertTrue(any("ChargeMech#0" in n for n in notes), notes)
+
     def test_psion_does_not_explain_mech_hp(self):
         want = self.board([self.unit(0, "JetMech", 3, 2, 3, team=1, mech=True)])
         got = self.board([self.unit(0, "JetMech", 4, 2, 3, team=1, mech=True),

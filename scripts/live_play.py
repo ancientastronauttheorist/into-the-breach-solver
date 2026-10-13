@@ -564,7 +564,8 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
       the grid higher by exactly the HP the buildings kept, was resisted.
     - A Soldier Psion / Psion Abomination that emerged from a hidden spawn
       (new in the game, absent from the prediction) gives every Vek +1 HP on
-      arrival: +1 HP on a known non-mech unit of the psion's team.
+      arrival: +1 HP on a known non-mech unit of the psion's team, and on
+      the mechs too when one carries Passive_Psions (Psionic Receiver).
     - `xp_split`: the prediction split squad XP whose remainder (a random
       draw) could level a pilot up; it takes the fewest level-ups, so a mech
       with exactly 2 HP more (a Health / Skilled level-up) is a note.
@@ -580,6 +581,9 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
     under = {u["uid"]: u for u in want.get("underground") or []}
     psion = None
     buffed = []
+    # Passive_Psions (Psionic Receiver) on any mech: the squad's mechs get psion bonuses too.
+    leech = any("Passive_Psions" in (u.get("weapons_exact") or u.get("weapons") or [])
+                for u in got["units"] if u.get("mech"))
     if enemy_phase and not any(_health_psion(u) for u in want["units"]):
         psion = next((u for u in got["units"] if u["uid"] not in known and _health_psion(u)), None)
     thaw_swaps = []
@@ -642,6 +646,8 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
             elif (psion is not None and b["hp"] == a["hp"] + 1 and not a.get("mech")
                     and a.get("team") == psion.get("team") and not _health_psion(a)):
                 buffed.append(who)
+            elif psion is not None and b["hp"] == a["hp"] + 1 and a.get("mech") and leech:
+                buffed.append(who)  # Psionic Receiver: mechs take Vek psion bonuses too
             elif enemy_phase and xp_split and a.get("mech") and b["hp"] == a["hp"] + 2:
                 notes.append(f"{who} hp {b['hp']} (engine {a['hp']}): a pilot level-up from the squad's "
                              "XP split (random remainder)")
