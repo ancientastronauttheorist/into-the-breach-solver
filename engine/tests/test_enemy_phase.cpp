@@ -1462,6 +1462,48 @@ TEST_CASE("chance: the final cave's destroyed bomb drops again at a random tile"
   CHECK(bombs == 1);
 }
 
+// Live 2026-10-12 m41 turn 3: the Psion Tyrant's tick killed the bomb; the
+// game dropped the new one on a tile the instant rocks had just struck (a
+// Beetle then charged into it). The pending ticks keep the board busy and a
+// due environment step takes the first idle frame, so UpdateMission's
+// re-drop waits for the strikes, and their danger marks are gone by then.
+TEST_CASE("final cave: a bomb the Tyrant kills drops again after the environment step") {
+  NEED_ENGINE();
+  Board b;
+  place(b, "Jelly_Lava1", {0, 0});
+  set_psion(b);
+  REQUIRE(b.psion == Leader::Tentacle);
+  const int32_t bomb = place(b, "BigBomb", {3, 3});
+  P(b, bomb).team = Team::Player;
+  hp(b, bomb, 1);
+  TurnContext ctx = context("Mission_Final_Cave");
+  ctx.mission.final_cave = FinalEnvState{true, 1, 3, true, {{2, 2}, {2, 3}}};  // instant rocks
+  int options = 0;
+  ctx.choose = [&options](const ChanceRecord& c) {
+    if (c.kind == ChanceKind::MissionRandom) options = c.options;
+    return 0;  // the first inner tile, (2,2): struck by the rocks
+  };
+  const PhaseResult r = E.end_turn(b, ctx);
+  CHECK(dead(b, bomb));
+  // The 4x4 centre, struck tiles included (the old bomb's tile is free).
+  CHECK(options == 16);
+  int env_step = -1, hook = -1;
+  for (size_t i = 0; i < r.events.size(); ++i) {
+    if (r.events[i].type == PhaseEventType::EnvStep && env_step < 0) env_step = static_cast<int>(i);
+    if (r.events[i].type == PhaseEventType::MissionHook && hook < 0) hook = static_cast<int>(i);
+  }
+  REQUIRE(env_step >= 0);
+  REQUIRE(hook >= 0);
+  CHECK(env_step < hook);
+  const Pawn* fresh = nullptr;
+  for (const Pawn& p : b.pawns()) {
+    if (symbol_name(p.type) == "BigBomb" && p.alive()) fresh = &p;
+  }
+  REQUIRE(fresh != nullptr);
+  CHECK(fresh->pos == Point{2, 2});
+  CHECK(fresh->hp == 4);
+}
+
 // ---- Environment coverage on recorded boards ---------------------------------------------
 
 namespace {

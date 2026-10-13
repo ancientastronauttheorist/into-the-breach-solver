@@ -72,10 +72,31 @@ class Host final : public EnvHost {
 
   int32_t new_uid() override { return r_.board().next_uid++; }
 
-  bool busy() const override { return r_.busy(); }
+  // Board:IsBusy() as Lua sees it from Mission:BaseUpdate. Besides the
+  // resolution's own busy state, the board is busy while status ticks are
+  // pending (busy code 7), and an environment step that is still due takes
+  // the first idle frame (BoardPlayer::UpdateState runs before BaseUpdate in
+  // the frame): `hold` covers both.
+  bool busy() const override {
+    if (hold_) {
+      deferred_ = true;
+      return true;
+    }
+    return r_.busy();
+  }
   int turn() const override { return r_.board().turn; }
 
+  void set_hold(bool hold) { hold_ = hold; }
+  // A hook asked while held: it waits for the next idle frame.
+  bool take_deferred() {
+    const bool d = deferred_;
+    deferred_ = false;
+    return d;
+  }
+
  private:
+  bool hold_ = false;
+  mutable bool deferred_ = false;
   Resolver& r_;
   RulesContext& rules_;
   const GameData& data_;
@@ -266,7 +287,9 @@ PhaseResult Engine::end_turn(Board& board, const TurnContext& tc) {
   // Mission:IsEnvironmentEffect(), evaluated once here.
   bool env_on = env->is_effect(host);
 
-  // ---- Status ticks: six phases, one pawn at a time.
+  // ---- Status ticks: six phases, one pawn at a time. The pending tick list
+  // keeps the board busy (code 7) for the hooks until the last tick.
+  host.set_hold(true);
   for (int phase = 0; phase < 6; ++phase) {
     std::vector<int32_t> order;
     for (const Pawn& p : board.pawns()) order.push_back(p.uid);
@@ -298,10 +321,25 @@ PhaseResult Engine::end_turn(Board& board, const TurnContext& tc) {
     }
   }
 
-  // ---- Environment steps, each resolved to idle before the next.
+  // ---- Environment steps, each resolved to idle before the next. A step
+  // still due takes every idle frame first, so a hook that waits for an idle
+  // board (Mission_Final_Cave's bomb re-drop) runs only once the last step
+  // has resolved, with the danger marks gone (live m41 turn 3: the bomb the
+  // Psion Tyrant killed came back on a tile the rocks had just struck).
+  host.set_hold(env_on);
   for (int step = 0; env_on && step < 64; ++step) {
     env_on = env->apply(host);
+    host.set_hold(env_on);
+    // The last step's own frames reach idle with the hold off: the hook runs.
+    if (!env_on) host.take_deferred();
     out.events.push_back(PhaseEvent{PhaseEventType::EnvStep, kInvalidPoint, -1, step, env->name()});
+    absorb(out, r.settle());
+    burrow_away();
+  }
+  host.set_hold(false);
+  // A hook held back with no step to resolve: its idle frame, before the
+  // first shooter.
+  if (host.take_deferred()) {
     absorb(out, r.settle());
     burrow_away();
   }

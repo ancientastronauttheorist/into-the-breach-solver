@@ -450,13 +450,15 @@ class FinalCaveEnv final : public AttackEnv {
   }
   bool has_update() const override { return true; }
   void update(EnvHost& host) override {
-    // Mission_Final_Cave:UpdateMission, on an idle board only.
-    if (host.busy()) return;
+    // Mission_Final_Cave:UpdateMission, on an idle board only. (The Lua
+    // tests IsBusy first; asking it only when a bomb is due is the same and
+    // tells the enemy phase which frames the hook waited for.)
     Board& b = host.board();
     for (const Pawn& p : b.pawns()) {
       if (p.team == Team::Player && detail::type_is(p, "BigBomb") && (p.alive() || is_corpse(b, p))) return;
     }
     if (!had_bomb_) return;  // no bomb at all: not a recorded final-cave board
+    if (host.busy()) return;
     // AddBomb: a random tile without a player pawn, building or environment
     // danger, preferring the inner 4x4.
     std::vector<Point> choices, inner;
