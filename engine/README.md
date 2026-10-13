@@ -42,6 +42,8 @@ engine/build/itb_inspect --solve recordings/<run>/m07_turn_01_solve_input.json -
 engine/build/itb_inspect --solve recordings --sample 60 --time 120 --threads 8 --json out.jsonl
 engine/build/itb_inspect --solve recordings --threat-tier --threat-eval --json on.jsonl  # experimental threat tier
 engine/build/itb_inspect --threat-check recordings                       # threat proxy vs engine and games, cost
+engine/build/itb_inspect --solve state.json --lookahead [--lookahead-samples 8] # experimental next-turn tier
+engine/build/itb_inspect --lookahead-study state.json --compare [--samples 8] [--next-time 4]  # plans vs next turn
 engine/build/itb_inspect --predict state.json --actions @actions.json --branches   # live validation
 engine/build/itb_inspect --ai recordings [--samples 64] [--show N] [--verbose]       # enemy AI planning vs the live saves
 engine/build/itb_live deploy deployed_state.json --time 45 --threads 8            # deployment search (JSON)
@@ -133,6 +135,14 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   actions this turn are kept in the run manifest (`unit_actions`); a unit
   that acted and is active again gets its pilot bonus in re-solves
   (`bonus_shift`, or `moved` for Double_Shot), which the bridge cannot read.
+- **Ranking options** (all off by default; each is passed to every solve and
+  re-solve of the turn): `--threat-tier`, `--threat-kills`,
+  `--objectives-first`, `--mech-grid N [--mech-grid-turns]
+  [--mech-grid-pilot]` and `--lookahead [--lookahead-samples K]
+  [--lookahead-reply greedy|idle]` ("Turn score" below). With
+  `--lookahead` the plan line adds the next-turn estimate of the plan's end
+  board, and the tier counts of `--min-tiers` include NextTurn (with
+  `--threat-tier`, `--min-tiers 7` reaches mech HP).
 - **end-turn** predicts the enemy phase from the board as left, sends
   `END_TURN` (it deactivates the mechs, so the "units can still act" dialog
   never appears; on this build the bridge cannot end the turn itself and
@@ -221,7 +231,15 @@ nodes and timing flags; `weapon_index` is the slot in the unit's weapons),
 `chance_exact`, `timed_out`, `extended` (the adaptive budget ran past the
 base time), `contingent`, `stats` and `warnings`. Requests take
 `time_limit`, `node_limit`, `beam_width`, `threads`, and for the adaptive
-budget `max_time` and `min_tiers`. The
+budget `max_time` and `min_tiers`; the ranking options are `threat_tier`,
+`threat_kills`, `objectives_first`, `mech_grid`, `mech_grid_turns`,
+`mech_grid_pilot` (then also `mech_rates` by uid) and `lookahead`
+(`lookahead_samples`, `lookahead_reply` "greedy" | "idle", `lookahead_seed`;
+then `worst_case` has `next_turn`, `stats` has `lookahead_evals`,
+`lookahead_hits` and `lookahead_s`, and `next_turn` gives the plan's own
+end board's estimate: worst grid, mechs and building HP lost and each AI
+sample's). CLI: `--mech-grid-pilot`, `--lookahead [--lookahead-samples K]
+[--lookahead-reply greedy|idle]`. The
 simulation follows the plan's default chance outcome (no Grid Defense
 resist, first branch), reseeding Lua as the solver does. Boards are compact:
 `grid_power`, `buildings` (x, y, hp) and living on-board `units` sorted by
@@ -644,6 +662,48 @@ mech HP, ..., and `--min-tiers 6` keeps mech HP proven.
 `itb_inspect --threat-check DIR` checks the proxy against the engine and
 the recorded games and times it (see "Threat tier measurement").
 
+**Next-turn lookahead (experimental, off by default).** `ScoreKey::NextTurn`
+sits between objective stars and the threat tier and is scored only with
+`SolveOptions::lookahead` (`itb_inspect --solve --lookahead`, itb_live /
+Python `"lookahead": true`, `live_play.py --lookahead`). It is minus what
+the board a turn leaves costs on the next turn (`lookahead.hpp`):
+
+1. From the end of the turn's enemy phase, spawns of a type the player
+   cannot see (they emerged without a pawn) get a pawn of an enemy type
+   visible on the turn's board (a sample of the hidden type).
+2. The AI plans the next turn (`Engine::ai_phase`, stage 10) with a sampled
+   seed (the live seed is hidden; `LookaheadOptions::seed`, sample k uses
+   `deploy_sample_seed(seed, k)`), each enemy's last target being the one
+   it showed at the start of this turn; then the next player turn starts.
+3. Reply: a greedy policy plays the next turn: rounds in which every unit
+   that has not played tries its unit turns (move, then weapon or repair)
+   aimed at the queued attacks (targets on or next to an attacker, its
+   target or the line between them, a projectile line through an attacker;
+   moves onto those tiles), each run through the enemy phase, and the best
+   one by (loss, then queued attackers and their HP) is kept while it
+   improves. Its loss (grid lost, then mechs lost, then building HP, from
+   the next turn's start) is achievable, so an upper bound on what that
+   board forces (`--lookahead-reply idle`: no reply at all).
+4. The worst loss over `lookahead_samples` seeds (default 8), packed as
+   `-(1024 x grid + 64 x mechs + building HP)` (`next_turn_value`, clamped;
+   floor `kNextTurnFloor`). No next turn (the mission's last turn, or the
+   phase ended the mission): 0.
+
+Where it ranks: below this turn's grid, buildings, mechs lost and stars
+failed, which are certain and permanent, while NextTurn is an estimate (a
+sample of the AI's seeds and of hidden spawn types, a reply that is only
+greedy); above the threat tier, which it refines (the AI's actual targets
+and the mechs' answers instead of reachability), and above mech HP,
+objective progress, kills and position, since a next-turn grid point lost
+is permanent for the run while those are not or are worth less. Within the
+term grid comes first, then mechs, then building HP, as next turn's own
+order would rank them. Chance inside the estimate takes its default outcome
+(no Grid Defense resist: the worst for buildings); the AI's own chance is
+the seed sample. Off, the tier is 0, its cap is 0, and it is left out of
+printed scores, JSON vectors and tier counts like the threat tier
+(`TierSet`: `tier_used`, `used_tier_count`, `components_for_tiers`), so
+results are unchanged. "Next-turn lookahead measurement" has the numbers.
+
 **Mech exchange (experimental, off by default).** A mech lost is gone for
 every remaining turn of the mission (and its pilot dies), while the strict
 order gives it up for any grid point. `ScoreOptions::mech_grid` = N >= 0
@@ -658,7 +718,17 @@ mech above building HP. `mech_grid_turns` (`--mech-grid-turns`,
 `"mech_grid_turns"`, `ITB_MECH_GRID_TURNS=1`) caps N by the turns left after
 this one (`total_turns - turn`), so on a mission's last turn a mech is worth
 less than one grid point again. The rate is fixed per solve (the root
-board's turn). Printed and JSON scores carry the combined slot as "grid"
+board's turn). `mech_grid_pilot` (`--mech-grid-pilot`, `"mech_grid_pilot"`)
+puts a floor under each mech's rate: min(N, its pilot's level 0-2), turns
+left or not (`mech_rate`). A dead pilot is gone for the rest of the run
+(the mech comes back next mission with no pilot, its levels, skills and
+the XP toward them lost), so on a mission's last turns a levelled pilot is
+worth more than the turns left say: level 1 more than one grid point (less
+than two), level 2 more than two, a level-0 pilot as before. Rates then
+differ per mech: the slot's mechs part is the sum over the root's mechs of
+(2 r_m + 1) x (alive after - alive before) (`mech_grid_slot_w`; with equal
+rates the same number as before), and its bound sums 2 r_m + 1 over the
+root's dead mechs (only those can be revived). Printed and JSON scores carry the combined slot as "grid"
 (`itb_inspect` adds the plan's plain tiers, JSON `"plain"`; itb_live adds
 `"mech_grid_rate"` and `live_play.py` prints the slot formula). Off, nothing
 changes (byte-identical `--corpus/--moves/--weapons/--replay [--turns]`,
@@ -892,7 +962,8 @@ cut. Per tier (each argued in `solver.cpp`): grid power never rises
 disables this bound), building HP never rises (no weapon, death or native
 environment script builds a building), mechs revived <= mechs dead at the
 start, net mech HP <= the HP missing at the start (+1 per mech with Psion
-Leech), objective stars lost <= 0, next-turn threat <= 0 (no tighter cap is
+Leech), objective stars lost <= 0, the next-turn loss estimate <= 0 (a loss
+is never negative), next-turn threat <= 0 (no tighter cap is
 cheaply sound: any enemy may still be killed, pushed, frozen or smoked, and
 spawns blocked), kills and HP removed <= the enemies and
 their HP at the start. Objective progress and position have no derived cap
@@ -905,6 +976,35 @@ therefore committed once a player action causes them. With the mech
 exchange the grid slot's bound is 2 x the grid bound + (2N + 1) x the mechs
 bound (both coefficients positive), less the grid-out penalty on a board
 already at grid 0 when grid power cannot rise.
+
+**Lookahead in the search.** With `SolveOptions::lookahead` the leaf value
+E(B) is computed lazily: each chance outcome of the enemy phase is scored
+with NextTurn at its cap (0), an upper bound, and the usual cut (the
+minimum so far <= alpha) runs on those bounds. Outcomes that survive are
+taken in increasing order of their bound; one whose bound with NextTurn at
+its floor cannot go below the minimum so far is skipped; for the others the
+lookahead's samples run one at a time, each lowering the outcome's
+NextTurn (the worst so far), and as soon as the outcome is <= alpha the
+remaining samples are skipped and the leaf reports [-inf, that value]
+(sound: more samples can only lower it). Sample values are cached by the
+end board (a shared table), so a later visit resumes where an earlier one
+stopped. Child ordering and the beam's ranking only take bounds
+([floor, cap] intervals, no lookahead); the beam evaluates the best 3
+chance-free states of each level exactly to seed incumbents. The tier's
+cap in `TierBounds` is 0. So intervals stay sound, a completed search
+proves the plan optimal with respect to the estimate (`test_solver.cpp`
+checks the lookahead against the naive enumeration on tiny boards, both
+folds), and `evaluate_plan` includes the estimate (the plan re-check
+matches). An estimate costs tens of milliseconds, so the search is slower;
+to keep that from costing the tiers above it, `LookaheadOptions::base_share`
+(25%) of the budget first goes to a search without the lookahead, and its
+plan, scored with the lookahead by `evaluate_plan` (open loop: a value it
+surely reaches), seeds the incumbent of the lookahead search, which gets the
+rest of the budget (time, or nodes). That search can only return something
+better under the full order, so grid, buildings, mechs and stars are never
+worse than the base search's at that share of the budget (before seeding,
+2 of 60 turns lost grid to it at 20 s and 2 threads). A sample stops when
+the budget runs out (the leaf reports the bound so far).
 
 **Anytime.** With a time or node budget the result is the best plan found,
 `proven_optimal = false`, an `upper_bound` (the root's interval, sound
@@ -1182,6 +1282,84 @@ was dominated by machine load (3x slower per sub-action in one arm).
 Suggested live trial: `live_play.py ... --mech-grid 2 --mech-grid-turns`
 (a mech is worth up to min(2, turns left) grid, never the last grid point);
 it is still off by default.
+
+The pilot floor (`--mech-grid-pilot`) on live run 13 (Hard,
+`live/20261013_024040`) Mission_FreezeBldg turn 4 of 4, where the plan
+lost the 1-HP burning Pierce Mech (pilot level 1, 46 XP) and a star with
+grid 7/7: with the floor its rate is 1 (more than one grid point), and the
+search still proves the trade optimal (39 s, 2 threads): keeping the mech
+costs 2 grid in the worst case (no Grid Defense resist; with rate 2 the
+search keeps the mech and the star for those 2 grid). A plan that keeps a
+levelled pilot for one grid point is now taken.
+
+**Next-turn lookahead measurement** (`--lookahead`, "Turn score";
+2026-10-13). `itb_inspect --lookahead-study` solves a recorded turn with the
+live flags (`--threat-tier --objectives-first --mech-grid 2
+--mech-grid-turns`) with and without the lookahead, plays each plan through
+its enemy phase, lets the AI plan the next turn with independent seeds (not
+the solver's) and measures what each next-turn board forces: a real solve
+of the next turn (4 s, 2 threads; plain grid, mechs and building HP of its
+plan) and the greedy reply. The greedy reply matches the 4 s solve on most
+boards (on Civilians turn 2 below, 6 of 8 seeds; it is an upper bound and
+missed two combinations); a sample costs about 3 ms of AI planning and
+20-40 ms of reply.
+
+Turns before the losses of the lost Unfair runs (`--time 30`, 2 threads,
+8 independent seeds per plan, next-turn loss by the real solve; the
+lookahead with its defaults):
+
+| turn (run, mission) | this turn | next turn, without | with the lookahead | game's next turn |
+|---|---|---|---|---|
+| run 12 m00 Artillery t3/4 | 0 lost (both) | 1.50 grid, 0.25 mechs; 8/8 lose | 0 lost in 8/8 | lost 1 grid + a mech |
+| run 11 m30 Civilians t2/4 | 0 lost (both) | 1.50 grid, 0.12 mechs; 8/8 | 0.50 grid; 4/8 | lost 1 grid |
+| run 10 m00 Volatile t2/4 | -3 grid (both) | 1.00 grid, 0.62 mechs | 1.00 grid, 0 mechs | lost 1 grid |
+| run 12 m06 Tanks t2/4 | 0 lost (both) | 0.75 grid; 6/8 | 0.75 grid; 4/8 | lost 1 grid |
+| run 11 m30 Civilians t3/4 | -1 grid (both) | 0.12 grid, 0.62 mechs; 6/8 | 0.75 grid, 1.00 mechs; 8/8 | lost 1 grid + a mech |
+| run 10 m00 t1, run 11 m30 t1, m32 t1-t2, run 12 m02 t2-t3, m04 t1, m06 t3 | same top tiers | no change in the forced loss (1 grid forced on 4 of them in every sample: no plan avoids it) | | |
+
+Run 12's turn 3 of its first mission is the clearest: both plans lose
+nothing this turn; after the live plan the game took 1 grid and a mech on
+turn 4 (the run's first losses); the lookahead plan uses the Ice Mech on
+the Scorpion at B3 and the Hydrant Mech on the Scarab at E2 instead, and no
+sampled AI outcome then forces a loss. Run 11's losses came from
+turn-1 boards (deployment) and forced chains (Missiles turn 1 forces 1 grid
+on turn 2 in every sample and every plan); run 10 had lost a mech on turn
+1. Civilians turn 3 is the sample noise the estimate cannot rule out: its
+own 8 seeds preferred a plan that independent seeds rate worse.
+
+Recorded live turns (60 evenly spaced Hard and Unfair turn starts of runs
+4-13 that are not a mission's last turn; `--time 20`, 2 threads, both arms
+side by side; each end board judged by the greedy reply on 16 independent
+AI seeds):
+
+| | without | with `--lookahead` (8 samples, worst) |
+|---|---|---|
+| plans changed | - | 36 of 60 |
+| grid, buildings, mechs, stars this turn | - | never worse (2 better: budget noise) |
+| next-turn grid lost, sum of the per-turn means | 22.9 | 14.2 (-38%) |
+| next-turn mechs lost, same | 7.4 | 4.4 (-41%) |
+| samples that lose anything next turn | 310 of 960 | 194 |
+| turns better / worse next turn | - | 25 / 8 |
+| mech HP, objective progress, kills (sums) | - | -16, -3.7 stars, 0 |
+| lookahead samples, thread time | - | 4549, 118 thread-s (26 ms each) |
+
+Alternatives on the same turns: the sum of 8 samples instead of the worst
+13.1 grid / 4.9 mechs (objective progress -4.9 stars), the worst of 16
+13.3 / 4.9 (-5.1 stars), all within the noise of each other, so the default
+is the cheapest (worst of 8). Two samples overfit: on Civilians turn 2 the
+search found a plan that its two seeds rated loss-free and independent seeds
+rated 5 grid. Before the base search seeded the lookahead search (below),
+2 of the 60 turns lost grid to the slower search.
+
+Cost: the budget is shared, not extended. At 20 s and 2 threads the
+lookahead search spent about 10% of its thread time in estimates (median
+33 samples per turn, at most 871), the base search 25-75% of the budget, and
+the tiers through stars were proven on 53 of 60 turns (52 without). At 8
+threads the same work per sample (26 ms of one thread) gives about 300
+samples per second; the live budget (`--time 30 --max-time 120`) leaves the
+base search 7.5-90 s and the lookahead search the rest. Suggested live
+trial: `live_play.py mission ... --lookahead --min-tiers 7` with the live
+flags (7 tiers: grid through mech HP with the threat and next-turn tiers).
 
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state

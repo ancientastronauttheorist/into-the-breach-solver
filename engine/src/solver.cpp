@@ -48,6 +48,7 @@
 #include "itb/engine.hpp"
 #include "itb/lua_host.hpp"
 #include "itb/movement.hpp"
+#include "itb/lookahead.hpp"
 #include "itb/objectives.hpp"
 #include "itb/pilot_xp.hpp"
 
@@ -61,6 +62,9 @@ using Clock = std::chrono::steady_clock;
 // live stream is hidden; any fixed state is one sample of it.
 constexpr uint32_t kLuaSeed = 1;
 constexpr int kMaxDepth = 48;
+// SolveOptions::lookahead: states per beam level whose exact value (with the
+// next-turn estimate) is computed to seed incumbents.
+constexpr size_t kBeamExact = 3;
 
 Score filled(int32_t v) {
   Score s;
@@ -308,6 +312,8 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 //                    level-up (+2 each, pilot_hp_room). So <= sum of
 //                    (max_hp [+1] + level-up room - hp_before).
 //   ObjectivesFailed = -(stars lost) <= 0.
+//   NextTurn       = next_turn_value of the lookahead's loss estimate <= 0
+//                    (a loss is never negative), 0 when the lookahead is off.
 //   Threat         = -(enemies able to hit a building next turn) <= 0 (0
 //                    whenever the threat tier is off). No tighter cap is
 //                    sound cheaply: any enemy may still be killed, pushed
@@ -330,6 +336,10 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 // coefficients are positive, so 2 * (the grid cap above) + (2r + 1) * (the
 // mechs cap) bounds it, and with grid monotone a board at grid <= 0 ends
 // the turn at grid <= 0, so its penalty is certain and comes off its bound.
+// With per-mech rates (mech_grid_pilot) the mechs part is the sum of
+// (2 r_m + 1) * delta_m over the root's mechs; only a mech dead at the root
+// can have delta_m > 0 (revived), so the sum over those of (2 r_m + 1)
+// bounds it.
 // tier_caps lowers any component further (the caller vouches for them).
 class TierBounds {
  public:
@@ -347,11 +357,15 @@ class TierBounds {
     caps_[ScoreKey::GridLost] = std::max(root.grid_power_max, root.grid_power) - root.grid_power;
     caps_[ScoreKey::BuildingHpLost] = 0;
     const int leech = root.has_passive(kPassivePsionLeech) ? 1 : 0;
-    int dead_mechs = 0, mech_room = 0, enemies = 0, enemy_hp = 0;
+    const ScoreOptions so = opt.score_options();
+    int dead_mechs = 0, dead_weight = 0, mech_room = 0, enemies = 0, enemy_hp = 0;
     for (const Pawn& p : root.pawns()) {
       const int hp0 = p.alive() && !p.fallen && p.pos.valid() ? p.hp : 0;
       if (p.mech && p.team == Team::Player) {
-        if (hp0 <= 0) ++dead_mechs;
+        if (hp0 <= 0) {
+          ++dead_mechs;
+          if (so.mech_exchange()) dead_weight += 2 * mech_rate(root, p, so) + 1;
+        }
         mech_room += std::max(0, p.max_hp + leech + pilot_hp_room(p) - hp0);
       } else if (scored_enemy(p) && hp0 > 0) {
         ++enemies;
@@ -361,6 +375,7 @@ class TierBounds {
     caps_[ScoreKey::MechsLost] = dead_mechs;
     caps_[ScoreKey::MechHpLost] = mech_room;
     caps_[ScoreKey::ObjectivesFailed] = 0;
+    caps_[ScoreKey::NextTurn] = 0;
     caps_[ScoreKey::Threat] = 0;
     caps_[ScoreKey::VekKilled] = enemies;
     if (threat_kills) caps_[ScoreKey::Threat] = enemies;
@@ -372,8 +387,12 @@ class TierBounds {
     }
     caps_[ScoreKey::VekHpRemoved] = enemy_hp;
     grid_cap_ = caps_[ScoreKey::GridLost];
-    mech_rate_ = mech_grid_rate(root, opt.score_options());
-    if (mech_rate_ >= 0) {
+    mech_rate_ = mech_grid_rate(root, so);
+    per_mech_ = so.mech_exchange() && so.mech_grid_pilot;
+    dead_weight_ = dead_weight;
+    if (per_mech_) {
+      caps_[ScoreKey::GridLost] = 2 * grid_cap_ + dead_weight_;
+    } else if (mech_rate_ >= 0) {
       caps_[ScoreKey::GridLost] = 2 * grid_cap_ + (2 * mech_rate_ + 1) * dead_mechs;
     }
     if (caps) {
@@ -387,7 +406,10 @@ class TierBounds {
 
   Score of(const Board& b) const {
     Score s = caps_;
-    if (grid_monotone_ && mech_rate_ >= 0) {
+    if (grid_monotone_ && per_mech_) {
+      const int grid = std::min(grid_cap_, b.grid_power - root_grid_);
+      s[ScoreKey::GridLost] = std::min(s[ScoreKey::GridLost], mech_grid_slot_w(grid, dead_weight_, b.grid_power));
+    } else if (grid_monotone_ && mech_rate_ >= 0) {
       const int grid = std::min(grid_cap_, b.grid_power - root_grid_);
       const int32_t slot = mech_grid_slot(mech_rate_, grid, s[ScoreKey::MechsLost], b.grid_power);
       s[ScoreKey::GridLost] = std::min(s[ScoreKey::GridLost], slot);
@@ -405,6 +427,8 @@ class TierBounds {
   int progress_cap_ = -1;
   int grid_cap_ = 0;   // the GridLost cap in grid units
   int mech_rate_ = -1; // mech_grid_rate at the root (-1: off)
+  bool per_mech_ = false;  // mech_grid_pilot: per-mech rates
+  int dead_weight_ = 0;    // sum of 2 r_m + 1 over the root's dead mechs
   Score caps_;
 };
 
@@ -523,13 +547,13 @@ class SharedMap {
 // What the search threads share.
 struct Shared {
   Shared(const Board& r, const TurnContext& ctx, const SolveOptions& opt)
-      : root(r), o(opt), bounds(r, opt.tier_caps, opt, &ctx), tt(opt.tt_max_entries), leaf(opt.tt_max_entries), busy(SIZE_MAX) {
+      : root(r), o(opt), bounds(r, opt.tier_caps, opt, &ctx), tt(opt.tt_max_entries), leaf(opt.tt_max_entries), busy(SIZE_MAX),
+        next_turn(opt.lookahead ? opt.tt_max_entries : 0) {
     base = ctx;
     base.events = nullptr;
     base.log = nullptr;
     adaptive = opt.min_proven_tiers > 0 && opt.time_limit_s > 0 && opt.max_time_s > opt.time_limit_s;
-    tiers = components_for_tiers(std::clamp(opt.min_proven_tiers, 0, used_tier_count(opt.tier_on())),
-                                 opt.tier_on());
+    tiers = components_for_tiers(std::clamp(opt.min_proven_tiers, 0, used_tier_count(opt.tiers())), opt.tiers());
     score_options = opt.score_options();
     root_ub = bounds.of(r);
   }
@@ -540,6 +564,9 @@ struct Shared {
   SharedMap<TTEntry> tt;
   SharedMap<Interval> leaf;
   SharedMap<int> busy;
+  // SolveOptions::lookahead: NextTurn values by the hash of the end board
+  // (after the enemy phase), shared by the threads.
+  SharedMap<std::vector<int32_t>> next_turn;
   size_t threads = 1;
   Clock::time_point start;
   std::atomic<bool> stop{false};       // budget spent or the search completed
@@ -559,6 +586,11 @@ struct Shared {
   bool has_incumbent = false;
   Score incumbent = kLow;
   std::vector<SubAction> best_line;
+  // A seeded incumbent (SolveOptions::lookahead, LookaheadOptions::
+  // base_share): its plan, used while no line has improved on it.
+  bool seeded = false;
+  std::vector<PlayerAction> seeded_actions;
+  bool seeded_contingent = false;
   double first_plan_s = 0, best_plan_s = 0;
   std::vector<std::string> warnings;
 
@@ -650,6 +682,7 @@ class Worker {
     if (!sh_.has_incumbent) sh_.first_plan_s = seconds_since(sh_.start);
     sh_.has_incumbent = true;
     sh_.incumbent = v;
+    sh_.seeded = false;
     sh_.best_line = path_;
     sh_.best_line.insert(sh_.best_line.end(), tail.begin(), tail.end());
     sh_.best_plan_s = seconds_since(sh_.start);
@@ -675,17 +708,82 @@ class Worker {
     return std::max(alpha, inc);
   }
 
-  // E(B): the worst case of ending the turn on B.
-  Interval leaf(const Board& b, const Score& alpha) {
+  // The NextTurn tier of one chance outcome of ending the turn: `s` is its
+  // score with NextTurn at the cap (0), `after` the board after the enemy
+  // phase `pr` (lookahead.hpp). The value is the worst of the samples'
+  // next_turn_value; the samples run one at a time, and as soon as the worst
+  // so far puts `s` at or below `alpha` the rest are skipped (`cut`: then the
+  // returned value is only an upper bound). Sample values are cached by the
+  // end board (with what the phase result adds: unknown spawns, mission end),
+  // so a later call resumes where an earlier one stopped.
+  int32_t next_turn_value_of(const Score& s, const Board& after, const PhaseResult& pr, const Score& alpha,
+                             bool& cut) {
+    cut = false;
+    BoardHash key = hash_board(after, HashMode::Search);
+    uint64_t extra = pr.mission_ended ? 0x9E3779B97F4A7C15ull : 0;
+    for (Point p : pr.emerged_unknown) extra = extra * 1099511628211ull + static_cast<uint64_t>(p.index() + 1);
+    key.lo ^= extra;
+    std::vector<int32_t> vals;
+    const bool had = sh_.next_turn.get(key, vals);
+    const size_t known = vals.size();
+    const int samples = std::max(1, o_.lookahead_options.samples);
+    int32_t worst = 0;
+    Score t = s;
+    for (int k = 0; k < samples; ++k) {
+      if (static_cast<size_t>(k) < vals.size()) {
+        ++stats_.lookahead_hits;
+      } else if (k > 0 && budget_exceeded()) {
+        cut = true;  // `worst` so far is still an upper bound
+        break;
+      } else {
+        const Clock::time_point t0 = Clock::now();
+        const NextTurnLoss l = lookahead_sample(e_, sh_.root, after, &pr, tc_, o_.lookahead_options, k);
+        stats_.lookahead_s += seconds_since(t0);
+        ++stats_.lookahead_evals;
+        vals.push_back(next_turn_value(l));
+        if (l.mission_over) {
+          vals.resize(static_cast<size_t>(samples), 0);  // no next turn: every sample is 0
+        }
+      }
+      worst = lookahead_fold(worst, vals[static_cast<size_t>(k)], o_.lookahead_options.sum);
+      t[ScoreKey::NextTurn] = worst;
+      if (k + 1 < samples && t <= alpha) {
+        cut = true;
+        break;
+      }
+    }
+    if (!had || vals.size() > known) {
+      sh_.next_turn.put(key, vals, [](const std::vector<int32_t>& a, const std::vector<int32_t>& b) {
+        return b.size() >= a.size() ? b : a;
+      });
+    }
+    return worst;
+  }
+
+  // E(B): the worst case of ending the turn on B. With the lookahead, each
+  // chance outcome is first scored with NextTurn at its cap (0), an upper
+  // bound; the lookahead then runs only for outcomes that can still decide
+  // the minimum, and not at all when the bound is already <= alpha or the
+  // caller only wants bounds (`lazy`: child ordering, the beam's ranking),
+  // in which case the interval is [NextTurn at its floor, at its cap].
+  Interval leaf(const Board& b, const Score& alpha, bool lazy = false) {
+    const bool la = o_.lookahead;
+    lazy = lazy && la;
     BoardHash key{};
     if (o_.use_tt) {
       key = hash_board(b, HashMode::EndTurn);
       Interval memo;
-      if (sh_.leaf.get(key, memo) && (memo.exact() || memo.hi <= alpha)) {
+      if (sh_.leaf.get(key, memo) && (memo.exact() || memo.hi <= alpha || lazy)) {
         ++stats_.leaf_hits;
         return memo;
       }
     }
+    struct Pending {
+      Score s;  // NextTurn at its cap
+      Board after;
+      PhaseResult pr;
+    };
+    std::vector<Pending> pending;
     Score worst = kHigh;
     bool cut = false;
     const EnumEnd end = enumerate_chance(driver_, o_.max_chance_leaves, stats_.chance_branches, [&] {
@@ -707,11 +805,43 @@ class Worker {
         cut = true;
         return false;
       }
+      if (la) pending.push_back(Pending{s, std::move(after), pr});
       return true;
     });
     if (end == EnumEnd::Truncated) sh_.chance_exact = false;
     if (cut) ++stats_.chance_cutoffs;
-    const Interval r = cut ? Interval{kLow, worst} : Interval{worst, worst};
+    Interval r = cut ? Interval{kLow, worst} : Interval{worst, worst};
+    if (la && !cut) {
+      const int32_t floor = lookahead_floor(o_.lookahead_options);
+      auto floor_of = [floor](Score s) {
+        s[ScoreKey::NextTurn] = floor;
+        return s;
+      };
+      if (lazy) {
+        Score lo = kHigh;
+        for (const Pending& p : pending) lo = std::min(lo, floor_of(p.s));
+        r = Interval{lo, worst};
+      } else {
+        // Outcomes in increasing order of their bound; one whose lowest
+        // possible value cannot go below the minimum so far is skipped.
+        std::stable_sort(pending.begin(), pending.end(),
+                         [](const Pending& x, const Pending& y) { return x.s < y.s; });
+        Score exact = kHigh;
+        for (const Pending& p : pending) {
+          if (floor_of(p.s) >= exact) continue;
+          Score s = p.s;
+          bool stopped = false;
+          s[ScoreKey::NextTurn] = next_turn_value_of(p.s, p.after, p.pr, alpha, stopped);
+          exact = std::min(exact, s);
+          if (stopped || exact <= alpha) {
+            cut = true;
+            break;
+          }
+        }
+        if (cut) ++stats_.chance_cutoffs;
+        r = cut ? Interval{kLow, exact} : Interval{exact, exact};
+      }
+    }
     if (o_.use_tt) sh_.leaf.put(key, r, intersect);
     return r;
   }
@@ -924,7 +1054,7 @@ class Worker {
       std::vector<State> next;
       auto consider = [&](Outcome& o, std::vector<SubAction> line, bool chance_free, uint32_t played) {
         if (!seen.insert(o.hash).second) return;
-        const Interval end = leaf(o.board, alpha_of(kLow));
+        const Interval end = leaf(o.board, alpha_of(kLow), o_.lookahead);
         if (chance_free && end.exact()) improve(end.lo, line);
         next.push_back(State{std::move(o.board), std::move(line), chance_free, played, end.hi});
       };
@@ -974,6 +1104,22 @@ class Worker {
       for (size_t i = 0, run = 0; i < next.size(); ++i) {
         run = (i > 0 && next[i].played == next[i - 1].played) ? run + 1 : 0;
         if (run < width) kept.push_back(std::move(next[i]));
+      }
+      if (o_.lookahead) {
+        // The beam ranks by bounds (NextTurn at its cap); the best few
+        // chance-free states of the level get their exact value, so the
+        // beam still seeds incumbents.
+        std::vector<size_t> best;
+        for (size_t i = 0; i < kept.size(); ++i) {
+          if (kept[i].chance_free) best.push_back(i);
+        }
+        std::stable_sort(best.begin(), best.end(), [&](size_t x, size_t y) { return kept[x].key > kept[y].key; });
+        for (size_t j = 0; j < best.size() && j < kBeamExact; ++j) {
+          if (budget_exceeded()) return;
+          State& st = kept[best[j]];
+          const Interval end = leaf(st.board, alpha_of(kLow));
+          if (end.exact()) improve(end.lo, st.line);
+        }
       }
       beam = std::move(kept);
     }
@@ -1077,7 +1223,7 @@ class Worker {
       for (Child& c : children) {
         if (budget_exceeded()) break;
         Score key = kHigh;
-        for (const Outcome& oc : c.outcomes) key = std::min(key, leaf(oc.board, alpha_of(alpha)).hi);
+        for (const Outcome& oc : c.outcomes) key = std::min(key, leaf(oc.board, alpha_of(alpha), true).hi);
         c.order = key;
       }
       std::stable_sort(children.begin(), children.end(),
@@ -1166,8 +1312,25 @@ class Worker {
 
 }  // namespace
 
-SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options) {
+namespace {
+
+struct Seed {
+  Score value;
+  std::vector<PlayerAction> actions;
+  bool contingent = false;
+};
+
+SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options,
+                        const Seed* seed) {
   Shared sh(board, ctx, options);
+  if (seed) {
+    sh.has_incumbent = true;
+    sh.incumbent = seed->value;
+    sh.seeded = true;
+    sh.seeded_actions = seed->actions;
+    sh.seeded_contingent = seed->contingent;
+    if (sh.adaptive && same_prefix(seed->value, sh.root_ub, sh.tiers)) sh.tiers_proven = true;
+  }
   std::vector<Engine*> engines{&engine};
   for (Engine* e : options.helper_engines) {
     if (e && e != &engine) engines.push_back(e);
@@ -1198,6 +1361,9 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
     out.stats.chance_cutoffs += s.chance_cutoffs;
     out.stats.sub_action_s += s.sub_action_s;
     out.stats.enemy_phase_s += s.enemy_phase_s;
+    out.stats.lookahead_evals += s.lookahead_evals;
+    out.stats.lookahead_hits += s.lookahead_hits;
+    out.stats.lookahead_s += s.lookahead_s;
     if (w->sampled()) sh.chance_exact = false;
   }
   out.stats.time_s = seconds_since(sh.start);
@@ -1211,10 +1377,15 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   out.extended = sh.prefix_mode;
   out.warnings = sh.warnings;
   if (!sh.has_incumbent) return out;
-  out.best.actions = to_player_actions(sh.best_line);
+  if (sh.seeded) {
+    out.best.actions = sh.seeded_actions;
+    out.best.contingent = sh.seeded_contingent;
+  } else {
+    out.best.actions = to_player_actions(sh.best_line);
+    out.best.contingent =
+        std::any_of(sh.best_line.begin(), sh.best_line.end(), [](const SubAction& a) { return a.chance; });
+  }
   out.best.worst_case = sh.incumbent;
-  out.best.contingent =
-      std::any_of(sh.best_line.begin(), sh.best_line.end(), [](const SubAction& a) { return a.chance; });
   // A search completed while proving only the first tiers proves those.
   out.proven_optimal = sh.completed && out.chance_exact && !out.extended;
   // Every root interval is sound; the tightest bound wins. A completed
@@ -1225,7 +1396,7 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   for (size_t i = 0; i < workers.size(); ++i) {
     if (workers[i]->complete() && roots[i].hi > claimed) {
       out.warnings.push_back("search completed with a root bound above the plan: " +
-                             roots[i].hi.describe(options.tier_on()));
+                             roots[i].hi.describe(options.tiers()));
     }
     upper = std::min(upper, roots[i].hi);
   }
@@ -1237,7 +1408,7 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   // tier is 0 in both and not counted).
   int k = 0;
   for (int i = 0; i < kScoreKeys && upper.v[static_cast<size_t>(i)] == sh.incumbent.v[static_cast<size_t>(i)]; ++i) {
-    if (tier_used(i, options.tier_on())) ++k;
+    if (tier_used(i, options.tiers())) ++k;
   }
   out.proven_components = k;
   if (!out.chance_exact) {
@@ -1249,9 +1420,68 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
     const std::optional<Score> again = evaluate_plan(engine, board, ctx, out.best.actions, options);
     if (!again || *again != out.best.worst_case) {
       out.warnings.push_back("re-running the plan gives " +
-                             (again ? again->describe(options.tier_on()) : std::string("a refusal")));
+                             (again ? again->describe(options.tiers()) : std::string("a refusal")));
     }
   }
+  return out;
+}
+
+}  // namespace
+
+// With the lookahead, a search without it first (LookaheadOptions::
+// base_share of the budget): its plan, scored with the lookahead
+// (evaluate_plan: open-loop, a value the plan surely reaches), seeds the
+// incumbent of the lookahead search, which gets the rest of the budget.
+SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options) {
+  const double share = options.lookahead_options.base_share;
+  if (!options.lookahead || share <= 0) return search_turn(engine, board, ctx, options, nullptr);
+  const Clock::time_point t0 = Clock::now();
+  SolveOptions base = options;
+  base.lookahead = false;
+  base.max_time_s = 0;
+  base.min_proven_tiers = 0;
+  base.time_limit_s = options.time_limit_s > 0 ? options.time_limit_s * share : 0;
+  // The tiers above NextTurn come first: while they are unproven the base
+  // search may go on (adaptive budget) up to LookaheadOptions::base_max_share
+  // of the whole budget (max_time_s, else time_limit_s).
+  if (base.time_limit_s > 0) {
+    const double whole = options.max_time_s > options.time_limit_s ? options.max_time_s : options.time_limit_s;
+    const double cap = whole * std::max(share, options.lookahead_options.base_max_share);
+    if (cap > base.time_limit_s) {
+      base.max_time_s = cap;
+      base.min_proven_tiers = static_cast<int>(ScoreKey::NextTurn);  // grid, buildings, mechs, stars
+    }
+  }
+  base.node_limit = options.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(options.node_limit * share)) : 0;
+  const SolveResult first = search_turn(engine, board, ctx, base, nullptr);
+  const double used = seconds_since(t0);
+  SolveOptions rest = options;
+  if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
+  if (options.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, options.max_time_s - used);
+  if (options.node_limit > 0) rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, first.stats.nodes));
+  std::optional<Seed> seed;
+  // (An empty plan, the base search having found nothing, is ending the
+  // turn at once: a plan too.)
+  if (std::optional<Score> v = evaluate_plan(engine, board, ctx, first.best.actions, options)) {
+    seed = Seed{*v, first.best.actions, first.best.contingent};
+  }
+  SolveResult out = search_turn(engine, board, ctx, rest, seed ? &*seed : nullptr);
+  // Both searches' work and time.
+  out.stats.nodes += first.stats.nodes;
+  out.stats.sub_actions += first.stats.sub_actions;
+  out.stats.enemy_phases += first.stats.enemy_phases;
+  out.stats.chance_branches += first.stats.chance_branches;
+  out.stats.tt_hits += first.stats.tt_hits;
+  out.stats.leaf_hits += first.stats.leaf_hits;
+  out.stats.duplicate_children += first.stats.duplicate_children;
+  out.stats.bound_prunes += first.stats.bound_prunes;
+  out.stats.chance_cutoffs += first.stats.chance_cutoffs;
+  out.stats.sub_action_s += first.stats.sub_action_s;
+  out.stats.enemy_phase_s += first.stats.enemy_phase_s;
+  out.stats.first_plan_s = first.stats.first_plan_s;
+  out.stats.best_plan_s += used;
+  out.stats.time_s = seconds_since(t0);
+  out.stats.base_search_s = used;
   return out;
 }
 
@@ -1300,7 +1530,11 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
     engine.lua().seed(kLuaSeed);
     const PhaseResult pr = engine.end_turn(b, tc);
     d.mark_random(pr.chances);
-    worst = std::min(worst, score_turn(board, b, &tc, &pr, options.score_options()));
+    Score s = score_turn(board, b, &tc, &pr, options.score_options());
+    if (options.lookahead) {
+      s[ScoreKey::NextTurn] = lookahead_value(engine, board, b, &pr, tc, options.lookahead_options);
+    }
+    worst = std::min(worst, s);
     return true;
   });
   if (bad) return std::nullopt;

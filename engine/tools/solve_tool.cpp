@@ -31,7 +31,7 @@ using nlohmann::json;
 namespace itb::tools {
 namespace {
 
-const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "threat",
+const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "next_turn", "threat",
                                       "mech_hp", "objectives",  "kills", "vek_hp",            "position"};
 
 Point json_point(const json& j) {
@@ -40,7 +40,7 @@ Point json_point(const json& j) {
 }
 
 // The tiers in use (score.hpp tier_used): Threat only with the threat tier.
-std::string score_text(const Score& s, bool threat) {
+std::string score_text(const Score& s, TierSet threat) {
   std::string out;
   for (int i = 0; i < kScoreKeys; ++i) {
     if (!tier_used(i, threat)) continue;
@@ -52,7 +52,7 @@ std::string score_text(const Score& s, bool threat) {
   return out;
 }
 
-std::vector<int32_t> score_vector(const Score& s, bool threat) {
+std::vector<int32_t> score_vector(const Score& s, TierSet threat) {
   std::vector<int32_t> v;
   for (int i = 0; i < kScoreKeys; ++i) {
     if (tier_used(i, threat)) v.push_back(s.v[static_cast<size_t>(i)]);
@@ -133,7 +133,8 @@ double percentile(std::vector<double> v, double q) {
 }  // namespace
 
 int run_solve(const SolveToolOptions& opt) {
-  const bool tier_on = opt.threat_tier || opt.kills_tier;
+  const TierSet tier_on =
+      ((opt.threat_tier || opt.kills_tier) ? kTierThreat : 0u) | (opt.lookahead ? kTierNextTurn : 0u);
   std::unique_ptr<Engine> engine;
   try {
     engine = Engine::create(opt.game);
@@ -221,6 +222,11 @@ int run_solve(const SolveToolOptions& opt) {
     so.objectives_first = opt.objectives_first;
     so.mech_grid = opt.mech_grid;
     so.mech_grid_turns = opt.mech_grid_turns;
+    so.mech_grid_pilot = opt.mech_grid_pilot;
+    so.lookahead = opt.lookahead;
+    so.lookahead_options.samples = std::max(1, opt.lookahead_samples);
+    if (opt.lookahead_idle) so.lookahead_options.reply = LookaheadOptions::Reply::Idle;
+    so.lookahead_options.sum = opt.lookahead_sum;
     so.helper_engines = helper_ptrs;
     if (opt.beam >= 0) so.beam_width = opt.beam;
     if (opt.tt_entries > 0) so.tt_max_entries = opt.tt_entries;
@@ -230,6 +236,7 @@ int run_solve(const SolveToolOptions& opt) {
         so.repair_skills.emplace_back(uid, engine->repair_skill(pilot));
       }
     }
+    so.lookahead_options.repair_skills = so.repair_skills;
     int units = 0;
     for (const Pawn& p : board.pawns()) {
       if (p.controlled() && p.alive() && p.active) ++units;
@@ -291,6 +298,11 @@ int run_solve(const SolveToolOptions& opt) {
                   static_cast<unsigned long long>(r.stats.tt_hits), static_cast<unsigned long long>(r.stats.leaf_hits),
                   static_cast<unsigned long long>(r.stats.duplicate_children),
                   static_cast<unsigned long long>(r.stats.bound_prunes), r.stats.first_plan_s, r.stats.best_plan_s);
+      if (so.lookahead) {
+        std::printf("lookahead: %llu estimates (%.2fs), %llu reused\n",
+                    static_cast<unsigned long long>(r.stats.lookahead_evals), r.stats.lookahead_s,
+                    static_cast<unsigned long long>(r.stats.lookahead_hits));
+      }
       for (const std::string& w : r.warnings) std::printf("warning: %s\n", w.c_str());
       if (row.recorded) {
         std::printf("recorded plan: %s -> %s%s\n", score_text(*row.recorded, tier_on).c_str(),

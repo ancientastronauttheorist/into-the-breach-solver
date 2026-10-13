@@ -281,11 +281,14 @@ TEST_CASE("threat: score tier and tier views") {
   CHECK(s.describe(true).find("threat=-2") != std::string::npos);
   CHECK(off.describe() == "grid=0 bldg_hp=0 mechs=0 obj_fail=0 mech_hp=0 obj=0 kills=0 vek_hp=0 position=-1");
   // Tier counts.
-  CHECK(used_tier_count(false) == kScoreKeys - 1);
-  CHECK(used_tier_count(true) == kScoreKeys);
+  CHECK(used_tier_count(false) == kScoreKeys - 2);
+  CHECK(used_tier_count(true) == kScoreKeys - 1);
+  CHECK(used_tier_count(kTierThreat | kTierNextTurn) == kScoreKeys);
   CHECK(components_for_tiers(4, false) == 4);
-  CHECK(components_for_tiers(5, false) == 6);  // grid .. mech HP, Threat (0) inside
-  CHECK(components_for_tiers(5, true) == 5);   // grid .. threat
+  CHECK(components_for_tiers(5, false) == 7);  // grid .. mech HP, NextTurn and Threat (0) inside
+  CHECK(components_for_tiers(5, true) == 6);   // grid .. threat, NextTurn (0) inside
+  CHECK(components_for_tiers(5, kTierNextTurn) == 5);  // grid .. next turn
+  CHECK(components_for_tiers(6, kTierThreat | kTierNextTurn) == 6);  // grid .. threat
   CHECK(components_for_tiers(9, false) == kScoreKeys);
   CHECK(components_for_tiers(0, true) == 0);
 }

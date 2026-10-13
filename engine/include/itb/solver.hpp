@@ -59,6 +59,7 @@
 
 #include "itb/board.hpp"
 #include "itb/enemy_phase.hpp"
+#include "itb/lookahead.hpp"
 #include "itb/score.hpp"
 
 namespace itb {
@@ -92,7 +93,18 @@ struct SolveOptions {
   // much grid power (folded into the GridLost slot); -1 = off.
   int mech_grid = -1;
   bool mech_grid_turns = false;
+  // Next-turn lookahead (lookahead.hpp, README "Turn score"): score
+  // ScoreKey::NextTurn, the worst next-turn loss over sampled AI plans under
+  // the reply policy of `lookahead_options`. Off (the default): the tier is
+  // 0 everywhere and left out of tier counts, so results are unchanged.
+  bool lookahead = false;
+  LookaheadOptions lookahead_options;
+  // ScoreOptions::mech_grid_pilot: a levelled pilot keeps a rate of at
+  // least its level on the mission's last turns.
+  bool mech_grid_pilot = false;
   bool tier_on() const { return threat_tier || threat_kills; }
+  // The optional tiers in use (score.hpp TierSet).
+  TierSet tiers() const { return (tier_on() ? kTierThreat : 0u) | (lookahead ? kTierNextTurn : 0u); }
   ScoreOptions score_options() const {
     ScoreOptions s;
     s.threat_tier = threat_tier;
@@ -100,6 +112,8 @@ struct SolveOptions {
     s.objectives_first = objectives_first;
     s.mech_grid = mech_grid;
     s.mech_grid_turns = mech_grid_turns;
+    s.mech_grid_pilot = mech_grid_pilot;
+    s.next_turn = lookahead;
     return s;
   }
   // Repair skill per unit uid (Engine::repair_skill of its pilot). Units not
@@ -165,6 +179,12 @@ struct SolveStats {
   double enemy_phase_s = 0; // time inside Engine::end_turn
   double first_plan_s = 0;  // when the first complete plan was found
   double best_plan_s = 0;   // when the returned plan was found
+  // SolveOptions::lookahead: next-turn estimates computed (lookahead_loss
+  // runs), reused from the shared cache, and their time.
+  uint64_t lookahead_evals = 0;
+  uint64_t lookahead_hits = 0;
+  double lookahead_s = 0;
+  double base_search_s = 0;  // the search without the lookahead that seeded it
 };
 
 struct SolveResult {

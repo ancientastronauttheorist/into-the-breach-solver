@@ -34,16 +34,16 @@ bool retreated(const Pawn& p, const Pawn* q) { return q && !p.minor && q->minor 
 }  // namespace
 
 const char* score_key_name(int key) {
-  static constexpr const char* kNames[kScoreKeys] = {"grid",    "bldg_hp", "mechs", "obj_fail", "threat",
-                                                     "mech_hp", "obj",     "kills", "vek_hp",   "position"};
+  static constexpr const char* kNames[kScoreKeys] = {"grid",    "bldg_hp", "mechs",  "obj_fail", "next_turn", "threat",
+                                                     "mech_hp", "obj",     "kills",  "vek_hp",   "position"};
   return key >= 0 && key < kScoreKeys ? kNames[key] : "?";
 }
 
-int components_for_tiers(int tiers, bool threat_tier) {
+int components_for_tiers(int tiers, TierSet in_use) {
   int used = 0;
   for (int i = 0; i < kScoreKeys; ++i) {
     if (used >= tiers) return i;
-    if (tier_used(i, threat_tier)) ++used;
+    if (tier_used(i, in_use)) ++used;
   }
   return kScoreKeys;
 }
@@ -55,11 +55,19 @@ int mech_grid_rate(const Board& before, const ScoreOptions& options) {
   return rate;
 }
 
-std::string Score::describe(bool threat_tier) const {
+int mech_rate(const Board& before, const Pawn& mech, const ScoreOptions& options) {
+  int rate = mech_grid_rate(before, options);
+  if (rate >= 0 && options.mech_grid_pilot) {
+    rate = std::max(rate, std::min(options.mech_grid, std::max(0, static_cast<int>(mech.pilot_level))));
+  }
+  return rate;
+}
+
+std::string Score::describe(TierSet tiers) const {
   std::ostringstream out;
   bool first = true;
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (!tier_used(i, threat_tier)) continue;
+    if (!tier_used(i, tiers)) continue;
     out << (first ? "" : " ") << score_key_name(i) << "=" << v[static_cast<size_t>(i)];
     first = false;
   }
@@ -85,12 +93,17 @@ Score score_turn(const Board& before, const Board& after, const TurnContext* ctx
   s[ScoreKey::GridLost] = after.grid_power - before.grid_power;
   s[ScoreKey::BuildingHpLost] = building_hp(after) - building_hp(before);
 
+  // With the pilot floor: the mech exchange weighted per mech.
+  const bool per_mech = options.mech_exchange() && options.mech_grid_pilot;
+  int weighted_mechs = 0;
   for (const Pawn& p : before.pawns()) {
     const Pawn* q = same_pawn(p, after, phase);
     const int hp0 = on_board_alive(&p) ? p.hp : 0;
     const int hp1 = on_board_alive(q) ? q->hp : 0;
     if (p.mech && p.team == Team::Player) {
-      s[ScoreKey::MechsLost] += (hp1 > 0 ? 1 : 0) - (hp0 > 0 ? 1 : 0);
+      const int delta = (hp1 > 0 ? 1 : 0) - (hp0 > 0 ? 1 : 0);
+      s[ScoreKey::MechsLost] += delta;
+      if (per_mech && delta != 0) weighted_mechs += (2 * mech_rate(before, p, options) + 1) * delta;
       s[ScoreKey::MechHpLost] += hp1 - hp0;
     } else if (is_enemy_unit(p) && hp0 > 0 && !retreated(p, q)) {
       s[ScoreKey::VekKilled] += hp1 > 0 ? 0 : 1;
@@ -116,7 +129,9 @@ Score score_turn(const Board& before, const Board& after, const TurnContext* ctx
   if (options.threat_tier) {
     s[ScoreKey::Threat] -= kUnitThreatWeight * std::min(count_unit_threats(after), kMaxUnitThreats);
   }
-  if (const int rate = mech_grid_rate(before, options); rate >= 0) {
+  if (per_mech) {
+    s[ScoreKey::GridLost] = mech_grid_slot_w(s[ScoreKey::GridLost], weighted_mechs, after.grid_power);
+  } else if (const int rate = mech_grid_rate(before, options); rate >= 0) {
     s[ScoreKey::GridLost] = mech_grid_slot(rate, s[ScoreKey::GridLost], s[ScoreKey::MechsLost], after.grid_power);
   }
   return s;

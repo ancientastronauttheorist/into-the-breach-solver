@@ -139,12 +139,14 @@ ACTION_TIMEOUT = 60.0
 # The adaptive solve budget's default tier target: the score tiers through
 # mech HP (engine score.hpp ScoreKey: GridLost, BuildingHpLost, MechsLost,
 # ObjectivesFailed, MechHpLost), what the solver reports as "optimal in the
-# first 5 tiers". With --threat-tier the fifth tier is Threat instead.
+# first 5 tiers". With --threat-tier the fifth tier is Threat instead; with
+# --lookahead it is NextTurn (each optional tier in use adds one to the count
+# that reaches mech HP).
 MIN_TIERS = 5
 
-# The engine's score tiers in rank order (itb_live score JSON keys); "threat"
-# is only present with --threat-tier.
-SCORE_TIERS = ("grid", "building_hp", "mechs", "objectives_failed", "threat", "mech_hp",
+# The engine's score tiers in rank order (itb_live score JSON keys);
+# "next_turn" is only present with --lookahead, "threat" with --threat-tier.
+SCORE_TIERS = ("grid", "building_hp", "mechs", "objectives_failed", "next_turn", "threat", "mech_hp",
                "objectives", "kills", "vek_hp", "position")
 
 # Psions whose mutation gives every Vek +1 HP (and max HP) the moment they
@@ -319,13 +321,19 @@ class Engine:
 
     def solve(self, path: Path, time_limit: float, max_time: float = 0, min_tiers: int = 0,
               threat_tier: bool = False, threat_kills: bool = False, objectives_first: bool = False,
-              mech_grid: int = -1, mech_grid_turns: bool = False) -> dict:
+              mech_grid: int = -1, mech_grid_turns: bool = False, mech_grid_pilot: bool = False,
+              lookahead: bool = False, lookahead_samples: int | None = None,
+              lookahead_reply: str | None = None, lookahead_fold: str | None = None) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
         min_tiers score tiers are proven, up to max_time. threat_tier: rank by
         the next-turn threat tier (SolveOptions::threat_tier). mech_grid >= 0:
         a mech is worth up to that much grid (SolveOptions::mech_grid; capped
-        by the mission's turns left with mech_grid_turns)."""
+        by the mission's turns left with mech_grid_turns; with
+        mech_grid_pilot never below its pilot's level). lookahead: rank by
+        the next-turn loss estimate (SolveOptions::lookahead: sampled AI
+        plans, a greedy reply; lookahead_samples AI seeds, lookahead_reply
+        'greedy' or 'idle', lookahead_fold 'worst' or 'sum')."""
         req = {"cmd": "solve", "state": str(path), "time_limit": time_limit, "threads": self.threads}
         if min_tiers > 0 and max_time > time_limit:
             req.update(max_time=max_time, min_tiers=min_tiers)
@@ -339,6 +347,16 @@ class Engine:
             req["mech_grid"] = mech_grid
             if mech_grid_turns:
                 req["mech_grid_turns"] = True
+            if mech_grid_pilot:
+                req["mech_grid_pilot"] = True
+        if lookahead:
+            req["lookahead"] = True
+            if lookahead_samples:
+                req["lookahead_samples"] = int(lookahead_samples)
+            if lookahead_reply:
+                req["lookahead_reply"] = lookahead_reply
+            if lookahead_fold:
+                req["lookahead_fold"] = lookahead_fold
         return self.request(req)
 
     def predict(self, path: Path, plan: list) -> dict:
@@ -1176,6 +1194,25 @@ def execute_step(bridge: Bridge, step: dict, state: dict, loadout: dict, click=N
     return ack
 
 
+def ranking_options(args) -> dict:
+    """The solve request's ranking options from the command line (only those
+    set, so that every option off sends exactly what it always did)."""
+    extra = {k: True for k in ("threat_tier", "threat_kills", "objectives_first") if getattr(args, k, False)}
+    if getattr(args, "mech_grid", -1) is not None and getattr(args, "mech_grid", -1) >= 0:
+        extra.update(mech_grid=args.mech_grid, mech_grid_turns=bool(getattr(args, "mech_grid_turns", False)))
+        if getattr(args, "mech_grid_pilot", False):
+            extra["mech_grid_pilot"] = True
+    if getattr(args, "lookahead", False):
+        extra["lookahead"] = True
+        if getattr(args, "lookahead_samples", None):
+            extra["lookahead_samples"] = args.lookahead_samples
+        if getattr(args, "lookahead_reply", None):
+            extra["lookahead_reply"] = args.lookahead_reply
+        if getattr(args, "lookahead_fold", None):
+            extra["lookahead_fold"] = args.lookahead_fold
+    return extra
+
+
 def plan_summary(pred: dict) -> str:
     if not pred.get("searched", True):
         return "no active unit (nothing to solve)"
@@ -1188,7 +1225,17 @@ def plan_summary(pred: dict) -> str:
     secs = (pred.get("stats") or {}).get("time_s", 0)
     rate = pred.get("mech_grid_rate")
     if rate is not None and rate >= 0:
-        tiers += f" (mech exchange: grid slot = 2 x grid + {2 * rate + 1} x mechs)"
+        rates = pred.get("mech_rates") or {}
+        if rates and len(set(rates.values())) > 1:
+            per = ", ".join(f"#{u} {2 * r + 1}" for u, r in sorted(rates.items(), key=lambda kv: int(kv[0])))
+            tiers += f" (mech exchange: grid slot = 2 x grid + per mech {per})"
+        else:
+            tiers += f" (mech exchange: grid slot = 2 x grid + {2 * rate + 1} x mechs)"
+    nt = pred.get("next_turn")
+    if nt and not nt.get("mission_over"):
+        n = len(nt.get("samples") or [])
+        tiers += (f" (next turn, worst of {n} AI samples: grid -{nt.get('grid', 0)}, mechs -{nt.get('mechs', 0)}, "
+                  f"building HP -{nt.get('building_hp', 0)})")
     return f"{proof} ({secs:.1f}s); worst case {tiers}"
 
 
@@ -1299,9 +1346,7 @@ def play_turn(ctx) -> list:
         path = run.save_state(solver_input, label, {"patches": patches} if patches else None)
         if patches:
             run.save_state(st, label + "_raw")
-        extra = {k: True for k in ("threat_tier", "threat_kills", "objectives_first") if getattr(args, k, False)}
-        if getattr(args, "mech_grid", -1) is not None and getattr(args, "mech_grid", -1) >= 0:
-            extra.update(mech_grid=args.mech_grid, mech_grid_turns=bool(getattr(args, "mech_grid_turns", False)))
+        extra = ranking_options(args)
         if plan is not None:
             pred = engine.predict(path, plan)
         else:
@@ -2012,6 +2057,18 @@ def build_parser() -> argparse.ArgumentParser:
                              "give up to N grid to keep a mech, never the last grid (default -1: off)")
     engine.add_argument("--mech-grid-turns", action="store_true",
                         help="experimental: with --mech-grid, cap N by the mission's turns left after this one")
+    engine.add_argument("--mech-grid-pilot", action="store_true",
+                        help="experimental: with --mech-grid, a mech's rate is at least its pilot's level (0-2, "
+                             "capped by N), turns left or not: a dead pilot is lost for the rest of the run")
+    engine.add_argument("--lookahead", action="store_true",
+                        help="experimental: rank plans by the next turn's loss (the AI's planning sampled, a greedy "
+                             "reply) right after objectives failed; it adds a tier to --min-tiers counts")
+    engine.add_argument("--lookahead-samples", type=int, default=None, metavar="K",
+                        help="with --lookahead: AI seeds per end board, worst case taken (engine default 8)")
+    engine.add_argument("--lookahead-reply", choices=("greedy", "idle"), default=None,
+                        help="with --lookahead: the next-turn reply policy (default greedy)")
+    engine.add_argument("--lookahead-fold", choices=("worst", "sum"), default=None,
+                        help="with --lookahead: rank by the worst AI sample or by their sum (default worst)")
     engine.add_argument("--threads", type=int, default=8)
     engine.add_argument("--game", help="game install for the engine (default: ITB_GAME_DIR / build default)")
     engine.add_argument("--max-resolves", type=int, default=3, help="re-solves per turn before giving up")

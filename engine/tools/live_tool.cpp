@@ -51,11 +51,12 @@ namespace {
 // it follows the plan's default outcome exactly.
 constexpr uint32_t kLuaSeed = 1;
 
-const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "threat",
+const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "next_turn", "threat",
                                       "mech_hp", "objectives",  "kills", "vek_hp",            "position"};
 
-// The tiers in use: "threat" only with the threat tier.
-json score_json(const Score& s, bool threat = false) {
+// The tiers in use: "threat" only with the threat tier, "next_turn" only
+// with the lookahead.
+json score_json(const Score& s, TierSet threat = 0) {
   json j = json::object();
   for (int i = 0; i < kScoreKeys; ++i) {
     if (!tier_used(i, threat)) continue;
@@ -216,7 +217,8 @@ int weapon_index(const Pawn* p, const std::string& weapon) {
 // Fills out["plan"], ["steps"], ["refused"], the boards and the predicted
 // score, and appends to `warnings`.
 void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& plan, json& out,
-              std::vector<std::string>& warnings, const ScoreOptions& score_options) {
+              std::vector<std::string>& warnings, const ScoreOptions& score_options,
+              const LookaheadOptions* lookahead = nullptr) {
   Board b = l.board;
   ActionOptions opts = action_options(l.ctx);  // the mission's per-frame hooks
   opts.check_legal = true;
@@ -298,7 +300,22 @@ void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
   const PhaseResult pr = engine.end_turn(b, ctx);
   out["after_enemy"] = live_board_json(b);
   out["enemy_phase"] = phase_json(l.board, b, pr);
-  out["predicted_score"] = score_json(score_turn(l.board, b, &ctx, &pr, score_options), score_options.tier_on());
+  Score predicted = score_turn(l.board, b, &ctx, &pr, score_options);
+  if (lookahead) {
+    // The next-turn estimate of the board left (lookahead.hpp), per AI sample.
+    std::vector<NextTurnLoss> per;
+    predicted[ScoreKey::NextTurn] = lookahead_value(engine, l.board, b, &pr, ctx, *lookahead, &per);
+    NextTurnLoss worst;
+    for (const NextTurnLoss& s : per) {
+      if (next_turn_value(s) < next_turn_value(worst)) worst = s;
+    }
+    worst.mission_over = per.empty();
+    json samples = json::array();
+    for (const NextTurnLoss& s : per) samples.push_back(json{{"grid", s.grid}, {"mechs", s.mechs}, {"building_hp", s.building_hp}});
+    out["next_turn"] = json{{"grid", worst.grid}, {"mechs", worst.mechs}, {"building_hp", worst.building_hp},
+                            {"mission_over", worst.mission_over}, {"samples", samples}};
+  }
+  out["predicted_score"] = score_json(predicted, tier_set(score_options));
   if (score_options.tier_on()) out["threatening_enemies"] = threatening_enemies(b);
   if (!pr.exact) warnings.push_back("enemy phase: the recorded data does not pin every step down (EnvInexact)");
   if (pr.timing_sensitive()) warnings.push_back("enemy phase: frame-timing sensitive");
@@ -317,6 +334,25 @@ json stats_json(const SolveStats& s) {
               {"time_s", s.time_s},
               {"first_plan_s", s.first_plan_s},
               {"best_plan_s", s.best_plan_s}};
+}
+
+// The lookahead's request fields: "lookahead" (bool), "lookahead_samples",
+// "lookahead_reply" ("greedy" | "idle"), "lookahead_seed".
+LookaheadOptions lookahead_options(const json& request, const std::vector<std::pair<int32_t, std::string>>& repair) {
+  LookaheadOptions o;
+  o.samples = std::max(1, request.value("lookahead_samples", o.samples));
+  o.seed = request.value("lookahead_seed", o.seed);
+  o.sum = request.value("lookahead_fold", std::string("worst")) == "sum";
+  const std::string reply = request.value("lookahead_reply", std::string("greedy"));
+  if (reply == "idle") {
+    o.reply = LookaheadOptions::Reply::Idle;
+  } else if (reply == "greedy") {
+    o.reply = LookaheadOptions::Reply::Greedy;
+  } else {
+    throw std::invalid_argument("lookahead_reply must be 'greedy' or 'idle'");
+  }
+  o.repair_skills = repair;
+  return o;
 }
 
 std::string read_text_arg(const std::string& arg) {
@@ -572,8 +608,21 @@ json LiveSession::handle(const json& request) {
     // Experiment: a mech is worth up to mech_grid grid (SolveOptions::mech_grid).
     tiers.mech_grid = request.value("mech_grid", -1);
     tiers.mech_grid_turns = request.value("mech_grid_turns", false);
-    if (const int rate = mech_grid_rate(l.board, tiers.score_options()); rate >= 0) out["mech_grid_rate"] = rate;
-    const bool threat = tiers.tier_on();
+    tiers.mech_grid_pilot = request.value("mech_grid_pilot", false);
+    // Next-turn lookahead (SolveOptions::lookahead, lookahead.hpp).
+    tiers.lookahead = request.value("lookahead", false);
+    if (tiers.lookahead) tiers.lookahead_options = lookahead_options(request, l.repair_skills);
+    if (const int rate = mech_grid_rate(l.board, tiers.score_options()); rate >= 0) {
+      out["mech_grid_rate"] = rate;
+      if (tiers.mech_grid_pilot) {
+        json rates = json::object();
+        for (const Pawn& p : l.board.pawns()) {
+          if (p.mech && p.team == Team::Player) rates[std::to_string(p.uid)] = mech_rate(l.board, p, tiers.score_options());
+        }
+        out["mech_rates"] = rates;
+      }
+    }
+    const TierSet threat = tiers.tiers();
     if (cmd == "predict") {
       if (!request.contains("plan")) throw std::invalid_argument("predict needs a 'plan'");
       plan = parse_plan(request["plan"]);
@@ -590,6 +639,9 @@ json LiveSession::handle(const json& request) {
         so.objectives_first = tiers.objectives_first;
         so.mech_grid = tiers.mech_grid;
         so.mech_grid_turns = tiers.mech_grid_turns;
+        so.mech_grid_pilot = tiers.mech_grid_pilot;
+        so.lookahead = tiers.lookahead;
+        so.lookahead_options = tiers.lookahead_options;
         const int beam = request.value("beam_width", -1);
         if (beam >= 0) so.beam_width = beam;
         so.repair_skills = l.repair_skills;
@@ -609,13 +661,19 @@ json LiveSession::handle(const json& request) {
         out["extended"] = r.extended;
         out["contingent"] = r.best.contingent;
         out["stats"] = stats_json(r.stats);
+        if (so.lookahead) {
+          out["stats"]["lookahead_evals"] = r.stats.lookahead_evals;
+          out["stats"]["lookahead_hits"] = r.stats.lookahead_hits;
+          out["stats"]["lookahead_s"] = r.stats.lookahead_s;
+        }
         warnings = r.warnings;
         if (r.best.contingent) warnings.push_back("plan is contingent on a chance node during the player's actions");
       } else {
         warnings.push_back("no active unit: nothing to solve (the enemy phase is still predicted)");
       }
     }
-    simulate(*main_, l, plan, out, warnings, tiers.score_options());
+    simulate(*main_, l, plan, out, warnings, tiers.score_options(),
+             tiers.lookahead ? &tiers.lookahead_options : nullptr);
     std::vector<std::string> unique;
     for (const std::string& w : warnings) {
       if (std::find(unique.begin(), unique.end(), w) == unique.end()) unique.push_back(w);
@@ -631,7 +689,8 @@ namespace {
 
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
-               "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] | "
+               "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] "
+               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | "
                "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
                "[--solve-time S] [--solve-nodes N] [--seed N] [--placements JSON|@FILE] [--always JSON|@FILE] | "
@@ -726,6 +785,16 @@ int run_live(int argc, char** argv) {
         request["mech_grid"] = std::stoi(args[++i]);
       } else if (args[i] == "--mech-grid-turns" && (cmd == "solve" || cmd == "predict")) {
         request["mech_grid_turns"] = true;
+      } else if (args[i] == "--mech-grid-pilot" && (cmd == "solve" || cmd == "predict")) {
+        request["mech_grid_pilot"] = true;
+      } else if (args[i] == "--lookahead" && (cmd == "solve" || cmd == "predict")) {
+        request["lookahead"] = true;
+      } else if (args[i] == "--lookahead-samples" && more && (cmd == "solve" || cmd == "predict")) {
+        request["lookahead_samples"] = std::stoi(args[++i]);
+      } else if (args[i] == "--lookahead-reply" && more && (cmd == "solve" || cmd == "predict")) {
+        request["lookahead_reply"] = args[++i];
+      } else if (args[i] == "--lookahead-fold" && more && (cmd == "solve" || cmd == "predict")) {
+        request["lookahead_fold"] = args[++i];
       } else if (args[i] == "--beam" && more && (cmd == "solve" || cmd == "deploy")) {
         request["beam_width"] = std::stoi(args[++i]);
       } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve" || cmd == "deploy")) {

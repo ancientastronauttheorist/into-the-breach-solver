@@ -28,6 +28,11 @@ struct SolveToolOptions {
   bool objectives_first = false;   // SolveOptions::objectives_first
   int mech_grid = -1;              // SolveOptions::mech_grid (experiment: mechs worth N grid)
   bool mech_grid_turns = false;    // SolveOptions::mech_grid_turns
+  bool mech_grid_pilot = false;    // SolveOptions::mech_grid_pilot
+  bool lookahead = false;          // SolveOptions::lookahead (next-turn tier)
+  int lookahead_samples = 8;       // LookaheadOptions::samples
+  bool lookahead_idle = false;     // LookaheadOptions::Reply::Idle instead of Greedy
+  bool lookahead_sum = false;      // LookaheadOptions::sum
   // JSON: also each plan's actions and its worst case scored with the threat
   // tier on ("plan", "threat_eval"), whatever the search ranked by.
   bool threat_eval = false;
