@@ -1440,6 +1440,16 @@ def tearDownModule():
     shutil.rmtree(_BRIDGE_DIR, ignore_errors=True)
 
 
+class GridBaseWarningTest(unittest.TestCase):
+    def test_restart_bug_is_flagged_only_on_unfair(self):
+        self.assertIsNotNone(lp.grid_base_warning({"grid_defense_base": 15, "difficulty": 3}))
+        self.assertIsNotNone(lp.grid_base_warning({"grid_defense_base": 15,
+                                                   "mission_state": {"difficulty": 3}}))
+        self.assertIsNone(lp.grid_base_warning({"grid_defense_base": 0, "difficulty": 3}))
+        self.assertIsNone(lp.grid_base_warning({"grid_defense_base": 15, "difficulty": 2}))
+        self.assertIsNone(lp.grid_base_warning({"difficulty": 3}))  # older bridge: unknown
+
+
 if __name__ == "__main__":
     unittest.main()
 

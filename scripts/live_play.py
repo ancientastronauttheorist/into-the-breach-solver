@@ -2035,6 +2035,19 @@ def parse_tiles(text: str) -> list:
 
 # ------------------------------------------------------------------ status / mission
 
+def grid_base_warning(st: dict) -> str | None:
+    """The Grid Defense restart bug: a save loaded right after the game
+    starts builds its power bar under the settings file's difficulty, so an
+    Unfair run can get the 15% base it should not have (engine/README.md,
+    Grid survival). Loading the save once more clears it."""
+    base = st.get("grid_defense_base")
+    difficulty = st.get("difficulty", (st.get("mission_state") or {}).get("difficulty"))
+    if base and difficulty == 3:
+        return (f"WARNING: Grid Defense base {base}% on an Unfair save (restart bug): "
+                "load the save once more (Reset Turn, or menu -> Continue) before playing on")
+    return None
+
+
 def status(ctx) -> list:
     bridge = ctx.bridge
     age = bridge.heartbeat_age()
@@ -2048,6 +2061,9 @@ def status(ctx) -> list:
         + (f" (estimate now {st['grid_power_estimate']})" if "grid_power_estimate" in st else ""))
     say(f"bridge_ext_version {st.get('bridge_ext_version')}  errors {len(st.get('bridge_errors') or [])}"
         + (f"  EXTENSION DISABLED: {st['bridge_ext_disabled']}" if st.get("bridge_ext_disabled") else ""))
+    warning = grid_base_warning(st)
+    if warning:
+        say(warning)
     for u in sorted(units(st), key=lambda u: (u.get("team") != 1, u["uid"])):
         if (u.get("hp") or 0) <= 0:
             continue

@@ -94,6 +94,14 @@ python3 scripts/live_play.py mission --max-turns 10  # turn + end-turn, stops at
 python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1  # back to a turn start
 ```
 
+- **After a game restart, load the save twice.** A save continued right after
+  the game starts gets the Grid Defense base of the settings file's
+  difficulty, not the save's (Grid survival, below), so an Unfair run would
+  play with 15% it should not have. We don't take that bonus: after any
+  restart, Continue, then load once more (Reset Turn, or menu → Continue)
+  before playing. `status` prints a WARNING while the bridge reports the
+  bogus base (`grid_defense_base` 15 on difficulty 3). Run 22 (2026-10-14,
+  won) had the bonus: 40% instead of 25%.
 - **Checkpoints and restore.** At each turn start `turn` copies the game's
   own save files (`profile_Alpha/saveData.lua`, `undoSave.lua`) into the run
   as `m<MM>_turn_<TT>_saveData.lua` / `_undoSave.lua`. `restore` quits the
