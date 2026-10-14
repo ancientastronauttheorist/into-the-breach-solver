@@ -84,6 +84,10 @@ struct ActionOptions {
   // depend on the random stream). The legality check uses it instead of
   // asking Lua again.
   const std::vector<Point>* known_area = nullptr;
+  // The prepared effect of this very weapon shot (actor, slot, target, one
+  // click) on this same board, from Engine::pure_weapon_effect: fire_weapon
+  // uses it instead of building it again.
+  const SkillEffect* known_effect = nullptr;
 };
 
 enum class ActionStatus : uint8_t {
@@ -172,6 +176,21 @@ class Engine {
   // with the effect recomputed from the shooter's current tile. The stored
   // shot is used up whether or not it fizzles.
   ActionResult fire_queued(Board& board, int32_t uid, const ActionOptions& opts = {});
+
+  // The effect fire_weapon(board, uid, slot, target, nullopt, opts) would
+  // resolve (prepared, alterations applied), computed without running it:
+  // nullopt unless fire_weapon would accept the target with a non-empty
+  // effect, and no random number was drawn and no Lua error occurred on the
+  // way. Then what fire_weapon does to `board` is a function of the board,
+  // the weapon slot and this effect except SkillEffect::target, which a
+  // prepared effect never reads (the target reaches the board only through
+  // the queued shot of an effect with a queued part), given that the
+  // weapon's Lua keeps no state that its resolution reads (as the solver
+  // assumes everywhere: it re-runs GetSkillEffect for every chance outcome
+  // and transposition). The solver uses it to skip targets that are bound
+  // to give a sibling's board.
+  std::optional<SkillEffect> pure_weapon_effect(const Board& board, int32_t uid, int slot, Point target,
+                                                const ActionOptions& opts);
 
   // A pilot's rule-changing ability (board.hpp PilotAbility) from its Lua
   // table's Skill, e.g. "Pilot_Rock" -> Rock_Skill. kPilotNone if none.

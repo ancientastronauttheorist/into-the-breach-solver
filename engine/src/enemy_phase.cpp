@@ -279,6 +279,15 @@ PhaseResult Engine::end_turn(Board& board, const TurnContext& tc) {
     }
   };
 
+  // TurnContext::stop_early, asked between steps (on an idle board).
+  auto stop_here = [&]() {
+    if (!tc.stop_early || !tc.stop_early(board)) return false;
+    out.stopped = true;
+    absorb(out, diag);
+    ctx.frame_hook = nullptr;
+    return true;
+  };
+
   // ---- State 1 entry: Board::NextTurn(6) releases every web.
   const int webs = clear_all_webs(board);
   if (webs > 0) out.events.push_back(PhaseEvent{PhaseEventType::WebsCleared, kInvalidPoint, -1, webs, ""});
@@ -321,6 +330,8 @@ PhaseResult Engine::end_turn(Board& board, const TurnContext& tc) {
     }
   }
 
+  if (stop_here()) return out;
+
   // ---- Environment steps, each resolved to idle before the next. A step
   // still due takes every idle frame first, so a hook that waits for an idle
   // board (Mission_Final_Cave's bomb re-drop) runs only once the last step
@@ -335,6 +346,7 @@ PhaseResult Engine::end_turn(Board& board, const TurnContext& tc) {
     out.events.push_back(PhaseEvent{PhaseEventType::EnvStep, kInvalidPoint, -1, step, env->name()});
     absorb(out, r.settle());
     burrow_away();
+    if (stop_here()) return out;
   }
   host.set_hold(false);
   // A hook held back with no step to resolve: its idle frame, before the
@@ -373,6 +385,7 @@ PhaseResult Engine::end_turn(Board& board, const TurnContext& tc) {
       absorb(out, r.settle());
     }
     burrow_away();
+    if (stop_here()) return out;
   }
   for (int32_t uid : queued_at_start) {
     if (fired.count(uid)) continue;

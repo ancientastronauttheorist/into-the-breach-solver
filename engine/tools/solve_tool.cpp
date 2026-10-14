@@ -298,10 +298,21 @@ int run_solve(const SolveToolOptions& opt) {
                   static_cast<unsigned long long>(r.stats.tt_hits), static_cast<unsigned long long>(r.stats.leaf_hits),
                   static_cast<unsigned long long>(r.stats.duplicate_children),
                   static_cast<unsigned long long>(r.stats.bound_prunes), r.stats.first_plan_s, r.stats.best_plan_s);
+      {
+        std::printf("profile: %llu same-effect shots skipped (%llu mismatches), %llu leaf evals (%llu phases stopped early), %llu children (%.1f per node), generate %.2fs, order %.2fs, base search %.2fs (%d tiers, plan at %.2fs); nodes by depth:",
+                    static_cast<unsigned long long>(r.stats.same_effect_shots), static_cast<unsigned long long>(r.stats.same_effect_mismatches),
+                    static_cast<unsigned long long>(r.stats.leaf_evals), static_cast<unsigned long long>(r.stats.phases_stopped),
+                    static_cast<unsigned long long>(r.stats.children),
+                    static_cast<double>(r.stats.children) / static_cast<double>(std::max<uint64_t>(1, r.stats.nodes)),
+                    r.stats.generate_s, r.stats.order_s, r.stats.base_search_s, r.stats.base_proven_components, r.stats.base_best_plan_s);
+        for (uint64_t d : r.stats.depth_nodes) std::printf(" %llu", static_cast<unsigned long long>(d));
+        std::printf("\n");
+      }
       if (so.lookahead) {
-        std::printf("lookahead: %llu estimates (%.2fs), %llu reused\n",
+        std::printf("lookahead: %llu estimates (%.2fs), %llu reused, %llu cut by the base search's bounds\n",
                     static_cast<unsigned long long>(r.stats.lookahead_evals), r.stats.lookahead_s,
-                    static_cast<unsigned long long>(r.stats.lookahead_hits));
+                    static_cast<unsigned long long>(r.stats.lookahead_hits),
+                    static_cast<unsigned long long>(r.stats.prior_hits));
       }
       for (const std::string& w : r.warnings) std::printf("warning: %s\n", w.c_str());
       if (row.recorded) {
@@ -330,6 +341,11 @@ int run_solve(const SolveToolOptions& opt) {
              {"leaf_entries", r.stats.leaf_entries},
              {"first_plan_s", r.stats.first_plan_s},
              {"best_plan_s", r.stats.best_plan_s},
+             {"base_search_s", r.stats.base_search_s},
+             {"base_proven_components", r.stats.base_proven_components},
+             {"base_best_plan_s", r.stats.base_best_plan_s},
+             {"same_effect_shots", r.stats.same_effect_shots},
+             {"phases_stopped", r.stats.phases_stopped},
              {"ours", score_vector(r.best.worst_case, tier_on)},
              {"contingent", r.best.contingent},
              {"proven_components", r.proven_components},

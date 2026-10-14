@@ -51,6 +51,7 @@
 // out, with a sound upper bound on what any plan can score.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -134,6 +135,9 @@ struct SolveOptions {
   bool use_tt = true;      // transposition table and end-of-turn memo
   bool use_bounds = true;  // branch-and-bound with the tier bounds
   bool order_children = true;
+  // Skip a weapon target whose effect equals a sibling target's (solver.cpp
+  // generate; the environment variable ITB_SAME_EFFECT=0 turns it off too).
+  bool skip_same_effect = true;
   // Entries per table (transposition table, end-of-turn memo).
   size_t tt_max_entries = size_t{1} << 21;
   // Beam pre-pass for a quick first plan: this many states kept per set of
@@ -185,6 +189,23 @@ struct SolveStats {
   uint64_t lookahead_hits = 0;
   double lookahead_s = 0;
   double base_search_s = 0;  // the search without the lookahead that seeded it
+  int base_proven_components = 0;  // ... and the leading tiers it proved
+  double base_best_plan_s = 0;     // ... and when it found its plan
+  // Profile (summed over threads): end-of-turn evaluations computed (not
+  // from the memo), children generated at expanded nodes, thread time in
+  // generating children and in ordering them, nodes expanded per depth
+  // (the last bucket holds the deeper ones).
+  uint64_t leaf_evals = 0;
+  uint64_t phases_stopped = 0;  // enemy phases ended early by the bound
+  uint64_t same_effect_shots = 0;  // shots not run: a sibling had the same effect
+  uint64_t same_effect_mismatches = 0;  // ITB_VERIFY_EFFECTS: such a shot differed
+  // SolveOptions::lookahead: nodes and end-of-turn values the base search's
+  // tables cut (their upper bounds hold for the lookahead search).
+  uint64_t prior_hits = 0;
+  uint64_t children = 0;
+  double generate_s = 0;
+  double order_s = 0;
+  std::array<uint64_t, 12> depth_nodes{};
 };
 
 struct SolveResult {

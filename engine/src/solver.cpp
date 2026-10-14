@@ -35,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cstdlib>
 #include <cstdio>
 #include <functional>
 #include <memory>
@@ -445,6 +446,14 @@ struct Child {
   Score order;                    // best case of ending the turn right after
 };
 
+// An end-of-turn value. `stopped`: the enemy phase was ended early by the
+// bound (TurnContext::stop_early), so `v` is [-inf, the bound there]: sound,
+// but a poor key for ordering children or ranking the beam.
+struct LeafMemo {
+  Interval v;
+  bool stopped = false;
+};
+
 struct TTEntry {
   Interval v;
   SubAction best;
@@ -455,6 +464,11 @@ struct TTEntry {
 Interval intersect(const Interval& a, const Interval& b) {
   const Interval r{std::max(a.lo, b.lo), std::min(a.hi, b.hi)};
   return r.lo <= r.hi ? r : b;  // only a truncated chance tree can disagree
+}
+LeafMemo merge_leaf(const LeafMemo& old, const LeafMemo& next) {
+  // A real cut value is never above a stopped one of the same board (the
+  // default outcome runs first), so the merge is stopped only if both are.
+  return LeafMemo{intersect(old.v, next.v), old.stopped && next.stopped};
 }
 TTEntry merge_entries(const TTEntry& old, const TTEntry& next) {
   TTEntry out = next.v.lo >= old.v.lo ? next : old;
@@ -562,11 +576,17 @@ struct Shared {
   TierBounds bounds;
   TurnContext base;
   SharedMap<TTEntry> tt;
-  SharedMap<Interval> leaf;
+  SharedMap<LeafMemo> leaf;
   SharedMap<int> busy;
   // SolveOptions::lookahead: NextTurn values by the hash of the end board
   // (after the enemy phase), shared by the threads.
   SharedMap<std::vector<int32_t>> next_turn;
+  // The lookahead search's prior: the tables of the search without the
+  // lookahead that ran first (solve_turn). Their upper bounds hold here: a
+  // plan's score with the lookahead is its score without it with NextTurn
+  // lowered from its cap (0), so every value here is at most the value
+  // there, which is at most its bound. (Their lower bounds do not hold.)
+  const Shared* prior = nullptr;
   size_t threads = 1;
   Clock::time_point start;
   std::atomic<bool> stop{false};       // budget spent or the search completed
@@ -621,6 +641,12 @@ class Worker {
     for (const auto& [uid, skill] : o_.repair_skills) repair_[uid] = intern(skill);
     move_skill_ = intern("Move");
     default_repair_ = intern("Skill_Repair");
+    auto env_on = [](const char* name, bool dflt) {
+      const char* v = std::getenv(name);
+      return v && *v ? std::string_view(v) != "0" : dflt;
+    };
+    verify_effects_ = env_on("ITB_VERIFY_EFFECTS", false);
+    same_effect_ = o_.skip_same_effect && env_on("ITB_SAME_EFFECT", true);
   }
 
   // Beam pre-pass (thread 0), then the full search. Returns the root's
@@ -766,18 +792,30 @@ class Worker {
   // the minimum, and not at all when the bound is already <= alpha or the
   // caller only wants bounds (`lazy`: child ordering, the beam's ranking),
   // in which case the interval is [NextTurn at its floor, at its cap].
-  Interval leaf(const Board& b, const Score& alpha, bool lazy = false) {
+  // `may_stop`: the enemy phase may end early once the outcome is cut (its
+  // value is then only the bound; ranking callers want the real one).
+  Interval leaf(const Board& b, const Score& alpha, bool lazy = false, bool may_stop = true) {
     const bool la = o_.lookahead;
     lazy = lazy && la;
     BoardHash key{};
     if (o_.use_tt) {
       key = hash_board(b, HashMode::EndTurn);
-      Interval memo;
-      if (sh_.leaf.get(key, memo) && (memo.exact() || memo.hi <= alpha || lazy)) {
+      LeafMemo memo;
+      if (sh_.leaf.get(key, memo) && (may_stop || !memo.stopped) &&
+          (memo.v.exact() || memo.v.hi <= alpha || lazy)) {
         ++stats_.leaf_hits;
-        return memo;
+        return memo.v;
       }
     }
+    if (o_.use_tt && sh_.prior && may_stop) {
+      LeafMemo memo;
+      if (const_cast<Shared*>(sh_.prior)->leaf.get(key, memo) && memo.v.hi <= alpha) {
+        ++stats_.prior_hits;
+        return Interval{kLow, memo.v.hi};
+      }
+    }
+    bool stopped_early = false;
+    ++stats_.leaf_evals;
     struct Pending {
       Score s;  // NextTurn at its cap
       Board after;
@@ -790,10 +828,22 @@ class Worker {
       Board after = b;
       const Clock::time_point t0 = Clock::now();
       e_.lua().seed(kLuaSeed);
+      // Stop the phase once the board's tier bound is <= alpha: grid power
+      // and building HP never rise (TierBounds), so the rest of the phase
+      // cannot lift this outcome above it.
+      if (o_.use_bounds && may_stop) tc_.stop_early = [&](const Board& mid) { return sh_.bounds.of(mid) <= alpha; };
       const PhaseResult pr = e_.end_turn(after, tc_);
+      tc_.stop_early = nullptr;
       stats_.enemy_phase_s += seconds_since(t0);
       ++stats_.enemy_phases;
       driver_.mark_random(pr.chances);
+      if (pr.stopped) {
+        ++stats_.phases_stopped;
+        stopped_early = true;
+        worst = std::min(worst, sh_.bounds.of(after));
+        cut = true;
+        return false;
+      }
       if (!pr.exact) sh_.note("enemy phase: the recorded data does not pin every step down (EnvInexact)");
       if (!pr.emerged_unknown.empty()) sh_.note("enemy phase: spawns of unknown type emerge without a pawn");
       const Score s = score_turn(sh_.root, after, &tc_, &pr, sh_.score_options);
@@ -842,7 +892,7 @@ class Worker {
         r = cut ? Interval{kLow, exact} : Interval{exact, exact};
       }
     }
-    if (o_.use_tt) sh_.leaf.put(key, r, intersect);
+    if (o_.use_tt) sh_.leaf.put(key, LeafMemo{r, stopped_early}, merge_leaf);
     return r;
   }
 
@@ -874,12 +924,14 @@ class Worker {
 
   // Runs one sub-action from b through every chance outcome. False if the
   // engine refuses it or nothing happens. `area`: the skill's target area on
-  // b, when unit_actions computed it cleanly (ActionOptions::known_area).
+  // b, when unit_actions computed it cleanly (ActionOptions::known_area);
+  // `effect`: the shot's pure effect (ActionOptions::known_effect).
   bool execute(const Board& b, SubAction& act, std::vector<Outcome>& outs,
-               const std::vector<Point>* area = nullptr) {
+               const std::vector<Point>* area = nullptr, const SkillEffect* effect = nullptr) {
     outs.clear();
     bool refused = false;
     aopts_.known_area = area;
+    aopts_.known_effect = effect;
     const EnumEnd end = enumerate_chance(driver_, o_.max_chance_leaves, stats_.chance_branches, [&] {
       Board next = b;
       const Clock::time_point t0 = Clock::now();
@@ -900,6 +952,7 @@ class Worker {
       return true;
     });
     aopts_.known_area = nullptr;
+    aopts_.known_effect = nullptr;
     if (refused) return false;
     if (end == EnumEnd::Truncated) sh_.chance_exact = false;
     act.chance = outs.size() > 1;
@@ -1007,6 +1060,18 @@ class Worker {
 
   static bool unit_can_play(const Pawn& p) { return p.controlled() && p.alive() && p.pos.valid(); }
 
+  // Same-effect shots. A weapon's target only reaches the board through
+  // the effect it builds (Engine::pure_weapon_effect): two targets of one
+  // unit's weapon slot whose pure effects are equal (SkillEffect::target
+  // aside, which a prepared effect never reads; no queued part) give the
+  // same outcomes, so the second needs no run. Every field of the effect
+  // takes part (SpaceDamage::operator== is defaulted).
+  static bool same_effect(const SkillEffect& a, const SkillEffect& b) {
+    static_assert(sizeof(SkillEffect) == 72, "SkillEffect changed: compare the new field in same_effect");
+    return a.effect == b.effect && a.q_effect == b.q_effect && a.origin == b.origin && a.owner == b.owner &&
+           a.team == b.team && a.follow_up == b.follow_up;
+  }
+
   void generate(const Board& b, const BoardHash& h, std::vector<Child>& out) {
     out.clear();
     std::unordered_set<BoardHash, BoardHashOf> seen;
@@ -1015,16 +1080,94 @@ class Worker {
     for (const Pawn& p : b.pawns()) {
       if (unit_can_play(p)) unit_actions(b, p, true, true, acts);
     }
+    // Shots already run from b with a pure effect: where their outcomes went
+    // (`child`: index in `out`, or npos when they duplicated a sibling).
+    struct Fired {
+      int32_t uid;
+      int8_t slot;
+      SkillEffect fx;
+      size_t child;
+    };
+    std::vector<Fired> fired;
     for (size_t i = 0; i < acts.acts.size(); ++i) {
       SubAction& act = acts.acts[i];
+      std::optional<SkillEffect> fx;
+      if (same_effect_ && act.kind == SubAction::Weapon && !act.target2.valid()) {
+        aopts_.known_area = acts.area_of(i);
+        fx = e_.pure_weapon_effect(b, act.uid, act.slot, act.target, aopts_);
+        aopts_.known_area = nullptr;
+        if (fx && !fx->q_effect.empty()) fx.reset();  // the queued shot keeps the target
+      }
+      if (fx) {
+        const Fired* twin = nullptr;
+        for (const Fired& f : fired) {
+          if (f.uid == act.uid && f.slot == act.slot && same_effect(f.fx, *fx)) {
+            twin = &f;
+            break;
+          }
+        }
+        if (twin) {
+          ++stats_.same_effect_shots;
+          if (verify_effects_) {
+            verify_twin(b, act, acts.area_of(i), twin->child == SIZE_MAX ? nullptr : &out[twin->child], seen);
+          }
+          if (twin->child == SIZE_MAX) {
+            ++stats_.duplicate_children;  // as running it would have found
+            continue;
+          }
+          Child c;
+          c.act = act;
+          c.act.chance = out[twin->child].act.chance;
+          c.outcomes = out[twin->child].outcomes;
+          if (c.outcomes.size() == 1) {  // (a single outcome is in `seen`: never reached)
+            ++stats_.duplicate_children;
+            continue;
+          }
+          out.push_back(std::move(c));
+          continue;
+        }
+      }
       Child c;
-      if (!execute(b, act, c.outcomes, acts.area_of(i))) continue;
+      if (!execute(b, act, c.outcomes, acts.area_of(i), fx ? &*fx : nullptr)) continue;
+      if (verify_effects_ && fx) {
+        // The shot run with its known effect must match a run that builds it.
+        SubAction a = act;
+        std::vector<Outcome> outs;
+        bool same = execute(b, a, outs, acts.area_of(i)) && outs.size() == c.outcomes.size();
+        for (size_t k = 0; same && k < outs.size(); ++k) same = outs[k].hash == c.outcomes[k].hash;
+        if (!same) {
+          ++stats_.same_effect_mismatches;
+          sh_.note("known-effect shot gave another board: " + std::string(symbol_name(act.skill)));
+        }
+      }
       if (c.outcomes.size() == 1 && !seen.insert(c.outcomes[0].hash).second) {
         ++stats_.duplicate_children;
+        if (fx) fired.push_back(Fired{act.uid, act.slot, std::move(*fx), SIZE_MAX});
         continue;
       }
       c.act = act;
+      if (fx) fired.push_back(Fired{act.uid, act.slot, std::move(*fx), out.size()});
       out.push_back(std::move(c));
+    }
+  }
+
+  // ITB_VERIFY_EFFECTS=1: a same-effect shot is run anyway and must give
+  // its twin's outcomes (a mismatch is a warning and is counted).
+  void verify_twin(const Board& b, const SubAction& act, const std::vector<Point>* area, const Child* twin,
+                   const std::unordered_set<BoardHash, BoardHashOf>& seen) {
+    SubAction a = act;
+    std::vector<Outcome> outs;
+    const bool ok = execute(b, a, outs, area);
+    bool same = ok;
+    if (ok && twin) {
+      same = outs.size() == twin->outcomes.size();
+      for (size_t k = 0; same && k < outs.size(); ++k) same = outs[k].hash == twin->outcomes[k].hash;
+    } else if (ok) {
+      same = outs.size() == 1 && seen.count(outs[0].hash) > 0;  // its twin's board was a sibling's
+    }
+    if (!same) {
+      ++stats_.same_effect_mismatches;
+      sh_.note("same-effect shot gave another board: " + std::string(symbol_name(act.skill)));
     }
   }
 
@@ -1054,7 +1197,7 @@ class Worker {
       std::vector<State> next;
       auto consider = [&](Outcome& o, std::vector<SubAction> line, bool chance_free, uint32_t played) {
         if (!seen.insert(o.hash).second) return;
-        const Interval end = leaf(o.board, alpha_of(kLow), o_.lookahead);
+        const Interval end = leaf(o.board, alpha_of(kLow), o_.lookahead, false);
         if (chance_free && end.exact()) improve(end.lo, line);
         next.push_back(State{std::move(o.board), std::move(line), chance_free, played, end.hi});
       };
@@ -1086,10 +1229,26 @@ class Worker {
             if (!q || !unit_can_play(*q)) continue;
             Actions acts;
             unit_actions(base.board, *q, true, false, acts);
+            // Same-effect shots (generate): the twin's board is in `seen`.
+            std::vector<std::pair<int8_t, SkillEffect>> fired;
             for (size_t i = 0; i < acts.acts.size(); ++i) {
               SubAction& a = acts.acts[i];
               if (budget_exceeded()) return;
-              if (!execute(base.board, a, outs, acts.area_of(i)) || outs.empty()) continue;
+              std::optional<SkillEffect> fx;
+              if (same_effect_ && a.kind == SubAction::Weapon && !a.target2.valid()) {
+                aopts_.known_area = acts.area_of(i);
+                fx = e_.pure_weapon_effect(base.board, a.uid, a.slot, a.target, aopts_);
+                aopts_.known_area = nullptr;
+                if (fx && !fx->q_effect.empty()) fx.reset();
+                if (fx && std::any_of(fired.begin(), fired.end(), [&](const auto& f) {
+                      return f.first == a.slot && same_effect(f.second, *fx);
+                    })) {
+                  ++stats_.same_effect_shots;
+                  continue;
+                }
+              }
+              if (!execute(base.board, a, outs, acts.area_of(i), fx ? &*fx : nullptr) || outs.empty()) continue;
+              if (fx) fired.emplace_back(a.slot, std::move(*fx));
               std::vector<SubAction> line = base.line;
               line.push_back(a);
               consider(outs[0], std::move(line), base.chance_free && !a.chance, played);
@@ -1117,7 +1276,7 @@ class Worker {
         for (size_t j = 0; j < best.size() && j < kBeamExact; ++j) {
           if (budget_exceeded()) return;
           State& st = kept[best[j]];
-          const Interval end = leaf(st.board, alpha_of(kLow));
+          const Interval end = leaf(st.board, alpha_of(kLow), false, false);
           if (end.exact()) improve(end.lo, st.line);
         }
       }
@@ -1184,6 +1343,13 @@ class Worker {
         }
       }
     }
+    if (o_.use_tt && sh_.prior) {
+      TTEntry e;
+      if (const_cast<Shared*>(sh_.prior)->tt.get(h, e) && e.v.hi <= alpha) {
+        ++stats_.prior_hits;
+        return Interval{kLow, e.v.hi};
+      }
+    }
     ++stats_.nodes;
     sh_.nodes.fetch_add(1, std::memory_order_relaxed);
     const bool shared = sh_.threads > 1;
@@ -1217,18 +1383,35 @@ class Worker {
       return finish(Interval{lo, std::max(hi, ub)});
     }
 
+    ++stats_.depth_nodes[static_cast<size_t>(std::min<int>(depth, static_cast<int>(stats_.depth_nodes.size()) - 1))];
     std::vector<Child> children;
+    Clock::time_point tg = Clock::now();
     generate(b, h, children);
+    stats_.generate_s += seconds_since(tg);
+    stats_.children += children.size();
+    tg = Clock::now();
     if (o_.order_children) {
       for (Child& c : children) {
         if (budget_exceeded()) break;
+        const Score a = alpha_of(alpha);
+        if (o_.use_bounds) {
+          // A child its tier bound cuts (visit) needs no end-of-turn value.
+          Score cub = kLow;
+          for (const Outcome& oc : c.outcomes) cub = std::max(cub, sh_.bounds.of(oc.board));
+          if (cub <= a) {
+            c.order = cub;
+            continue;
+          }
+        }
         Score key = kHigh;
-        for (const Outcome& oc : c.outcomes) key = std::min(key, leaf(oc.board, alpha_of(alpha), true).hi);
+        const bool may_stop = sh_.prefix_mode.load(std::memory_order_relaxed);
+        for (const Outcome& oc : c.outcomes) key = std::min(key, leaf(oc.board, a, true, may_stop).hi);
         c.order = key;
       }
       std::stable_sort(children.begin(), children.end(),
                        [](const Child& x, const Child& y) { return x.order > y.order; });
     }
+    stats_.order_s += seconds_since(tg);
 
     // With several threads, children another thread is searching right now
     // wait for a second pass (by then usually settled in the table).
@@ -1303,6 +1486,8 @@ class Worker {
   Symbol move_skill_ = kNoSymbol;
   Symbol default_repair_ = kNoSymbol;
   bool aborted_ = false;
+  bool verify_effects_ = false;
+  bool same_effect_ = true;
   uint64_t seen_version_ = ~uint64_t{0};
   bool has_incumbent_ = false;
   Score incumbent_ = kLow;
@@ -1320,9 +1505,21 @@ struct Seed {
   bool contingent = false;
 };
 
+// `prior`: tables of an earlier search whose upper bounds hold for this one
+// (Shared::prior). `keep`: receives this search's tables.
 SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options,
-                        const Seed* seed) {
-  Shared sh(board, ctx, options);
+                        const Seed* seed, const Shared* prior = nullptr, std::unique_ptr<Shared>* keep = nullptr) {
+  auto owned = std::make_unique<Shared>(board, ctx, options);
+  Shared& sh = *owned;
+  sh.prior = prior;
+  // Hands the tables over on every return (after the workers are gone).
+  struct Keep {
+    std::unique_ptr<Shared>& owned;
+    std::unique_ptr<Shared>* keep;
+    ~Keep() {
+      if (keep) *keep = std::move(owned);
+    }
+  } keep_tables{owned, keep};
   if (seed) {
     sh.has_incumbent = true;
     sh.incumbent = seed->value;
@@ -1364,6 +1561,15 @@ SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& c
     out.stats.lookahead_evals += s.lookahead_evals;
     out.stats.lookahead_hits += s.lookahead_hits;
     out.stats.lookahead_s += s.lookahead_s;
+    out.stats.leaf_evals += s.leaf_evals;
+    out.stats.phases_stopped += s.phases_stopped;
+    out.stats.same_effect_shots += s.same_effect_shots;
+    out.stats.same_effect_mismatches += s.same_effect_mismatches;
+    out.stats.prior_hits += s.prior_hits;
+    out.stats.children += s.children;
+    out.stats.generate_s += s.generate_s;
+    out.stats.order_s += s.order_s;
+    for (size_t d = 0; d < s.depth_nodes.size(); ++d) out.stats.depth_nodes[d] += s.depth_nodes[d];
     if (w->sampled()) sh.chance_exact = false;
   }
   out.stats.time_s = seconds_since(sh.start);
@@ -1453,7 +1659,8 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
     }
   }
   base.node_limit = options.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(options.node_limit * share)) : 0;
-  const SolveResult first = search_turn(engine, board, ctx, base, nullptr);
+  std::unique_ptr<Shared> base_tables;
+  const SolveResult first = search_turn(engine, board, ctx, base, nullptr, nullptr, &base_tables);
   const double used = seconds_since(t0);
   SolveOptions rest = options;
   if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
@@ -1465,7 +1672,8 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   if (std::optional<Score> v = evaluate_plan(engine, board, ctx, first.best.actions, options)) {
     seed = Seed{*v, first.best.actions, first.best.contingent};
   }
-  SolveResult out = search_turn(engine, board, ctx, rest, seed ? &*seed : nullptr);
+  SolveResult out = search_turn(engine, board, ctx, rest, seed ? &*seed : nullptr, base_tables.get());
+  base_tables.reset();
   // Both searches' work and time.
   out.stats.nodes += first.stats.nodes;
   out.stats.sub_actions += first.stats.sub_actions;
@@ -1476,12 +1684,42 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   out.stats.duplicate_children += first.stats.duplicate_children;
   out.stats.bound_prunes += first.stats.bound_prunes;
   out.stats.chance_cutoffs += first.stats.chance_cutoffs;
+  out.stats.leaf_evals += first.stats.leaf_evals;
+  out.stats.phases_stopped += first.stats.phases_stopped;
+  out.stats.same_effect_shots += first.stats.same_effect_shots;
+  out.stats.same_effect_mismatches += first.stats.same_effect_mismatches;
+  out.stats.children += first.stats.children;
+  out.stats.generate_s += first.stats.generate_s;
+  out.stats.order_s += first.stats.order_s;
+  for (size_t d = 0; d < out.stats.depth_nodes.size(); ++d) out.stats.depth_nodes[d] += first.stats.depth_nodes[d];
   out.stats.sub_action_s += first.stats.sub_action_s;
   out.stats.enemy_phase_s += first.stats.enemy_phase_s;
   out.stats.first_plan_s = first.stats.first_plan_s;
   out.stats.best_plan_s += used;
   out.stats.time_s = seconds_since(t0);
   out.stats.base_search_s = used;
+  out.stats.base_proven_components = first.proven_components;
+  out.stats.base_best_plan_s = first.stats.best_plan_s;
+  // The base search's bound holds for this search too: with the lookahead a
+  // plan scores what it scores without it, NextTurn lowered from its cap
+  // (0), so the value is at most the base search's value, which is at most
+  // its bound. The tighter of the two bounds is sound (the base search may
+  // have proven tiers the lookahead search did not get to).
+  if (first.upper_bound && out.upper_bound && *first.upper_bound < *out.upper_bound) {
+    if (*first.upper_bound < out.best.worst_case) {
+      out.warnings.push_back("the base search's bound is below the plan: " +
+                             first.upper_bound->describe(options.tiers()));
+    } else {
+      out.upper_bound = *first.upper_bound;
+      int k = 0;
+      for (int i = 0; i < kScoreKeys && out.upper_bound->v[static_cast<size_t>(i)] == out.best.worst_case.v[static_cast<size_t>(i)];
+           ++i) {
+        if (tier_used(i, options.tiers())) ++k;
+      }
+      out.proven_components = std::max(out.proven_components, k);
+      if (*out.upper_bound == out.best.worst_case && out.chance_exact && first.chance_exact) out.proven_optimal = true;
+    }
+  }
   return out;
 }
 

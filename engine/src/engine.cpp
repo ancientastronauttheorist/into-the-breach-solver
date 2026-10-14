@@ -377,10 +377,12 @@ ResolveResult Engine::resolve(Board& board, const SkillEffect& effect, const Wea
 
 // Skill::ComputeAffectedPoints, then FireInstant and the Pawn::FireWeapon
 // bookkeeping.
+// With `preview`, it stops before anything changes: the prepared effect goes
+// to *preview (status Ok, or why it would be refused).
 static ActionResult fire_skill(Engine& engine, Engine::Impl& im, Board& board, int32_t uid,
                                int slot, const std::string& weapon, Point target,
                                std::optional<Point> target2, bool move_skill,
-                               const ActionOptions& opts) {
+                               const ActionOptions& opts, SkillEffect* preview = nullptr) {
   ActionResult out;
   out.weapon = weapon;
   LuaHost& host = *im.host;
@@ -425,10 +427,12 @@ static ActionResult fire_skill(Engine& engine, Engine::Impl& im, Board& board, i
     return out;
   }
 
+  // A known effect (ActionOptions::known_effect) for this one-click shot.
+  const SkillEffect* known = !move_skill && !target2 && !preview ? opts.known_effect : nullptr;
   LuaSkillEffect raw;
   Point final_target = target;
   bool two_click = false;
-  if (!move_skill) {
+  if (!move_skill && !known) {
     LuaCall c;
     two_click = host.is_two_click(weapon, &c) && !host.two_click_exception(board, *pawn, weapon, origin, target, &c);
     note_error(out, c);
@@ -449,24 +453,33 @@ static ActionResult fire_skill(Engine& engine, Engine::Impl& im, Board& board, i
     final_target = *target2;
     raw = host.final_effect_raw(board, *pawn, weapon, origin, first, *target2, &c);
     note_error(out, c);
-  } else {
+  } else if (!known) {
     LuaCall c;
     raw = host.skill_effect_raw(board, *pawn, weapon, origin, target, &c);
     note_error(out, c);
   }
 
   // PrepareEffect, owner, CheckAlterations on both lists.
-  SkillEffect fx = to_engine(raw);
   const std::optional<std::string> explosion = host.lua_string(weapon, "Explosion");
   const Symbol explosion_sym = explosion && !explosion->empty() ? intern(*explosion) : kNoSymbol;
-  prepare_effect(fx, origin, final_target, pawn->team, explosion_sym);
-  fx.owner = uid;
-  check_alterations(board, fx.effect, pawn, move_skill);
-  check_alterations(board, fx.q_effect, pawn, move_skill);
+  SkillEffect fx;
+  if (known) {
+    fx = *known;
+  } else {
+    fx = to_engine(raw);
+    prepare_effect(fx, origin, final_target, pawn->team, explosion_sym);
+    fx.owner = uid;
+    check_alterations(board, fx.effect, pawn, move_skill);
+    check_alterations(board, fx.q_effect, pawn, move_skill);
+  }
 
   if (fx.effect.empty() && fx.q_effect.empty()) {
     out.status = ActionStatus::NoEffect;
     out.effect = std::move(fx);
+    return out;
+  }
+  if (preview) {
+    *preview = std::move(fx);
     return out;
   }
   // A skill with a queued part telegraphs it (SetQueuedShot).
@@ -536,6 +549,25 @@ ActionResult Engine::fire_weapon(Board& board, int32_t uid, std::string_view wea
   }
   return fire_skill(*this, *impl_, board, uid, slot, std::string(weapon), target, target2, false,
                     opts);
+}
+
+std::optional<SkillEffect> Engine::pure_weapon_effect(const Board& board, int32_t uid, int slot, Point target,
+                                                     const ActionOptions& opts) {
+  const Pawn* pawn = board.find_pawn(uid);
+  if (!pawn || slot < 0 || slot >= kMaxWeapons || pawn->weapons[static_cast<size_t>(slot)] == kNoSymbol) {
+    return std::nullopt;
+  }
+  const std::string weapon(symbol_name(pawn->weapons[static_cast<size_t>(slot)]));
+  LuaHost& host = *impl_->host;
+  const uint64_t draws = host.rand_draws();
+  SkillEffect fx;
+  // fire_skill changes nothing before the preview point (the board is only
+  // read; the selected pawn is set again by every later call).
+  const ActionResult r =
+      fire_skill(*this, *impl_, const_cast<Board&>(board), uid, slot, weapon, target, std::nullopt, false, opts, &fx);
+  if (!r.ok() || !r.lua_errors.empty() || host.rand_draws() != draws) return std::nullopt;
+  if (fx.effect.empty()) return std::nullopt;
+  return fx;
 }
 
 ActionResult Engine::repair(Board& board, int32_t uid, Point target, std::string_view skill,

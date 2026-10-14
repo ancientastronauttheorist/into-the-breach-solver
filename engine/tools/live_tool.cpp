@@ -334,7 +334,9 @@ json stats_json(const SolveStats& s) {
               {"bound_prunes", s.bound_prunes},
               {"time_s", s.time_s},
               {"first_plan_s", s.first_plan_s},
-              {"best_plan_s", s.best_plan_s}};
+              {"best_plan_s", s.best_plan_s},
+              {"base_search_s", s.base_search_s},
+              {"base_proven_components", s.base_proven_components}};
 }
 
 // The lookahead's request fields: "lookahead" (bool), "lookahead_samples",
