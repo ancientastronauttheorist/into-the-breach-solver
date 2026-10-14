@@ -349,7 +349,12 @@ Done so far (build order from the decompile):
      leaves its tile. All webs go when the enemy phase starts
      (`BoardSpace::NextTurn(6)` @0091b950).
 - **Stage 5: movement** (`movement.hpp`).
-   - Pathing profiles, move budget and pilot move skills.
+   - Pathing profiles, move budget and pilot move skills. A recorded speed
+     keeps what `base_move` does not compute live as a standing bonus; the
+     loader puts each pilot's ability (`GameData::pilot_ability`, its Lua
+     Skill) on the pawn first, so Youth_Move (+3 on turn 1) and
+     Arrogant_Boost are not counted twice (live 2026-10-13: a 10-tile move
+     planned with an 8-tile budget).
    - The game's reachability search and its weighted A* walk path (float32,
      (f, x, y) tie-break).
    - Walks, leaps, charges, teleports and burrows. With a stage 2 context,

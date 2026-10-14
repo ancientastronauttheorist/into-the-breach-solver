@@ -106,12 +106,23 @@ class GameData {
   // laser_length, ...), or `fallback`.
   float value(std::string_view name, float fallback) const;
 
+  // A pilot's Lua Skill (pilots.lua CreatePilot: the table _G[id], e.g.
+  // "Pilot_Youth" -> "Youth_Move"); empty if unknown or none.
+  std::string_view pilot_skill(std::string_view pilot_id) const;
+  // The rule-changing ability (board.hpp PilotAbility) of that Skill.
+  uint32_t pilot_ability(std::string_view pilot_id) const;
+
  private:
   std::vector<PawnDef> pawns_;
   std::unordered_map<Symbol, size_t> by_symbol_;
   std::vector<AnimDef> anims_;
   std::unordered_map<Symbol, size_t> anim_by_symbol_;
   std::unordered_map<std::string, float> values_;
+  std::unordered_map<std::string, std::string> pilot_skills_;
 };
+
+// The PilotAbility bit for a pilot's Lua Skill name ("Rock_Skill" ->
+// kPilotRockSkill); kPilotNone for skills without a modelled rule.
+uint32_t pilot_skill_ability(std::string_view skill);
 
 }  // namespace itb

@@ -4,8 +4,12 @@
 #include <doctest/doctest.h>
 
 #include <filesystem>
+#include <fstream>
+#include <string>
 
 #include "itb/game_data.hpp"
+#include "itb/movement.hpp"
+#include "itb/recording.hpp"
 
 using namespace itb;
 
@@ -159,4 +163,65 @@ TEST_CASE("animation definitions and tuning values") {
   CHECK(data->value("gravity", 0) == doctest::Approx(3.0f));
   CHECK(data->value("laser_length", 0) == doctest::Approx(0.5f));
   CHECK(data->value("no_such_value", -1) == -1);
+}
+
+TEST_CASE("pilot skills come from the pilot tables") {
+  const GameData* data = game_data();
+  if (!data) return;
+  CHECK(data->pilot_skill("Pilot_Youth") == "Youth_Move");
+  CHECK(data->pilot_ability("Pilot_Youth") == kPilotYouthMove);
+  CHECK(data->pilot_ability("Pilot_Arrogant") == kPilotArrogantBoost);  // AE pilot
+  CHECK(data->pilot_ability("Pilot_Rock") == kPilotRockSkill);
+  CHECK(data->pilot_ability("Pilot_Original") == kPilotExtraXp);
+  CHECK(data->pilot_skill("Pilot_Rust").empty());  // a recruit
+  CHECK(data->pilot_ability("Pilot_Rust") == kPilotNone);
+  CHECK(data->pilot_ability("no_such_pilot") == kPilotNone);
+  CHECK(pilot_skill_ability("Thick") == kPilotThick);
+}
+
+TEST_CASE("a recorded Youth_Move speed is not counted twice") {
+  // Live 2026-10-13 m30 turn 1 (Mission_Belt): Lily Reed's FourwayMech
+  // (MoveSpeed 4) reported move 8 = 4 + 1 standing + 3 Youth_Move. The loader
+  // took out the live terms before the pilot's ability was known, so the
+  // callers' pilot_ability made it 11 and the solver planned a 10-tile move
+  // the game refused.
+  const GameData* data = game_data();
+  if (!data) return;
+  auto load = [&](int turn, int move) {
+    const auto path = std::filesystem::temp_directory_path() / "itb_recording_youth.json";
+    {
+      std::ofstream out(path);
+      out << R"({"turn": )" << turn << R"(, "total_turns": 4, "tiles": [], "units": [
+          {"uid": 2, "type": "FourwayMech", "x": 0, "y": 0, "hp": 4, "max_hp": 4, "team": 1, "mech": true,
+           "move": )" << move << R"(, "base_move": )" << move << R"(, "pilot_id": "Pilot_Youth",
+           "pilot": {"id": "Pilot_Youth", "level": 1, "xp": 21, "skill1": 11, "skill2": 13}}]})";
+    }
+    std::string error;
+    auto rec = load_recording(path, data, &error);
+    std::filesystem::remove(path);
+    REQUIRE_MESSAGE(rec.has_value(), error);
+    return *rec;
+  };
+  {
+    Recording rec = load(1, 8);
+    Pawn& p = *rec.board.find_pawn(2);
+    CHECK(p.has_pilot(kPilotYouthMove));
+    CHECK(p.movement.pilot_bonus == 1);
+    CHECK(base_move(rec.board, p) == 8);
+    // What every caller does next (solve, live, replay): no change.
+    p.pilot_abilities |= data->pilot_ability(rec.pilots.at(0).second);
+    CHECK(base_move(rec.board, p) == 8);
+    const TileMask area = move_area(rec.board, p);
+    CHECK(mask_has(area, Point{4, 4}));        // 8 steps
+    CHECK_FALSE(mask_has(area, Point{4, 5}));  // 9 steps
+    // The next turn start drops Youth_Move.
+    start_turn_movement(rec.board, 2);
+    CHECK(base_move(rec.board, *rec.board.find_pawn(2)) == 5);
+  }
+  {
+    Recording rec = load(2, 5);
+    const Pawn& p = *rec.board.find_pawn(2);
+    CHECK(p.movement.pilot_bonus == 1);
+    CHECK(base_move(rec.board, p) == 5);
+  }
 }

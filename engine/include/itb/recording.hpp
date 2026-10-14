@@ -34,7 +34,8 @@ struct Recording {
   Board board;
   std::vector<int32_t> attack_order;  // Vek uids in the order the game reported
   // Pilot table name per unit uid (e.g. "Pilot_Rock"); the pilot's Lua Skill
-  // gives its ability (Engine::pilot_ability).
+  // gives its ability (Engine::pilot_ability), which load_recording already
+  // puts on the board's pawns when it has the GameData.
   std::vector<std::pair<int32_t, std::string>> pilots;
   int difficulty = -1;  // the bridge's GetDifficulty(), -1 if not recorded
   // The mission and environment data stage 7 needs (TurnContext::mission).

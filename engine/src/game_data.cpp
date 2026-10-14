@@ -270,6 +270,35 @@ GameData GameData::load(const std::filesystem::path& game_root, ScriptLoadReport
     lua_pop(L, 1);
   }
 
+  // Pilots: every global table whose metatable chain reaches the Pilot class
+  // (CreatePilot: _G[Id] = Pilot:new(data)), with its Skill.
+  lua_getglobal(L, "Pilot");
+  if (lua_istable(L, -1)) {
+    const int pilot_base = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, LUA_GLOBALSINDEX) != 0) {
+      if (lua_type(L, -2) == LUA_TSTRING && lua_istable(L, -1) && !lua_rawequal(L, -1, pilot_base)) {
+        bool is_pilot = false;
+        lua_pushvalue(L, -1);
+        for (int depth = 0; depth < 32 && lua_getmetatable(L, -1); ++depth) {
+          lua_remove(L, -2);
+          if (lua_rawequal(L, -1, pilot_base)) {
+            is_pilot = true;
+            break;
+          }
+        }
+        lua_pop(L, 1);
+        if (is_pilot) {
+          lua_getfield(L, -1, "Skill");
+          if (lua_type(L, -1) == LUA_TSTRING) data.pilot_skills_[lua_tostring(L, -3)] = lua_tostring(L, -1);
+          lua_pop(L, 1);
+        }
+      }
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);
+
   // Animations: every table in ANIMS (sorted by name for a stable order).
   std::vector<std::string> anim_names;
   lua_getglobal(L, "ANIMS");
@@ -339,6 +368,33 @@ const AnimDef* GameData::animation(Symbol symbol) const {
 float GameData::value(std::string_view name, float fallback) const {
   auto it = values_.find(std::string(name));
   return it == values_.end() ? fallback : it->second;
+}
+
+std::string_view GameData::pilot_skill(std::string_view pilot_id) const {
+  auto it = pilot_skills_.find(std::string(pilot_id));
+  return it == pilot_skills_.end() ? std::string_view{} : std::string_view(it->second);
+}
+
+uint32_t GameData::pilot_ability(std::string_view pilot_id) const {
+  return pilot_skill_ability(pilot_skill(pilot_id));
+}
+
+uint32_t pilot_skill_ability(std::string_view skill) {
+  static const std::pair<const char*, PilotAbility> kNames[] = {
+      {"Armored", kPilotArmored},          {"Thick", kPilotThick},
+      {"Rock_Skill", kPilotRockSkill},     {"Retaliation", kPilotRetaliation},
+      {"Flying", kPilotFlying},            {"Disable_Immunity", kPilotDisableImmunity},
+      {"Freeze_Walk", kPilotFreezeWalk},   {"Pain_Immunity", kPilotPainImmunity},
+      {"Road_Runner", kPilotRoadRunner},   {"Shifty", kPilotShifty},
+      {"Post_Move", kPilotPostMove},       {"Double_Shot", kPilotDoubleShot},
+      {"Youth_Move", kPilotYouthMove},     {"Arrogant_Boost", kPilotArrogantBoost},
+      {"Regen", kPilotRegen},              {"Zoltan_Skill", kPilotZoltan},
+      {"Extra_XP", kPilotExtraXp},         {"KO_Boost", kPilotKoBoost},
+  };
+  for (const auto& [name, bit] : kNames) {
+    if (skill == name) return bit;
+  }
+  return kPilotNone;
 }
 
 Pawn GameData::make_pawn(const PawnDef& def, int32_t uid, Point pos) const {

@@ -773,7 +773,7 @@ std::optional<Recording> load_recording(const std::filesystem::path& path,
       extra_entries.emplace_back(get_or<int>(u, "uid", -1), Point{get_or<int>(u, "x", -1), get_or<int>(u, "y", -1)});
       continue;
     }
-    const Pawn& p = b.add_pawn(load_unit(u, data, rec.warnings));
+    Pawn& p = b.add_pawn(load_unit(u, data, rec.warnings));
     if (p.webbed) web_reported.emplace_back(p.uid, get_or<int>(u, "web_source_uid", -1));
     std::string pilot = get_or<std::string>(u, "pilot_id", "");
     if (auto it = u.find("pilot"); it != u.end() && it->is_object()) {
@@ -787,7 +787,13 @@ std::optional<Recording> load_recording(const std::filesystem::path& path,
       if (pilot.empty()) pilot = info.id;
       rec.pilot_info.push_back(std::move(info));
     }
-    if (!pilot.empty()) rec.pilots.emplace_back(p.uid, pilot);
+    if (!pilot.empty()) {
+      rec.pilots.emplace_back(p.uid, pilot);
+      // The pilot's own ability (its Lua Skill) now, before the standing move
+      // bonus below takes out what base_move computes live: Youth_Move and
+      // Arrogant_Boost are part of that, and the recorded speed includes them.
+      if (data) p.pilot_abilities |= data->pilot_ability(pilot);
+    }
     if (auto it = u.find("mutation"); it != u.end() && it->is_number_integer()) {
       mutations.emplace_back(p.uid, it->get<int>());
     }

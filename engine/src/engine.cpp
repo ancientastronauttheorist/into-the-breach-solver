@@ -301,23 +301,8 @@ void Engine::apply_writes(Resolver& r, RulesContext& rules, const std::vector<Lu
 }
 
 uint32_t Engine::pilot_ability(std::string_view pilot_id) {
-  static const std::pair<const char*, PilotAbility> kNames[] = {
-      {"Armored", kPilotArmored},          {"Thick", kPilotThick},
-      {"Rock_Skill", kPilotRockSkill},     {"Retaliation", kPilotRetaliation},
-      {"Flying", kPilotFlying},            {"Disable_Immunity", kPilotDisableImmunity},
-      {"Freeze_Walk", kPilotFreezeWalk},   {"Pain_Immunity", kPilotPainImmunity},
-      {"Road_Runner", kPilotRoadRunner},   {"Shifty", kPilotShifty},
-      {"Post_Move", kPilotPostMove},       {"Double_Shot", kPilotDoubleShot},
-      {"Youth_Move", kPilotYouthMove},     {"Arrogant_Boost", kPilotArrogantBoost},
-      {"Regen", kPilotRegen},              {"Zoltan_Skill", kPilotZoltan},
-      {"Extra_XP", kPilotExtraXp},         {"KO_Boost", kPilotKoBoost},
-  };
   const std::optional<std::string> skill = impl_->host->lua_string(pilot_id, "Skill");
-  if (!skill) return kPilotNone;
-  for (const auto& [name, bit] : kNames) {
-    if (*skill == name) return bit;
-  }
-  return kPilotNone;
+  return skill ? pilot_skill_ability(*skill) : kPilotNone;
 }
 
 std::string Engine::repair_skill(std::string_view pilot_id) {
