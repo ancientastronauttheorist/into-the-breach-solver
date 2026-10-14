@@ -242,6 +242,11 @@ class Resolver {
   // Board:DamageSpace(SD): applied at once, as if it were an entry of the
   // effect being applied (pushes start from it, deaths are noted).
   void damage_space(const SpaceDamage& sd);
+  // Board:Bounce(p, amount) (the script of SkillEffect:AddBounce): the tile
+  // bounces for 0.5 s, and a bouncing tile is busy (code 2), so FULL_DELAY
+  // chunks, death effects and the quiescent-frame work (kill credit, corpse
+  // detonation, the end of the last shot) wait for it.
+  void bounce(Point p, int amount);
   // Records a chance node of a hook into the result of the call in progress.
   void add_chance(const ChanceRecord& chance);
 

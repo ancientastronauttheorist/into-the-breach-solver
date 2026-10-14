@@ -425,6 +425,16 @@ Done so far (build order from the decompile):
      its tile 42 updates later. The game bumped the mech (the vat's progress
      was back at 0.37), where a Digger2 in the same spot 42 updates after
      its death (8 frames) is passed through.
+   - `Board:Bounce` (the script `SkillEffect:AddBounce` adds) is not only
+     cosmetic: the tile's `BounceAnim` runs 0.5 s and `BoardSpace::IsBusy`
+     counts it (busy code 2), so FULL_DELAY chunks, death effects and the
+     quiescent-frame work (kill credit, corpse detonation, the end of the
+     last shot) wait for it (`Resolver::bounce`). A bounce of at most 9 is
+     skipped on a tile whose first pawn spans two tiles. Live 2026-10-14
+     run 23 (m00 Mission_Dam, turn 3): a Vice Fist throw killed a Mosquito
+     with an unanimated damage entry; without the bounce the last shot ended
+     before the death was processed, the kill went to nobody and Viscera
+     Nanobots did not heal the Judo, as the game did.
    - Boost and Vek Hormones are baked in when an effect is computed.
    - Outcomes that hinge on two events within one frame are reported as
      timing-sensitive; Grid Defense rolls and spider-egg picks are logged as

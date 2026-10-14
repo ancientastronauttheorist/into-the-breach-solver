@@ -102,6 +102,7 @@ const FrameClock& Resolver::clock() const { return sim_->clock(); }
 void Resolver::add_effect(SkillEffect effect) { sim_->add_effect(std::move(effect)); }
 void Resolver::add_delay(float seconds) { sim_->add_delay(seconds); }
 void Resolver::damage_space(const SpaceDamage& sd) { sim_->damage_space(sd); }
+void Resolver::bounce(Point p, int amount) { sim_->bounce(p, amount); }
 void Resolver::add_chance(const ChanceRecord& chance) { sim_->add_chance(chance); }
 ResolveResult Resolver::apply(const std::function<void()>& edit) { return sim_->apply(edit); }
 void Resolver::update_leaders() { sim_->leaders_now(); }
@@ -247,6 +248,31 @@ void Simulation::add_delay(float seconds) {
 }
 
 void Simulation::damage_space(const SpaceDamage& sd) { apply_hit(sd, new_cause()); }
+
+// Board::Bounce @0093ef10 -> BoardSpace::Bounce @00905f70 -> BounceAnim::Start:
+// the tile's bounce tracker runs for 0.5 s (eased in and out for amounts 0
+// and 100), updated in the tile's P2 pass, and BoardSpace::IsBusy is true
+// while it runs (busy code 2). A small bounce (|amount| <= 9) is skipped on a
+// tile whose first listed pawn, living or a corpse being present, spans
+// several tiles. An off-board point bounces the dummy tile: nothing waits.
+void Simulation::bounce(Point p, int amount) {
+  if (!p.valid()) return;
+  if (amount >= -9 && amount <= 9) {
+    const Pawn* first = nullptr;
+    bool present = false;
+    for (const Pawn& pawn : board_.pawns()) {
+      if (!pawn.occupies(p)) continue;
+      if (pawn.alive() || is_corpse(board_, pawn)) present = true;
+      if (!first || pawn.arrival < first->arrival) first = &pawn;
+    }
+    if (present && first && first->extra_tile().valid()) return;
+  }
+  const int n = amount == 0 || amount == 100
+                    ? clock_.eased_tracker_updates(dur_.bounce, dur_.bounce_ease, dur_.bounce_ease)
+                    : clock_.tracker_updates(dur_.bounce);
+  tile_anims_.push_back(TileAnim{p, first_update(Phase::P2) + n - 1});
+  changed_ = true;
+}
 
 void Simulation::add_chance(const ChanceRecord& chance) {
   if (result_) result_->chances.push_back(chance);

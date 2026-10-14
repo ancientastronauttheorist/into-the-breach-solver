@@ -5,8 +5,10 @@
 // instance state the Lua keeps (Locations, Index, WindDir, Belts, ...) from
 // what the bridge recorded. The effects are built with the same entries and
 // delays the Lua builds; purely cosmetic entries (sounds, voices, weather and
-// shake scripts, bounces, emitters) are left out because they change nothing
-// on the board and take no time.
+// shake scripts, emitters) are left out because they change nothing on the
+// board and take no time. Bounces are left out too, although a bouncing tile
+// is busy for 0.5 s (Resolver::bounce): here that only stretches the busy
+// time after the last row of a flood or strike.
 
 #include <algorithm>
 #include <map>

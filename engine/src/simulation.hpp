@@ -215,6 +215,7 @@ class Simulation final : public FrameHooks {
   void add_effect(SkillEffect effect);
   void add_delay(float seconds);
   void damage_space(const SpaceDamage& sd);
+  void bounce(Point p, int amount);
   void add_chance(const ChanceRecord& chance);
   ResolveResult apply(const std::function<void()>& edit);
   void leaders_now() { update_leaders(); }
