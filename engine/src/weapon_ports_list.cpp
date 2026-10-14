@@ -1249,6 +1249,52 @@ bool blob_effect(PortContext&, const Fields& f, Point p1, Point, SE& ret) {
   return true;
 }
 
+// ---- batch 5: deployable units (weapons_base.lua Deployable, weapons_deploy.lua) ----
+
+// Deployable:GetSkillEffect(p1, p2): one artillery shot that creates
+// self.Deployed on p2 (the support tanks). Fields: Deployed, Projectile.
+bool deployable_effect(PortContext&, const Fields& f, Point, Point p2, SE& ret) {
+  SD damage = n::space_damage(p2, 0);
+  damage.sPawn = f[0].s;
+  n::add_artillery(ret, kInvalidPoint, damage, f[1].s, kProjDelay);
+  return true;
+}
+
+// Deploy_AcidTankShot:GetSkillEffect(p1, p2): ACID on GetProjectileEnd
+// (pushed when self.Push == 1). Fields: Damage, Push, Acid, ProjectileArt.
+bool acid_tank_effect(PortContext& c, const Fields& f, Point p1, Point p2, SE& ret) {
+  const int direction = n::direction(p2 - p1);
+  Point target;
+  if (!projectile_end(c.board, p1, p2, kPathProjectile, target)) return false;
+  SD damage = n::space_damage(target, f[0].as_int());
+  if (f[1].equals(1)) damage = n::space_damage(target, f[0].as_int(), direction);
+  damage.iAcid = f[2].as_int();
+  damage.sAnimation = "ExploAcid1";
+  n::add_projectile(ret, kInvalidPoint, damage, f[3].s, kNoDelay);
+  return true;
+}
+
+// Deploy_ShieldTankShot:GetSkillEffect(p1, p2): a melee shield on p2. The
+// Lua assigns the global `damage` (no `local`); the port does the same.
+bool shield_tank_effect(PortContext& c, const Fields&, Point p1, Point p2, SE& ret) {
+  SD damage = n::space_damage(p2, 0);
+  damage.iShield = 1;
+  n::add_melee(ret, false, p1, damage, kFullDelay);
+  n::set_global_space_damage(c.L, "damage", damage);
+  return true;
+}
+
+// Deploy_ShieldTankShot2:GetSkillEffect(p1, p2): a projectile that shields
+// GetProjectileEnd. Fields: Damage, Shield, ProjectileArt.
+bool shield_tank2_effect(PortContext& c, const Fields& f, Point p1, Point p2, SE& ret) {
+  Point target;
+  if (!projectile_end(c.board, p1, p2, kPathProjectile, target)) return false;
+  SD damage = n::space_damage(target, f[0].as_int());
+  damage.iShield = f[1].as_int();
+  n::add_projectile(ret, kInvalidPoint, damage, f[2].s, kNoDelay);
+  return true;
+}
+
 using K = FieldKind;
 
 constexpr DepSpec kProjectileEnd{DepSpec::Global, "GetProjectileEnd", "weapons_base.lua", 54, 0x36caaebbd1f32521};
@@ -1409,6 +1455,16 @@ const std::vector<PortSpec>& port_specs() {
        truck_effect},
       {"GetSkillEffect", "missions/grass/mission_artillery.lua", 99, 0x21e7365d30096c24,
        {{"Damage", K::Num}, {"UpShot", K::Str}}, {}, false, nullptr, archive_art_effect},
+      // deployable units
+      {"GetSkillEffect", "weapons_base.lua", 355, 0x750d6de920c63d87, {{"Deployed", K::Str}, {"Projectile", K::Str}}, {},
+       false, nullptr, deployable_effect},
+      {"GetSkillEffect", "weapons_deploy.lua", 265, 0x5ed5c3ec059c13ee,
+       {{"Damage", K::Num}, {"Push", K::Any}, {"Acid", K::Num}, {"ProjectileArt", K::Str}}, {kProjectileEnd}, false,
+       nullptr, acid_tank_effect},
+      {"GetSkillEffect", "weapons_deploy.lua", 129, 0x02aff87cdaaed9a4, {}, {}, false, nullptr, shield_tank_effect},
+      {"GetSkillEffect", "weapons_deploy.lua", 159, 0x9ee4611ca3cc1335,
+       {{"Damage", K::Num}, {"Shield", K::Num}, {"ProjectileArt", K::Str}}, {kProjectileEnd}, false, nullptr,
+       shield_tank2_effect},
   };
   return specs;
 }

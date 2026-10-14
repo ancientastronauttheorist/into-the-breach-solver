@@ -710,7 +710,13 @@ int objective_progress_cap(const Board& before, const TurnContext* ctx) {
 
 int PositionTerms::total() const {
   return -(3 * mech_fire + 2 * mech_acid + 2 * mech_frozen + mech_smoke + 2 * mech_fragile) -
-         (building_threat + unit_threat) + enemy_fire + enemy_frozen;
+         (building_threat + unit_threat) + enemy_fire + enemy_frozen + 2 * deployed + deployed_hp;
+}
+
+bool is_deployed_unit(const Pawn& p) {
+  if (p.team != Team::Player || p.mech || p.neutral) return false;
+  const std::string_view t = type_name(p);
+  return t.starts_with("Deploy_") || t.starts_with("DeployUnit_Aracnoid");
 }
 
 PositionTerms position_terms(const Board& b) {
@@ -725,6 +731,11 @@ PositionTerms position_terms(const Board& b) {
       t.mech_frozen += p.frozen ? 1 : 0;
       t.mech_smoke += b.tile(p.pos).smoke && !p.ignore_smoke ? 1 : 0;
       t.mech_fragile += p.hp == 1 ? 1 : 0;
+      continue;
+    }
+    if (p.team == Team::Player && is_deployed_unit(p)) {
+      ++t.deployed;
+      t.deployed_hp += p.hp;
       continue;
     }
     if (p.team != Team::Enemy || p.neutral) continue;

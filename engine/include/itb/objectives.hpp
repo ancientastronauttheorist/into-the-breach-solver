@@ -120,14 +120,26 @@ const Pawn* same_pawn(const Pawn& p, const Board& after, const PhaseResult* phas
 //      -1 per enemy next to a player-team non-mech unit: what the next
 //      enemy turn can reach without moving
 //   +1 per enemy on fire (not immune) or frozen: damage or a lost attack
+//   +2 per living deployed unit, +1 per HP it has (is_deployed_unit): a
+//      tank kept for the coming turns; without it a dead tank would score
+//      better than a living one next to a Vek (the -1 above)
 // Enemies are team-6 pawns that are not neutral (as in tier 4).
 struct PositionTerms {
   int mech_fire = 0, mech_acid = 0, mech_frozen = 0, mech_smoke = 0, mech_fragile = 0;
   int building_threat = 0, unit_threat = 0;
   int enemy_fire = 0, enemy_frozen = 0;
+  int deployed = 0, deployed_hp = 0;
   int total() const;
 };
 
 PositionTerms position_terms(const Board& after);
+
+// A player unit a weapon deployed that stays for the battle: the support
+// tanks (weapons_deploy.lua, Deploy_Tank / _AcidTank / _ShieldTank /
+// _PullTank / _IceTank and their upgraded types) and the Arachnoid's spider
+// (DeployUnit_Aracnoid). Not the Bombling's bomb (a TempUnit, gone before
+// the next turn) and never a mech. Its death is no mech loss and costs no
+// star; only the position tier counts it.
+bool is_deployed_unit(const Pawn& p);
 
 }  // namespace itb

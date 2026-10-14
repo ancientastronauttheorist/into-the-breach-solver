@@ -109,6 +109,7 @@ add_executable(itb_tests
   tests/test_live.cpp
   tests/test_weapon_ports.cpp
   tests/test_pilot_xp.cpp
+  tests/test_deployables.cpp
 )
 target_link_libraries(itb_tests PRIVATE itb_live_lib itb_engine itb_lua doctest::doctest)
 target_compile_definitions(itb_tests PRIVATE

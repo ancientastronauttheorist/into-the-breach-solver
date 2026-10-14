@@ -89,12 +89,27 @@ def unit(state, uid):
     return next(u for u in state["units"] if u["uid"] == uid)
 
 
-def apply(state: dict, step: dict, damage: int = 1) -> None:
-    """The fake game's rules (and the fake engine's, with damage=1)."""
+# A deploy weapon's tank (weapons_deploy.lua): a player unit, not a mech,
+# active at once, its weapon from the type's SkillList (the bridge has no
+# save record of it until the next turn: no weapons_exact / weapon_slots).
+def deployed_tank(uid: int, x: int, y: int) -> dict:
+    return {"uid": uid, "type": "Deploy_Tank", "x": x, "y": y, "hp": 1, "max_hp": 1, "team": 1, "mech": False,
+            "active": True, "moved": False, "weapons": ["Deploy_TankShot"]}
+
+
+def apply(state: dict, step: dict, damage: int = 1, spawn_uid: int | None = None) -> None:
+    """The fake game's rules (and the fake engine's, with damage=1). A
+    DeploySkill_* drops a Deploy_Tank on its target, numbered `spawn_uid`
+    (default: one more than the largest uid, as the engine numbers it)."""
     u = unit(state, step["uid"])
     if step["sub"] == "move":
         u["x"], u["y"] = step["to"]
         u["moved"] = True
+    elif step["sub"] == "weapon" and str(step.get("weapon", "")).startswith("DeploySkill_"):
+        if spawn_uid is None:
+            spawn_uid = max(v["uid"] for v in state["units"]) + 1
+        state["units"].append(deployed_tank(spawn_uid, *step["target"]))
+        u["active"] = False
     elif step["sub"] == "weapon":
         tx, ty = step["target"]
         for v in state["units"]:
@@ -173,7 +188,10 @@ class FakeEngine:
         self.tiers.append(tiers)
         active = {u["uid"] for u in st["units"] if u.get("team") == 1 and u.get("active")}
         moved = {u["uid"] for u in st["units"] if u.get("moved")}
-        steps = [s for s in self.plan if s["uid"] in active and not (s["sub"] == "move" and s["uid"] in moved)]
+        # Steps of units the plan creates (not on the board yet) stay.
+        present = {u["uid"] for u in st["units"]}
+        steps = [s for s in self.plan if (s["uid"] in active or s["uid"] not in present)
+                 and not (s["sub"] == "move" and s["uid"] in moved)]
         out = self._simulate(st, steps)
         out.update(searched=True, proven_optimal=True, worst_case={"grid": 0}, stats={"time_s": 0.1})
         return out
@@ -221,6 +239,9 @@ class FakeBridge:
         self.export_moved = True
         self.next_turn = None  # function(state) -> next player-turn state
         self.silent = False  # the game left the mission: no more heartbeats
+        # The game's own uid counter for units created mid-turn (it also
+        # counts spawns the engine never sees, so it runs ahead).
+        self.next_spawn_uid = 7510
         self.stop = threading.Event()
         self.write_state()
         self.thread = threading.Thread(target=self.loop, daemon=True)
@@ -276,7 +297,12 @@ class FakeBridge:
             return f"OK {name} {uid} to {x},{y} [FireWeapon[0]] at {x},{y}"
         if name == "ATTACK":
             uid, slot, x, y = (int(v) for v in args)
-            apply(self.state, {"sub": "weapon", "uid": uid, "target": [x, y]}, self.damage)
+            u = unit(self.state, uid)
+            listed = u.get("weapons_exact") or u.get("weapons") or []
+            weapon = listed[slot] if slot < len(listed) else ""
+            self.next_spawn_uid += 1
+            apply(self.state, {"sub": "weapon", "uid": uid, "weapon": weapon, "target": [x, y]}, self.damage,
+                  spawn_uid=self.next_spawn_uid)
             return f"OK ATTACK {uid} slot={slot} at {x},{y} [FireWeapon]"
         if name == "REPAIR":
             apply(self.state, {"sub": "repair", "uid": int(args[0])})
@@ -543,6 +569,49 @@ class LivePlayTest(unittest.TestCase):
         run = self.tmp / "live" / "old"
         run.mkdir(parents=True)
         self.assertEqual(lp.main(["restore", "--run", str(run), "--mission", "0", "--turn", "1"]), 2)
+
+    def test_a_deployed_tank_is_commanded_by_its_live_uid(self):
+        # A DeploySkill_Tank drop: the engine numbers the new tank 101, the
+        # game 7511. Once the drop step matches (by type, tile and HP), the
+        # tank's move and shot go out under the game's uid; its weapon slot
+        # comes from the type's SkillList (no save record mid-turn).
+        st = base_state()
+        mech = unit(st, 1)
+        mech["weapons_exact"] = ["Brute_Tankmech", "DeploySkill_Tank"]
+        mech["weapon_slots"] = [{"slot": 0, "id": "Brute_Tankmech"},
+                                {"slot": 1, "id": "DeploySkill_Tank", "limited": 1, "uses": 1, "uses_saved": 1}]
+        self.bridge(st)
+        plan = [
+            {"sub": "weapon", "uid": 1, "weapon": "DeploySkill_Tank", "target": [6, 3], "target2": None, "action": 0},
+            {"sub": "move", "uid": 101, "to": [4, 3], "action": 1},
+            {"sub": "weapon", "uid": 101, "weapon": "Deploy_TankShot", "target": [3, 3], "target2": None,
+             "action": 1},
+        ]
+        eng = FakeEngine(plan=plan)
+        self.assertEqual(self.run_cmd(["turn"], eng), 0)
+        self.assertEqual(self.acting(), ["ATTACK 1 1 6 3", "MOVE_NATIVE 7511 4 3", "ATTACK 7511 0 3 3"])
+        self.assertEqual(len(eng.solves), 1)  # every step matched: no re-solve
+        tank = unit(self.fb.state, 7511)
+        self.assertEqual((tank["x"], tank["y"], tank["active"]), (4, 3, False))
+        self.assertEqual(unit(self.fb.state, 100)["hp"], 2)
+        # The turn's action history (UI limits, pilot bonuses) is kept under
+        # the live uid.
+        manifest = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertIn('"7511": "MA"', json.dumps(manifest.get("unit_actions")))
+
+    def test_a_deployed_tank_is_a_known_unit_next_turn(self):
+        # The next turn the tank is on the board under the game's uid like
+        # any unit: solved, commanded and compared by uid.
+        st = base_state()
+        st["units"].append(dict(deployed_tank(7511, 4, 3), weapons_exact=["Deploy_TankShot"],
+                                weapon_slots=[{"slot": 0, "id": "Deploy_TankShot", "limited": 0}]))
+        self.bridge(st)
+        plan = PLAN + [{"sub": "weapon", "uid": 7511, "weapon": "Deploy_TankShot", "target": [3, 3],
+                        "target2": None, "action": 2}]
+        eng = FakeEngine(plan=plan)
+        self.assertEqual(self.run_cmd(["turn"], eng), 0)
+        self.assertEqual(self.acting()[-1], "ATTACK 7511 0 3 3")
+        self.assertEqual(len(eng.solves), 1)
 
     def test_a_mismatch_re_solves_from_the_live_board(self):
         self.bridge()
