@@ -446,6 +446,14 @@ struct Child {
   Score order;                    // best case of ending the turn right after
 };
 
+// An end-of-turn value. `stopped`: the enemy phase was ended early by the
+// bound (TurnContext::stop_early), so `v` is [-inf, the bound there]: sound,
+// but a poor key for ordering children or ranking the beam.
+struct LeafMemo {
+  Interval v;
+  bool stopped = false;
+};
+
 struct TTEntry {
   Interval v;
   SubAction best;
@@ -456,6 +464,11 @@ struct TTEntry {
 Interval intersect(const Interval& a, const Interval& b) {
   const Interval r{std::max(a.lo, b.lo), std::min(a.hi, b.hi)};
   return r.lo <= r.hi ? r : b;  // only a truncated chance tree can disagree
+}
+LeafMemo merge_leaf(const LeafMemo& old, const LeafMemo& next) {
+  // A real cut value is never above a stopped one of the same board (the
+  // default outcome runs first), so the merge is stopped only if both are.
+  return LeafMemo{intersect(old.v, next.v), old.stopped && next.stopped};
 }
 TTEntry merge_entries(const TTEntry& old, const TTEntry& next) {
   TTEntry out = next.v.lo >= old.v.lo ? next : old;
@@ -563,7 +576,7 @@ struct Shared {
   TierBounds bounds;
   TurnContext base;
   SharedMap<TTEntry> tt;
-  SharedMap<Interval> leaf;
+  SharedMap<LeafMemo> leaf;
   SharedMap<int> busy;
   // SolveOptions::lookahead: NextTurn values by the hash of the end board
   // (after the enemy phase), shared by the threads.
@@ -779,25 +792,29 @@ class Worker {
   // the minimum, and not at all when the bound is already <= alpha or the
   // caller only wants bounds (`lazy`: child ordering, the beam's ranking),
   // in which case the interval is [NextTurn at its floor, at its cap].
-  Interval leaf(const Board& b, const Score& alpha, bool lazy = false) {
+  // `may_stop`: the enemy phase may end early once the outcome is cut (its
+  // value is then only the bound; ranking callers want the real one).
+  Interval leaf(const Board& b, const Score& alpha, bool lazy = false, bool may_stop = true) {
     const bool la = o_.lookahead;
     lazy = lazy && la;
     BoardHash key{};
     if (o_.use_tt) {
       key = hash_board(b, HashMode::EndTurn);
-      Interval memo;
-      if (sh_.leaf.get(key, memo) && (memo.exact() || memo.hi <= alpha || lazy)) {
+      LeafMemo memo;
+      if (sh_.leaf.get(key, memo) && (may_stop || !memo.stopped) &&
+          (memo.v.exact() || memo.v.hi <= alpha || lazy)) {
         ++stats_.leaf_hits;
-        return memo;
+        return memo.v;
       }
     }
-    if (o_.use_tt && sh_.prior) {
-      Interval memo;
-      if (const_cast<Shared*>(sh_.prior)->leaf.get(key, memo) && memo.hi <= alpha) {
+    if (o_.use_tt && sh_.prior && may_stop) {
+      LeafMemo memo;
+      if (const_cast<Shared*>(sh_.prior)->leaf.get(key, memo) && memo.v.hi <= alpha) {
         ++stats_.prior_hits;
-        return Interval{kLow, memo.hi};
+        return Interval{kLow, memo.v.hi};
       }
     }
+    bool stopped_early = false;
     ++stats_.leaf_evals;
     struct Pending {
       Score s;  // NextTurn at its cap
@@ -814,7 +831,7 @@ class Worker {
       // Stop the phase once the board's tier bound is <= alpha: grid power
       // and building HP never rise (TierBounds), so the rest of the phase
       // cannot lift this outcome above it.
-      if (o_.use_bounds) tc_.stop_early = [&](const Board& mid) { return sh_.bounds.of(mid) <= alpha; };
+      if (o_.use_bounds && may_stop) tc_.stop_early = [&](const Board& mid) { return sh_.bounds.of(mid) <= alpha; };
       const PhaseResult pr = e_.end_turn(after, tc_);
       tc_.stop_early = nullptr;
       stats_.enemy_phase_s += seconds_since(t0);
@@ -822,6 +839,7 @@ class Worker {
       driver_.mark_random(pr.chances);
       if (pr.stopped) {
         ++stats_.phases_stopped;
+        stopped_early = true;
         worst = std::min(worst, sh_.bounds.of(after));
         cut = true;
         return false;
@@ -874,7 +892,7 @@ class Worker {
         r = cut ? Interval{kLow, exact} : Interval{exact, exact};
       }
     }
-    if (o_.use_tt) sh_.leaf.put(key, r, intersect);
+    if (o_.use_tt) sh_.leaf.put(key, LeafMemo{r, stopped_early}, merge_leaf);
     return r;
   }
 
@@ -1179,7 +1197,7 @@ class Worker {
       std::vector<State> next;
       auto consider = [&](Outcome& o, std::vector<SubAction> line, bool chance_free, uint32_t played) {
         if (!seen.insert(o.hash).second) return;
-        const Interval end = leaf(o.board, alpha_of(kLow), o_.lookahead);
+        const Interval end = leaf(o.board, alpha_of(kLow), o_.lookahead, false);
         if (chance_free && end.exact()) improve(end.lo, line);
         next.push_back(State{std::move(o.board), std::move(line), chance_free, played, end.hi});
       };
@@ -1211,10 +1229,26 @@ class Worker {
             if (!q || !unit_can_play(*q)) continue;
             Actions acts;
             unit_actions(base.board, *q, true, false, acts);
+            // Same-effect shots (generate): the twin's board is in `seen`.
+            std::vector<std::pair<int8_t, SkillEffect>> fired;
             for (size_t i = 0; i < acts.acts.size(); ++i) {
               SubAction& a = acts.acts[i];
               if (budget_exceeded()) return;
-              if (!execute(base.board, a, outs, acts.area_of(i)) || outs.empty()) continue;
+              std::optional<SkillEffect> fx;
+              if (same_effect_ && a.kind == SubAction::Weapon && !a.target2.valid()) {
+                aopts_.known_area = acts.area_of(i);
+                fx = e_.pure_weapon_effect(base.board, a.uid, a.slot, a.target, aopts_);
+                aopts_.known_area = nullptr;
+                if (fx && !fx->q_effect.empty()) fx.reset();
+                if (fx && std::any_of(fired.begin(), fired.end(), [&](const auto& f) {
+                      return f.first == a.slot && same_effect(f.second, *fx);
+                    })) {
+                  ++stats_.same_effect_shots;
+                  continue;
+                }
+              }
+              if (!execute(base.board, a, outs, acts.area_of(i), fx ? &*fx : nullptr) || outs.empty()) continue;
+              if (fx) fired.emplace_back(a.slot, std::move(*fx));
               std::vector<SubAction> line = base.line;
               line.push_back(a);
               consider(outs[0], std::move(line), base.chance_free && !a.chance, played);
@@ -1242,7 +1276,7 @@ class Worker {
         for (size_t j = 0; j < best.size() && j < kBeamExact; ++j) {
           if (budget_exceeded()) return;
           State& st = kept[best[j]];
-          const Interval end = leaf(st.board, alpha_of(kLow));
+          const Interval end = leaf(st.board, alpha_of(kLow), false, false);
           if (end.exact()) improve(end.lo, st.line);
         }
       }
@@ -1370,7 +1404,8 @@ class Worker {
           }
         }
         Score key = kHigh;
-        for (const Outcome& oc : c.outcomes) key = std::min(key, leaf(oc.board, a, true).hi);
+        const bool may_stop = sh_.prefix_mode.load(std::memory_order_relaxed);
+        for (const Outcome& oc : c.outcomes) key = std::min(key, leaf(oc.board, a, true, may_stop).hi);
         c.order = key;
       }
       std::stable_sort(children.begin(), children.end(),

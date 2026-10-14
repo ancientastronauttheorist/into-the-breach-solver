@@ -466,7 +466,9 @@ json stats_json(const SolveStats& s) {
               {"sub_action_s", s.sub_action_s},
               {"enemy_phase_s", s.enemy_phase_s},
               {"first_plan_s", s.first_plan_s},
-              {"best_plan_s", s.best_plan_s}};
+              {"best_plan_s", s.best_plan_s},
+              {"base_search_s", s.base_search_s},
+              {"base_proven_components", s.base_proven_components}};
 }
 
 class PyEngine {
