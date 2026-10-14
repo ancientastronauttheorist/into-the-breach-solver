@@ -154,7 +154,11 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   survivors and mech tiles. Vek tiles and webs are not compared (the AI
   moves and webs after the point the engine stops); new units are reported
   as spawns. Outcomes the engine cannot know are notes, not anomalies: a
-  Vek that picks up an acid pool moving while the AI plans; Grid Defense
+  Vek that picks up an acid pool moving while the AI plans; a unit burning
+  in the prediction that the game shows put out on a tile smoked after it
+  (a Mosquito smokes the target it queues on while the AI plans, so a burning
+  mech there is put out; live m78; the compact boards list `smoke_tiles`;
+  `itb_inspect --ai` reproduces the game's board there); Grid Defense
   (the prediction takes every roll as not resisted, its worst case: with
   chance nodes in the prediction, a building it damaged that the game shows
   with more HP, at most its HP before the phase and on a tile with a roll,

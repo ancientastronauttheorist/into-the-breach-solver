@@ -226,6 +226,53 @@ TEST_CASE("AI phase: the recorded seed reproduces the game (live run, Mission_Vo
   CHECK(r.seed == 4479278u);
 }
 
+TEST_CASE("AI phase: a Mosquito's planning smoke puts out the burning mech it targets (live Mission_Power)") {
+  NEED_ENGINE();
+  // Live 20261014_045942 m78 turn 2 -> 3 (Detritus, Unfair): the TeleMech
+  // burns at G4 (bridge (4,1)). The enemy phase's fire tick and a Centipede's
+  // acid leave it at 1 HP, burning, with ACID: that is where end_turn stops.
+  // Then the AI plans: the Mosquito2 walks onto F4 (picking up the acid pool
+  // the Centipede left) and queues its whip on the mech, and the instant part
+  // of that skill smokes G4. A burning pawn on a smoked tile is put out (fire
+  // and smoke never share a tile), so the next player turn shows the mech at
+  // 1 HP with ACID and no fire under smoke.
+  const Recording rec = fixture("live_power_t2_end_turn.json");
+  Board b = rec.board;
+  const TurnContext ctx = turn_context(rec, Visibility::Full);
+  constexpr int32_t kMech = 2, kMosquito = 15879;
+  constexpr Point kMechTile{4, 1};
+  REQUIRE(b.find_pawn(kMech) != nullptr);
+  REQUIRE(b.find_pawn(kMech)->fire);
+  const PhaseResult phase = E.end_turn(b, ctx);
+  REQUIRE_FALSE(phase.mission_ended);
+  {
+    const Pawn& m = *b.find_pawn(kMech);
+    CHECK(m.pos == kMechTile);
+    CHECK(m.hp == 1);
+    CHECK(m.acid);
+    CHECK(m.fire);  // the enemy phase itself does not smoke it
+    CHECK_FALSE(b.tile(kMechTile).smoke);
+  }
+  AiPhaseOptions o;
+  o.seed = 1821990806;  // the save's aiSeed at the start of turn 2
+  o.last_target = {{15874, {1, 5}}, {15875, {5, 2}}, {15876, {3, 1}}, {15877, {1, 6}},
+                   {15878, {6, 3}}, {15879, {3, 4}}, {15891, {3, 4}}, {15905, {1, 5}}};
+  o.actions = action_options(ctx);
+  const AiPhaseResult r = E.ai_phase(b, o);
+  CHECK(r.lua_errors.empty());
+  const Pawn* mosquito = b.find_pawn(kMosquito);
+  REQUIRE(mosquito != nullptr);
+  CHECK(mosquito->pos == Point{4, 2});
+  CHECK(mosquito->queued.target == kMechTile);
+  CHECK(mosquito->acid);  // the Centipede's pool at F4
+  const Pawn& m = *b.find_pawn(kMech);
+  CHECK(b.tile(kMechTile).smoke);
+  CHECK_FALSE(b.tile(kMechTile).on_fire());
+  CHECK_FALSE(m.fire);
+  CHECK(m.acid);
+  CHECK(m.hp == 1);
+}
+
 TEST_CASE("deployment: outcome boards and a small search on a recorded drop zone") {
   NEED_ENGINE();
   const Recording rec = fixture("live_volatile_t0_deployed.json");

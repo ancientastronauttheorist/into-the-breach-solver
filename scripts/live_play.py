@@ -45,7 +45,8 @@ omits it) until the AI's move brings it up: the engine's boards list it under
 re-solves and the end-of-turn prediction, so a resurfacing Burrower is
 matched by uid, not reported as a spawn.
 Notes, not differences: a Vek picking up an acid pool while the AI plans; a
-Grid Defense resist the prediction (worst case: no resist) could not know; a
+unit put out by smoke a Mosquito lays on it while the AI plans; a Grid
+Defense resist the prediction (worst case: no resist) could not know; a
 Soldier Psion / Psion Abomination emerging from a hidden spawn (+1 HP to
 every Vek).
 
@@ -562,7 +563,8 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
                 acid_pools: frozenset = frozenset(), resist: dict | None = None,
                 xp_split: bool = False, mines_gone: frozenset = frozenset(),
                 random_thaw: bool = False, freeze_mines_gone: frozenset = frozenset(),
-                repair_mines_gone: frozenset = frozenset()) -> tuple[list, list]:
+                repair_mines_gone: frozenset = frozenset(),
+                smoke_new: frozenset = frozenset()) -> tuple[list, list]:
     """Differences between a predicted and a live compact board (itb_live's
     live_board_json). Returns (differences, notes). Units in `known` (the
     turn-start uids) are matched by uid; others by type/tile/HP (the engine
@@ -585,6 +587,12 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
       (Mission_Repair): a Vek that walks onto one while planning is healed
       and loses ACID and fire. A non-mech that moved onto one of these tiles
       with more HP, or with acid / fire cleared, is a note.
+    - `smoke_new` are the tiles the game shows smoked after the phase that
+      the prediction did not smoke: smoke laid while the AI planned (a
+      Mosquito's queued whip smokes its target at once). A unit burning in
+      the prediction that the game shows not burning on one of these tiles
+      was put out by it (live m78 Mission_Power: a TeleMech under a
+      Mosquito2's planning smoke).
     - `random_thaw` (the prediction thawed frozen enemies at random:
       Mission_Reactivation thaws 2 random frozen Vek each enemy turn, a chance
       node the prediction takes one outcome of): enemies whose frozen flag
@@ -696,6 +704,10 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
                         and (b["x"], b["y"]) in acid_pools):
                     notes.append(f"{who} picked up the acid pool at {visual(b['x'], b['y'])} "
                                  "moving during AI planning")
+                    continue
+                if enemy_phase and f == "fire" and not b.get(f) and (b["x"], b["y"]) in smoke_new:
+                    notes.append(f"{who} was put out by smoke laid on {visual(b['x'], b['y'])} during AI "
+                                 "planning (a Mosquito's queued attack)")
                     continue
                 if (enemy_phase and f == "frozen" and b.get(f) and not a.get("mech") and freeze_left > 0):
                     freeze_left -= 1
@@ -1591,7 +1603,14 @@ def end_turn(ctx) -> list:
     pools = frozenset((t["x"], t["y"]) for t in state.get("tiles", []) if t.get("acid")) | \
         frozenset(tuple(xy) for xy in pred["after_enemy"].get("acid_tiles", []))
     mines = lambda s, item="Item_Mine": {(t["x"], t["y"]) for t in s.get("tiles", []) if t.get("item") == item}
+    # Smoke laid during AI planning (a Mosquito smokes its target as it
+    # queues): smoked in the game, not in the prediction (an itb_live without
+    # "smoke_tiles": not smoked before the phase either).
+    smoked = lambda s: {(t["x"], t["y"]) for t in s.get("tiles", []) if t.get("smoke")}
+    engine_smoke = ({tuple(xy) for xy in pred["after_enemy"]["smoke_tiles"]}
+                    if "smoke_tiles" in pred["after_enemy"] else smoked(state))
     diffs, notes = diff_boards(pred["after_enemy"], live, known, enemy_phase=True, acid_pools=pools,
+                               smoke_new=frozenset(smoked(after) - engine_smoke),
                                mines_gone=frozenset(mines(state) - mines(after)),
                                freeze_mines_gone=frozenset(mines(state, "Freeze_Mine") - mines(after, "Freeze_Mine")),
                                repair_mines_gone=frozenset(mines(state, "Item_Repair_Mine")

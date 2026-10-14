@@ -1372,6 +1372,24 @@ class DiffBoardsTest(unittest.TestCase):
         diffs, _ = lp.diff_boards(want, got, {97}, enemy_phase=True, acid_pools=frozenset())
         self.assertEqual(len(diffs), 1)
 
+    def test_a_unit_put_out_by_planning_smoke_is_a_note(self):
+        # Live 20261014_045942 m78 (Mission_Power) turn 2 -> 3: the engine's
+        # prediction (it stops before the AI plans) has the TeleMech burning;
+        # a Mosquito2 then queued its whip on it, smoking G4 at once, and the
+        # game shows it put out on that smoke.
+        mech = {"uid": 2, "type": "TeleMech", "x": 4, "y": 1, "hp": 1, "mech": True, "acid": True}
+        want = self.board([dict(mech, fire=True)])
+        got = self.board([dict(mech, fire=False)])
+        diffs, notes = lp.diff_boards(want, got, {2}, enemy_phase=True, smoke_new=frozenset({(4, 1)}))
+        self.assertEqual(diffs, [])
+        self.assertTrue(any("put out by smoke" in n for n in notes))
+        # Without new smoke there it is still a difference, and so is a unit
+        # the game shows burning that the engine does not.
+        diffs, _ = lp.diff_boards(want, got, {2}, enemy_phase=True, smoke_new=frozenset({(4, 2)}))
+        self.assertEqual(diffs, ["TeleMech#2 fire: engine True, game False"])
+        diffs, _ = lp.diff_boards(got, want, {2}, enemy_phase=True, smoke_new=frozenset({(4, 1)}))
+        self.assertEqual(len(diffs), 1)
+
     def test_a_different_random_thaw_is_a_note(self):
         # Live 2026-10-10 (Mission_Reactivation): the engine thawed Snowart2,
         # the game thawed Burrower1 instead.
