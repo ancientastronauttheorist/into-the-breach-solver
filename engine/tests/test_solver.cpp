@@ -7,8 +7,10 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -103,12 +105,19 @@ SolveOptions quick(double seconds = 60) {
 // re-running each prefix of choices, values by the definition
 //   V(B) = max(E(B), max_a min_o V(B·a·o)),  E(B) = min_o score(end_turn(B, o)).
 
+// How the grid survival odds weigh a call (SolveOptions::grid_survival):
+// a Grid Defense roll by the resist chance, a mission's random pick and a
+// spider egg evenly, anything else at its worst.
+enum class Kind { Worst, Resist, Even };
+
 struct Choices {
   std::vector<int> forced;
   std::vector<int> options;  // per call
-  int next(int n) {
+  std::vector<Kind> kinds;   // per call
+  int next(int n, Kind k = Kind::Worst) {
     const size_t i = options.size();
     options.push_back(n);
+    kinds.push_back(k);
     const int c = i < forced.size() ? forced[i] : 0;
     return std::min(c, n - 1);
   }
@@ -139,27 +148,76 @@ struct Naive {
   // With the lookahead: the NextTurn tier of every chance outcome (the
   // definition: lookahead_loss, worst over its samples).
   const LookaheadOptions* lookahead = nullptr;
+  // Grid survival (score_options.grid_survival): the Grid Defense chance.
+  double resist_p = 0;
   uint64_t evaluations = 0;
+  int player_chance = 0;  // grid survival: actions with more than one run folded
 
   void hooks(Choices& c, ActionOptions& o, TurnContext* tc) {
-    auto resist = [&c](Point, int) { return c.next(2) == 1; };
+    auto resist = [&c](Point, int) { return c.next(2, Kind::Resist) == 1; };
     auto egg = [&c](Resolver&, const Pawn&, const std::vector<Point>& t) {
-      return c.next(static_cast<int>(t.size()));
+      return c.next(static_cast<int>(t.size()), Kind::Even);
+    };
+    auto choose = [&c](const ChanceRecord& n) {
+      return c.next(std::max(1, n.options), n.kind == ChanceKind::MissionRandom ? Kind::Even : Kind::Worst);
     };
     o.grid_resist = resist;
     o.spider_egg = egg;
     o.mission = &base.mission;  // the mission's per-frame hooks, as in game
-    o.choose = [&c](const ChanceRecord& n) { return c.next(std::max(1, n.options)); };
+    o.choose = choose;
     if (tc) {
       tc->grid_resist = resist;
       tc->spider_egg = egg;
-      tc->choose = [&c](const ChanceRecord& n) { return c.next(std::max(1, n.options)); };
+      tc->choose = choose;
     }
   }
 
+  // The odds that the grid outlives the enemy phase from b, by walking the
+  // chance tree node by node: the run with `prefix` forced reveals the next
+  // call; each of its options is a subtree. `lost`: some leaf loses the grid.
+  double odds(const Board& b, const std::vector<int>& prefix, bool& lost) {
+    Choices c;
+    c.forced = prefix;
+    Board after = b;
+    TurnContext tc = base;
+    ActionOptions unused;
+    hooks(c, unused, &tc);
+    e.lua().seed(1);
+    e.end_turn(after, tc);
+    const size_t d = prefix.size();
+    if (c.options.size() <= d) {
+      if (after.grid_power <= 0) lost = true;
+      return after.grid_power > 0 ? 1.0 : 0.0;
+    }
+    const int n = c.options[d];
+    double first = 0, second = 0, sum = 0, worst = 2.0;
+    for (int j = 0; j < n; ++j) {
+      std::vector<int> p = prefix;
+      p.push_back(j);
+      const double x = odds(b, p, lost);
+      if (j == 0) first = x;
+      if (j == 1) second = x;
+      sum += x;
+      worst = std::min(worst, x);
+    }
+    if (n == 1) return first;
+    if (c.kinds[d] == Kind::Resist && n == 2) return (1 - resist_p) * first + resist_p * second;
+    if (c.kinds[d] == Kind::Even) return sum / n;
+    return worst;
+  }
+
+  // The odds rounded to kSurvivalOne units: exactly 1 only if no leaf loses
+  // the grid.
+  static int32_t rounded(double o, bool lost) {
+    return lost ? static_cast<int32_t>(std::min<long long>(std::llround(std::clamp(o, 0.0, 1.0) * kSurvivalOne),
+                                                           kSurvivalOne - 1))
+                : kSurvivalOne;
+  }
+
   Score end_value(const Board& b) {
-    Score worst;
+    Score worst, alive;
     worst.v.fill(INT32_MAX);
+    alive.v.fill(INT32_MAX);
     each_outcome([&](Choices& c) {
       Board after = b;
       TurnContext tc = base;
@@ -171,7 +229,50 @@ struct Naive {
       Score s = score_turn(root, after, &tc, &pr, score_options);
       if (lookahead) s[ScoreKey::NextTurn] = lookahead_value(e, root, after, &pr, tc, *lookahead);
       worst = std::min(worst, s);
+      if (s[ScoreKey::GridSurvival] == kSurvivalOne) alive = std::min(alive, s);
     });
+    if (score_options.grid_survival) {
+      // The definition: the odds over the whole tree; the rest from the
+      // worst outcome that kept the grid when the odds are above 0, else
+      // from the worst outcome.
+      bool lost = false;
+      const int32_t o = rounded(odds(b, {}, lost), lost);
+      worst = o > 0 ? alive : worst;
+      worst[ScoreKey::GridSurvival] = o;
+    }
+    return worst;
+  }
+
+  // A player action's chance tree, folded (grid survival): `leaves` are the
+  // runs (their calls' options, kinds and choices) with the value reached.
+  struct Run {
+    std::vector<int> options, chosen;
+    std::vector<Kind> kinds;
+    Score v;
+  };
+  double fold(const std::vector<const Run*>& runs, size_t d) {
+    if (runs.size() == 1 && runs[0]->options.size() <= d) {
+      return static_cast<double>(runs[0]->v[ScoreKey::GridSurvival]) / kSurvivalOne;
+    }
+    std::map<int, std::vector<const Run*>> by;
+    for (const Run* r : runs) {
+      REQUIRE(r->options.size() > d);
+      by[r->chosen[d]].push_back(r);
+    }
+    const int n = runs[0]->options[d];
+    const Kind kind = runs[0]->kinds[d];
+    double first = 0, second = 0, sum = 0, worst = 2.0;
+    for (int j = 0; j < n; ++j) {
+      REQUIRE(by.count(j) == 1);
+      const double x = fold(by[j], d + 1);
+      if (j == 0) first = x;
+      if (j == 1) second = x;
+      sum += x;
+      worst = std::min(worst, x);
+    }
+    if (n == 1) return first;
+    if (kind == Kind::Resist && n == 2) return (1 - resist_p) * first + resist_p * second;
+    if (kind == Kind::Even) return sum / n;
     return worst;
   }
 
@@ -228,6 +329,7 @@ struct Naive {
       Score worst;
       worst.v.fill(INT32_MAX);
       bool legal = true;
+      std::vector<Run> runs;
       each_outcome([&](Choices& c) {
         if (!legal) return;
         Board next = b;
@@ -238,9 +340,35 @@ struct Naive {
           legal = false;
           return;
         }
-        worst = std::min(worst, value(next, depth + 1));
+        const Score v = value(next, depth + 1);
+        worst = std::min(worst, v);
+        std::vector<int> chosen;
+        for (size_t i = 0; i < c.options.size(); ++i) {
+          chosen.push_back(i < c.forced.size() ? std::min(c.forced[i], c.options[i] - 1) : 0);
+        }
+        runs.push_back(Run{c.options, chosen, c.kinds, v});
       });
-      if (legal) best = std::max(best, worst);
+      if (!legal) continue;
+      if (score_options.grid_survival && runs.size() > 1) {
+        ++player_chance;
+        // The odds folded over the action's chance tree; the rest from the
+        // worst outcome with odds above 0 when the fold is above 0.
+        std::vector<const Run*> ptrs;
+        bool lost = false;
+        for (const Run& r : runs) {
+          ptrs.push_back(&r);
+          lost = lost || r.v[ScoreKey::GridSurvival] < kSurvivalOne;
+        }
+        const int32_t o = rounded(fold(ptrs, 0), lost);
+        Score cls;
+        cls.v.fill(INT32_MAX);
+        for (const Run& r : runs) {
+          if (o <= 0 || r.v[ScoreKey::GridSurvival] > 0) cls = std::min(cls, r.v);
+        }
+        cls[ScoreKey::GridSurvival] = o;
+        worst = cls;
+      }
+      best = std::max(best, worst);
     }
     return best;
   }
@@ -977,6 +1105,268 @@ TEST_CASE("solver: tiny boards with the pilot floor match a naive exhaustive enu
     ++checked;
   }
   CHECK(checked == kTrials);
+}
+
+// ---- Grid survival (SolveOptions::grid_survival) -------------------------------------
+
+namespace {
+
+// Two attacks on 1-HP buildings or one on a 3-HP building: with the grid at 1
+// every line loses it unless Grid Defense saves it. The Laser Mech (it
+// cannot move) kills the Leaper to the left (one 3-damage hit stopped, two
+// 1-damage hits left: two rolls, 2 building HP at worst) or both Hornets
+// below (one hit left: one roll, 3 building HP at worst).
+Board two_roll_board(int32_t* mech) {
+  Board b;
+  b.grid_power = 1;
+  const int32_t m = place(b, "LaserMech", {3, 3}, true);
+  P(b, m).moved = true;
+  const int32_t a = place(b, "Leaper1", {2, 3});
+  set_building(b, {2, 2}, 3);
+  queue(b, a, {2, 2});
+  set_mountain(b, {1, 3});
+  const int32_t h1 = place(b, "Hornet1", {3, 4});
+  set_building(b, {4, 4});
+  queue(b, h1, {4, 4});
+  const int32_t h2 = place(b, "Hornet1", {3, 5});
+  set_building(b, {4, 5});
+  queue(b, h2, {4, 5});
+  set_mountain(b, {3, 6});
+  if (mech) *mech = m;
+  return b;
+}
+
+}  // namespace
+
+TEST_CASE("grid survival: when every line loses the grid, the one-roll line beats the two-roll line") {
+  NEED_ENGINE();
+  int32_t m = -1;
+  const Board b = two_roll_board(&m);
+  TurnContext ctx = context();
+  ctx.mission.grid_defense = 25;
+  const double p = 0.25;
+  auto fire = [&](Point t) {
+    PlayerAction a;
+    a.uid = m;
+    a.kind = PlayerAction::Kind::Weapon;
+    a.weapon = std::string(symbol_name(P(const_cast<Board&>(b), m).weapons[0]));
+    a.target = t;
+    return std::vector<PlayerAction>{a};
+  };
+  SolveOptions on = quick();
+  on.grid_survival = true;
+  const auto down = evaluate_plan(E, b, ctx, fire({3, 4}), on);  // both Hornets: one roll left
+  const auto left = evaluate_plan(E, b, ctx, fire({2, 3}), on);  // the Leaper: two rolls left
+  REQUIRE(down);
+  REQUIRE(left);
+  CHECK((*down)[ScoreKey::GridSurvival] == static_cast<int32_t>(std::llround(p * kSurvivalOne)));
+  CHECK((*left)[ScoreKey::GridSurvival] == static_cast<int32_t>(std::llround(p * p * kSurvivalOne)));
+  // The rest of a line with odds above 0 is its worst outcome that keeps the
+  // grid: every building resisted.
+  CHECK((*down)[ScoreKey::GridLost] == 0);
+  CHECK((*left)[ScoreKey::BuildingHpLost] == 0);
+  // The worst cases: both lose the grid, the two-roll line fewer building HP.
+  const auto down_off = evaluate_plan(E, b, ctx, fire({3, 4}), quick());
+  const auto left_off = evaluate_plan(E, b, ctx, fire({2, 3}), quick());
+  REQUIRE(down_off);
+  REQUIRE(left_off);
+  CHECK((*down_off)[ScoreKey::GridLost] == -1);
+  CHECK((*left_off)[ScoreKey::GridLost] == -1);
+  CHECK((*left_off)[ScoreKey::BuildingHpLost] > (*down_off)[ScoreKey::BuildingHpLost]);
+
+  // Off: every line ends with the grid lost at worst; fewer building HP
+  // lost wins, i.e. the two-roll line.
+  const SolveResult r_off = solve_turn(E, b, ctx, quick());
+  CHECK(r_off.proven_optimal);
+  REQUIRE(r_off.best.actions.size() == 1);
+  CHECK(r_off.best.actions[0].target == Point{2, 3});
+  CHECK(r_off.best.worst_case[ScoreKey::GridSurvival] == 0);
+
+  // On: the odds decide first.
+  const SolveResult r_on = solve_turn(E, b, ctx, on);
+  CHECK(r_on.proven_optimal);
+  REQUIRE(r_on.best.actions.size() == 1);
+  CHECK(r_on.best.actions[0].target == Point{3, 4});
+  CHECK(r_on.best.worst_case == *down);
+  for (const std::string& w : r_on.warnings) CHECK_MESSAGE(w.rfind("re-running", 0) != 0, w);
+
+  // The game's chance comes from the state; without it the board's (15%).
+  TurnContext unknown = context();
+  const auto down15 = evaluate_plan(E, b, unknown, fire({3, 4}), on);
+  REQUIRE(down15);
+  CHECK((*down15)[ScoreKey::GridSurvival] == static_cast<int32_t>(std::llround(0.15 * kSurvivalOne)));
+}
+
+TEST_CASE("grid survival: a line that keeps the grid scores 1 and ranks as before") {
+  NEED_ENGINE();
+  // Grid 2: killing the Leaper leaves two 1-HP hits, the grid at 0 at worst;
+  // killing the Hornets leaves one 3-damage hit on a 3-HP building: grid 0
+  // too. With grid 4 both keep the grid: the plans rank as without the odds.
+  int32_t m = -1;
+  Board b = two_roll_board(&m);
+  b.grid_power = 4;
+  TurnContext ctx = context();
+  ctx.mission.grid_defense = 25;
+  const SolveResult off = solve_turn(E, b, ctx, quick());
+  SolveOptions o = quick();
+  o.grid_survival = true;
+  const SolveResult on = solve_turn(E, b, ctx, o);
+  CHECK(off.proven_optimal);
+  CHECK(on.proven_optimal);
+  CHECK(on.best.worst_case[ScoreKey::GridSurvival] == kSurvivalOne);
+  Score same = on.best.worst_case;
+  same[ScoreKey::GridSurvival] = 0;
+  CHECK(same == off.best.worst_case);
+  REQUIRE(on.best.actions.size() == off.best.actions.size());
+  for (size_t i = 0; i < on.best.actions.size(); ++i) CHECK(on.best.actions[i].target == off.best.actions[i].target);
+}
+
+// A tiny board (tiny_board) with the grid at 1-2 and more of it at stake: Vek
+// next to a building attack it, a Hornet joins next to some buildings, and
+// often the first mech is done for the turn.
+static Board grid_risk_board(std::mt19937& rng) {
+  Board b = tiny_board(rng);
+  b.grid_power = 1 + static_cast<int>(rng() % 2u);
+  for (int i = 0; i < kTileCount; ++i) {
+    const Point at = Point::from_index(i);
+    if (!b.tile(at).is_building()) continue;
+    for (Point d : kDirVectors) {
+      const Point q = at + d;
+      if (q.valid() && q.x < 4 && q.y < 4 && !b.pawn_at(q) && b.tile(q).terrain == Terrain::Road &&
+          rng() % 2u == 0) {
+        queue(b, place(b, "Hornet1", q), at);
+        break;
+      }
+    }
+  }
+  for (Pawn& p : b.pawns()) {
+    if (p.mech) {
+      if (rng() % 2u == 0) p.active = false;
+      break;
+    }
+  }
+  for (Pawn& p : b.pawns()) {
+    if (p.team != Team::Enemy) continue;
+    for (Point d : kDirVectors) {
+      const Point t = p.pos + d;
+      if (t.valid() && b.tile(t).is_building()) {
+        p.queued = QueuedShot{0, p.pos, t};
+        break;
+      }
+    }
+  }
+  return b;
+}
+
+TEST_CASE("solver: tiny boards with grid survival match a naive exhaustive enumeration") {
+  NEED_ENGINE();
+  // The naive value folds every enemy phase's chance tree node by node; the
+  // player's own chance stays at its worst. On a board where some line keeps
+  // the grid for sure the value is the plain one with odds 1.
+  std::mt19937 rng(20261015);
+  int checked = 0, doomed = 0, positive = 0, odds_decide = 0, player_chance = 0;
+  constexpr int kTrials = 30;
+  for (int trial = 0; trial < kTrials; ++trial) {
+    const Board b = grid_risk_board(rng);
+    TurnContext ctx = context();
+    static constexpr int kDefense[] = {15, 25, 40, 5, 0};
+    ctx.mission.grid_defense = kDefense[trial % 5];
+    Naive naive{E, b, ctx};
+    naive.score_options.grid_survival = true;
+    naive.resist_p = ctx.mission.grid_defense / 100.0;
+    const Score want = naive.value(b);
+    Naive plain{E, b, ctx};
+    const Score base = plain.value(b);
+    if (want[ScoreKey::GridSurvival] == kSurvivalOne) {
+      Score same = want;
+      same[ScoreKey::GridSurvival] = 0;
+      CHECK(same == base);
+    } else {
+      ++doomed;
+      if (want[ScoreKey::GridSurvival] > 0) ++positive;
+    }
+    if (naive.player_chance > 0) ++player_chance;
+    for (bool tt : {true, false}) {
+      SolveOptions o = quick(120);
+      o.grid_survival = true;
+      o.use_tt = tt;
+      o.use_bounds = tt;
+      o.order_children = tt;
+      o.beam_width = tt ? 6 : 0;
+      const SolveResult r = solve_turn(E, b, ctx, o);
+      INFO("trial " << trial << " tt " << tt << " naive " << want.describe(kTierSurvival) << " solver "
+                    << r.best.worst_case.describe(kTierSurvival));
+      CHECK(r.proven_optimal);
+      CHECK(r.best.worst_case == want);
+      if (!r.best.contingent) {
+        const auto again = evaluate_plan(E, b, ctx, r.best.actions, o);
+        REQUIRE(again);
+        CHECK(*again == r.best.worst_case);
+        // The odds picked a line the plain order ranks lower.
+        const auto plain_value = evaluate_plan(E, b, ctx, r.best.actions);
+        REQUIRE(plain_value);
+        if (tt && *plain_value < base) ++odds_decide;
+      }
+    }
+    ++checked;
+  }
+  CHECK(checked == kTrials);
+  MESSAGE("grid survival brute-force boards: " << checked << ", every line can lose the grid: " << doomed
+                                              << " (odds above 0: " << positive << "; the odds picked a line the "
+                                              << "plain order ranks lower: " << odds_decide
+                                              << "), with chance in the player's actions: " << player_chance);
+}
+
+TEST_CASE("solver: grid survival with the lookahead and the mech exchange matches a naive enumeration") {
+  NEED_ENGINE();
+  // The odds in front of the lookahead's lazy leaves (and its base search)
+  // and of the mech exchange's grid slot.
+  std::mt19937 rng(20261016);
+  LookaheadOptions la;
+  la.samples = 2;
+  int checked = 0, doomed = 0;
+  constexpr int kTrials = 6;
+  for (int trial = 0; trial < kTrials; ++trial) {
+    const Board b = grid_risk_board(rng);
+    TurnContext ctx = context();
+    ctx.mission.grid_defense = 25;
+    const bool with_la = trial % 2 == 0;
+    Naive naive{E, b, ctx};
+    naive.score_options.grid_survival = true;
+    naive.resist_p = 0.25;
+    if (with_la) {
+      naive.lookahead = &la;
+      naive.score_options.next_turn = true;
+    } else {
+      naive.score_options.mech_grid = 1;
+    }
+    const Score want = naive.value(b);
+    if (want[ScoreKey::GridSurvival] < kSurvivalOne) ++doomed;
+    for (bool tt : {true, false}) {
+      SolveOptions o = quick(300);
+      o.grid_survival = true;
+      if (with_la) {
+        o.lookahead = true;
+        o.lookahead_options = la;
+      } else {
+        o.mech_grid = 1;
+      }
+      o.use_tt = tt;
+      o.use_bounds = tt;
+      o.order_children = tt;
+      o.beam_width = tt ? 6 : 0;
+      const SolveResult r = solve_turn(E, b, ctx, o);
+      const TierSet shown = kTierSurvival | (with_la ? kTierNextTurn : 0u);
+      INFO("trial " << trial << " tt " << tt << " naive " << want.describe(shown) << " solver "
+                    << r.best.worst_case.describe(shown));
+      CHECK(r.proven_optimal);
+      CHECK(r.best.worst_case == want);
+    }
+    ++checked;
+  }
+  CHECK(checked == kTrials);
+  MESSAGE("grid survival with lookahead / mech exchange: " << checked << " boards, " << doomed
+                                                          << " where every line can lose the grid");
 }
 
 // ---- Threads and recorded boards ----------------------------------------------------

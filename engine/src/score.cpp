@@ -1,6 +1,7 @@
 #include "itb/score.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <sstream>
 
 #include "itb/objectives.hpp"
@@ -34,8 +35,8 @@ bool retreated(const Pawn& p, const Pawn* q) { return q && !p.minor && q->minor 
 }  // namespace
 
 const char* score_key_name(int key) {
-  static constexpr const char* kNames[kScoreKeys] = {"grid",    "bldg_hp", "mechs",  "obj_fail", "next_turn", "threat",
-                                                     "mech_hp", "obj",     "kills",  "vek_hp",   "position"};
+  static constexpr const char* kNames[kScoreKeys] = {"survival", "grid",   "bldg_hp", "mechs",  "obj_fail", "next_turn",
+                                                     "threat",   "mech_hp", "obj",    "kills",  "vek_hp",   "position"};
   return key >= 0 && key < kScoreKeys ? kNames[key] : "?";
 }
 
@@ -67,8 +68,16 @@ std::string Score::describe(TierSet tiers) const {
   std::ostringstream out;
   bool first = true;
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (!tier_used(i, tiers)) continue;
-    out << (first ? "" : " ") << score_key_name(i) << "=" << v[static_cast<size_t>(i)];
+    if (!tier_shown(i, tiers)) continue;
+    out << (first ? "" : " ") << score_key_name(i) << "=";
+    const int32_t x = v[static_cast<size_t>(i)];
+    if (i == static_cast<int>(ScoreKey::GridSurvival) && x >= 0 && x <= kSurvivalOne) {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "%.4f", static_cast<double>(x) / kSurvivalOne);
+      out << buf;
+    } else {
+      out << x;
+    }
     first = false;
   }
   return out.str();
@@ -87,9 +96,12 @@ std::string Score::describe(TierSet tiers) const {
 //  5. position (objectives.hpp position_terms).
 // With the threat tier, Threat (between stars and mech HP) is minus the
 // enemies on `after` that could attack a building next turn (threat.hpp).
+// With grid_survival, GridSurvival (first) says whether the grid survived
+// this outcome; the solver turns it into odds over the outcomes.
 Score score_turn(const Board& before, const Board& after, const TurnContext* ctx, const PhaseResult* phase,
                  const ScoreOptions& options) {
   Score s;
+  if (options.grid_survival) s[ScoreKey::GridSurvival] = after.grid_power > 0 ? kSurvivalOne : 0;
   s[ScoreKey::GridLost] = after.grid_power - before.grid_power;
   s[ScoreKey::BuildingHpLost] = building_hp(after) - building_hp(before);
 

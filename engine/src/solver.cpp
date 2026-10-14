@@ -35,9 +35,11 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -112,12 +114,19 @@ double seconds_since(Clock::time_point t) {
 
 enum class Hook : uint8_t { Resist, Choose, Seed, Egg };
 
+// How the grid survival odds (SolveOptions::grid_survival) weigh a call's
+// branches: a Grid Defense roll by the resist chance, the game's random
+// picks evenly, everything else (hidden state, orders the recording does
+// not pin down, sampled seeds) at its worst.
+enum class Weigh : uint8_t { Worst, Resist, Even };
+
 struct ChanceCall {
   Hook hook;
   int options = 1;  // branches of this call (1 = nothing to branch on)
   int chosen = 0;
   uint32_t seed = 0;     // Seed: the seed handed out
   bool matched = false;  // Seed: its death effect drew random numbers
+  Weigh weigh = Weigh::Worst;
 };
 
 class ChanceDriver {
@@ -149,28 +158,37 @@ class ChanceDriver {
   }
 
   void bind(ActionOptions& o) {
-    o.grid_resist = [this](Point, int) { return next(Hook::Resist, resist_ ? 2 : 1) == 1; };
-    o.choose = [this](const ChanceRecord& node) { return next(Hook::Choose, std::max(1, node.options)); };
+    o.grid_resist = [this](Point, int) { return next(Hook::Resist, resist_ ? 2 : 1, Weigh::Resist) == 1; };
+    o.choose = [this](const ChanceRecord& node) {
+      return next(Hook::Choose, std::max(1, node.options), weigh_of(node.kind));
+    };
     o.death_seed = [this](const Pawn& p) { return seed_for(p); };
     o.spider_egg = [this](Resolver&, const Pawn&, const std::vector<Point>& tiles) {
-      return next(Hook::Egg, static_cast<int>(tiles.size()));
+      return next(Hook::Egg, static_cast<int>(tiles.size()), Weigh::Even);
     };
   }
   void bind(TurnContext& tc) {
-    tc.grid_resist = [this](Point, int) { return next(Hook::Resist, resist_ ? 2 : 1) == 1; };
-    tc.choose = [this](const ChanceRecord& node) { return next(Hook::Choose, std::max(1, node.options)); };
+    tc.grid_resist = [this](Point, int) { return next(Hook::Resist, resist_ ? 2 : 1, Weigh::Resist) == 1; };
+    tc.choose = [this](const ChanceRecord& node) {
+      return next(Hook::Choose, std::max(1, node.options), weigh_of(node.kind));
+    };
     tc.death_seed = [this](const Pawn& p) { return seed_for(p); };
     tc.spider_egg = [this](Resolver&, const Pawn&, const std::vector<Point>& tiles) {
-      return next(Hook::Egg, static_cast<int>(tiles.size()));
+      return next(Hook::Egg, static_cast<int>(tiles.size()), Weigh::Even);
     };
   }
 
  private:
-  int next(Hook h, int options) {
+  // A mission hook's random pick (the Final Cave's bomb drop, the
+  // Reactivation thaw: random_removal over a list) is uniform in game.
+  // Environment orders and choices are also hidden state the recording
+  // lacks, and an XP split only decides level-ups: worst case.
+  static Weigh weigh_of(ChanceKind k) { return k == ChanceKind::MissionRandom ? Weigh::Even : Weigh::Worst; }
+  int next(Hook h, int options, Weigh w) {
     const size_t i = calls_.size();
     int c = forced_ && i < forced_->size() ? (*forced_)[i] : 0;
     c = std::clamp(c, 0, std::max(0, options - 1));
-    calls_.push_back(ChanceCall{h, std::max(1, options), c, 0, false});
+    calls_.push_back(ChanceCall{h, std::max(1, options), c, 0, false, w});
     return c;
   }
   uint32_t seed_for(const Pawn& p) {
@@ -179,7 +197,7 @@ class ChanceDriver {
     // k = 0: the engine's default seed (uid + 1); others: fixed samples.
     const uint32_t seed = k == 0 ? static_cast<uint32_t>(p.uid + 1)
                                  : static_cast<uint32_t>(p.uid + 1) * 2654435761u + 40503u * static_cast<uint32_t>(k);
-    calls_.push_back(ChanceCall{Hook::Seed, 1, k, seed, false});
+    calls_.push_back(ChanceCall{Hook::Seed, 1, k, seed, false, Weigh::Worst});
     return seed;
   }
 
@@ -218,6 +236,178 @@ EnumEnd enumerate_chance(ChanceDriver& d, int max_leaves, uint64_t& extra, Run&&
     if (leaves >= max_leaves && !todo.empty()) return EnumEnd::Truncated;
   }
   return EnumEnd::Complete;
+}
+
+// ---- Grid survival odds ------------------------------------------------------------
+//
+// SolveOptions::grid_survival (README "Grid survival"). GridSurvival is the
+// probability that the grid is still above 0 at the end of the turn, in
+// kSurvivalOne units. score_turn gives one outcome 1 or 0; a chance node
+// folds its outcomes' values over its chance tree (the leaves of
+// enumerate_chance, each with the calls of its run): a Grid Defense roll is
+// (1 - p) x (not resisted) + p x (resisted), a game's random pick the mean
+// of its branches, any other call its worst branch. Branches no leaf reached
+// count as `unexplored` (1: an upper bound on the odds, before every leaf is
+// known). Every weight is non-negative and the fold is monotone in each
+// leaf, so bounds on the leaves bound the odds.
+//
+// The odds are rounded to kSurvivalOne units with a guard: exactly
+// kSurvivalOne when every leaf has kSurvivalOne, at most kSurvivalOne - 1
+// otherwise. So a node that never loses the grid has odds 1 and beats every
+// node that can lose it, whatever the rounding (a lost leaf behind ten
+// rolls may weigh less than one unit). The guarded value is monotone too.
+//
+// The rest of a chance node's value is the worst (lexicographic) of its
+// outcomes' values in its class: the outcomes with odds above 0 when the
+// node's odds are above 0 (given the grid survives, how good is the turn;
+// an outcome that surely loses it does not count), else all of them (as
+// without the odds).
+
+struct ChanceLeaf {
+  std::vector<ChanceCall> path;  // the run's chance calls, in order
+  int idx = 0;                   // which value the leaf reaches
+};
+
+class ChanceTree {
+ public:
+  ChanceTree() = default;
+  // order_ points into leaves_: moves keep the buffer, copies would not.
+  ChanceTree(ChanceTree&&) = default;
+  ChanceTree& operator=(ChanceTree&&) = default;
+  ChanceTree(const ChanceTree&) = delete;
+  ChanceTree& operator=(const ChanceTree&) = delete;
+
+  void add(ChanceLeaf l) {
+    leaves_.push_back(std::move(l));
+    sorted_ = false;
+  }
+  // The guarded odds (kSurvivalOne units) for leaf values `vals` (by
+  // ChanceLeaf::idx, kSurvivalOne units).
+  int32_t survival(double p, const std::vector<int32_t>& vals, double unexplored = 1.0) {
+    bool lost = false;
+    for (const ChanceLeaf& l : leaves_) lost = lost || vals[static_cast<size_t>(l.idx)] < kSurvivalOne;
+    if (!lost) return kSurvivalOne;
+    sort();
+    const double odds = fold(0, order_.size(), 0, p, unexplored, vals);
+    const double x = std::clamp(odds, 0.0, 1.0) * kSurvivalOne;
+    return static_cast<int32_t>(std::min<long long>(std::llround(x), kSurvivalOne - 1));
+  }
+
+ private:
+  void sort() {
+    if (sorted_) return;
+    order_.clear();
+    for (const ChanceLeaf& l : leaves_) order_.push_back(&l);
+    std::sort(order_.begin(), order_.end(), [](const ChanceLeaf* a, const ChanceLeaf* b) {
+      const size_t n = std::min(a->path.size(), b->path.size());
+      for (size_t i = 0; i < n; ++i) {
+        if (a->path[i].chosen != b->path[i].chosen) return a->path[i].chosen < b->path[i].chosen;
+      }
+      return a->path.size() < b->path.size();
+    });
+    sorted_ = true;
+  }
+  // Leaves [lo, hi) of order_ share their first d calls.
+  double fold(size_t lo, size_t hi, size_t d, double p, double unexplored, const std::vector<int32_t>& vals) const {
+    // Leaves whose path ends here sort first. Normally such a leaf is alone;
+    // anything else is folded at its worst.
+    size_t k = lo;
+    double end = 2.0;
+    while (k < hi && order_[k]->path.size() <= d) {
+      end = std::min(end, static_cast<double>(vals[static_cast<size_t>(order_[k++]->idx)]) / kSurvivalOne);
+    }
+    if (k == hi) return end;
+    const ChanceCall& c = order_[k]->path[d];
+    double sum = 0, worst = 2.0, first = unexplored, second = unexplored;
+    const int n = std::max(1, c.options);
+    size_t i = k;
+    for (int j = 0; j < n; ++j) {
+      size_t e = i;
+      while (e < hi && order_[e]->path[d].chosen == j) ++e;
+      const double x = e > i ? fold(i, e, d + 1, p, unexplored, vals) : unexplored;
+      i = e;
+      if (j == 0) first = x;
+      if (j == 1) second = x;
+      sum += x;
+      worst = std::min(worst, x);
+    }
+    double out = worst;
+    if (n == 1) {
+      out = first;
+    } else if (c.weigh == Weigh::Resist && n == 2) {
+      out = (1 - p) * first + p * second;  // branch 1 = resisted
+    } else if (c.weigh == Weigh::Even) {
+      out = sum / n;
+    }
+    return std::min(end, out);
+  }
+
+  std::vector<ChanceLeaf> leaves_;
+  std::vector<const ChanceLeaf*> order_;
+  bool sorted_ = false;
+};
+
+int32_t clamp_odds(int32_t s) { return std::clamp(s, 0, kSurvivalOne); }
+
+// The Grid Defense chance the odds use: the game's, when the state carries
+// it (MissionData::grid_defense), else the board's.
+double resist_chance(const Board& root, const TurnContext& ctx) {
+  const int pct = ctx.mission.grid_defense >= 0 ? ctx.mission.grid_defense : root.grid_defense;
+  return std::clamp(pct, 0, 100) / 100.0;
+}
+
+constexpr size_t kSurvival = static_cast<size_t>(ScoreKey::GridSurvival);
+
+Score with_odds(Score s, int32_t odds) {
+  s.v[kSurvival] = odds;
+  return s;
+}
+
+// A chance node's value from its outcomes' intervals (grid survival): the
+// odds folded over `tree` (outcome k = ChanceLeaf::idx k), the rest from the
+// worst outcome of the node's class (above). Sound for any sound intervals:
+// an outcome's odds lie in [lo, hi] clamped to [0, 1] (lexicographic bounds
+// bound the first component), and a bound's rest only bounds the outcome's
+// rest when the bound has the outcome's odds (then the outcome's odds are
+// pinned).
+Interval combine_odds(ChanceTree& tree, double p, const std::vector<Interval>& r) {
+  const size_t n = r.size();
+  std::vector<int32_t> slo(n), shi(n);
+  bool pinned = true;
+  for (size_t k = 0; k < n; ++k) {
+    slo[k] = clamp_odds(r[k].lo.v[kSurvival]);
+    shi[k] = clamp_odds(r[k].hi.v[kSurvival]);
+    pinned = pinned && slo[k] == shi[k];
+  }
+  const int32_t lo_odds = tree.survival(p, slo), hi_odds = tree.survival(p, shi);
+  if (pinned) {
+    // The node's odds are known: its rest is the worst in its class.
+    Score lo = kHigh, hi = kHigh;
+    for (size_t k = 0; k < n; ++k) {
+      if (lo_odds > 0 && slo[k] <= 0) continue;
+      lo = std::min(lo, r[k].lo.v[kSurvival] == slo[k] ? r[k].lo : with_odds(kLow, slo[k]));
+      hi = std::min(hi, r[k].hi.v[kSurvival] == shi[k] ? r[k].hi : with_odds(kHigh, shi[k]));
+    }
+    return Interval{with_odds(lo, lo_odds), with_odds(hi, hi_odds)};
+  }
+  Interval out{with_odds(kLow, lo_odds), with_odds(kHigh, hi_odds)};
+  if (hi_odds >= kSurvivalOne) {
+    // Odds 1 means every outcome has odds 1: all of them count.
+    Score hi = kHigh;
+    for (size_t k = 0; k < n; ++k) {
+      if (r[k].hi.v[kSurvival] == kSurvivalOne) hi = std::min(hi, r[k].hi);
+    }
+    out.hi = with_odds(hi, kSurvivalOne);
+  } else if (hi_odds <= 0) {
+    // Odds 0: all of them count, the worst has odds 0; an outcome whose
+    // bound has odds 0 bounds it.
+    Score hi = kHigh;
+    for (size_t k = 0; k < n; ++k) {
+      if (r[k].hi.v[kSurvival] == 0) hi = std::min(hi, r[k].hi);
+    }
+    out.hi = with_odds(hi, 0);
+  }
+  return out;
 }
 
 // ---- Sub-actions -----------------------------------------------------------------
@@ -341,6 +531,9 @@ bool scored_enemy(const Pawn& p) { return p.team == Team::Enemy && !p.neutral &&
 // (2 r_m + 1) * delta_m over the root's mechs; only a mech dead at the root
 // can have delta_m > 0 (revived), so the sum over those of (2 r_m + 1)
 // bounds it.
+// GridSurvival (grid_survival; else 0) is odds <= 1, and 0 on a board
+// whose grid is already 0: grid power never rises (above), so every leaf
+// below it loses the grid.
 // tier_caps lowers any component further (the caller vouches for them).
 class TierBounds {
  public:
@@ -387,6 +580,8 @@ class TierBounds {
       caps_[ScoreKey::Threat] = static_cast<int32_t>(std::min<int64_t>(slot, INT32_MAX - 1));
     }
     caps_[ScoreKey::VekHpRemoved] = enemy_hp;
+    survival_ = opt.grid_survival;
+    caps_[ScoreKey::GridSurvival] = survival_ ? kSurvivalOne : 0;
     grid_cap_ = caps_[ScoreKey::GridLost];
     mech_rate_ = mech_grid_rate(root, so);
     per_mech_ = so.mech_exchange() && so.mech_grid_pilot;
@@ -418,6 +613,7 @@ class TierBounds {
       s[ScoreKey::GridLost] = std::min(s[ScoreKey::GridLost], b.grid_power - root_grid_);
     }
     s[ScoreKey::BuildingHpLost] = std::min(s[ScoreKey::BuildingHpLost], building_hp(b) - root_building_);
+    if (survival_ && grid_monotone_ && b.grid_power <= 0) s[ScoreKey::GridSurvival] = 0;
     return s;
   }
 
@@ -430,6 +626,7 @@ class TierBounds {
   int mech_rate_ = -1; // mech_grid_rate at the root (-1: off)
   bool per_mech_ = false;  // mech_grid_pilot: per-mech rates
   int dead_weight_ = 0;    // sum of 2 r_m + 1 over the root's dead mechs
+  bool survival_ = false;  // grid_survival
   Score caps_;
 };
 
@@ -444,6 +641,9 @@ struct Child {
   SubAction act;
   std::vector<Outcome> outcomes;  // the default outcome first
   Score order;                    // best case of ending the turn right after
+  // grid_survival, more than one outcome: the action's chance tree, each
+  // leaf reaching outcomes[idx].
+  std::shared_ptr<ChanceTree> tree;
 };
 
 // An end-of-turn value. `stopped`: the enemy phase was ended early by the
@@ -452,6 +652,10 @@ struct Child {
 struct LeafMemo {
   Interval v;
   bool stopped = false;
+  // grid_survival: the worst outcome so far, each with its own odds (1 or
+  // 0): the order key the search had before the odds (child ordering under
+  // an alpha that surely keeps the grid ranks by it).
+  Score key = kHigh;
 };
 
 struct TTEntry {
@@ -468,7 +672,7 @@ Interval intersect(const Interval& a, const Interval& b) {
 LeafMemo merge_leaf(const LeafMemo& old, const LeafMemo& next) {
   // A real cut value is never above a stopped one of the same board (the
   // default outcome runs first), so the merge is stopped only if both are.
-  return LeafMemo{intersect(old.v, next.v), old.stopped && next.stopped};
+  return LeafMemo{intersect(old.v, next.v), old.stopped && next.stopped, std::min(old.key, next.key)};
 }
 TTEntry merge_entries(const TTEntry& old, const TTEntry& next) {
   TTEntry out = next.v.lo >= old.v.lo ? next : old;
@@ -570,6 +774,7 @@ struct Shared {
     tiers = components_for_tiers(std::clamp(opt.min_proven_tiers, 0, used_tier_count(opt.tiers())), opt.tiers());
     score_options = opt.score_options();
     root_ub = bounds.of(r);
+    resist_p = resist_chance(r, ctx);
   }
   const Board& root;
   const SolveOptions& o;
@@ -599,6 +804,15 @@ struct Shared {
   int tiers = 0;                          // ScoreKey components holding min_proven_tiers
   ScoreOptions score_options;
   Score root_ub;                          // bounds.of(root)
+  double resist_p = 0;                    // grid_survival: the Grid Defense chance
+  // Grid survival's survey (search_survival): every alpha is at least
+  // `floor` (odds 1), so only lines that surely keep the grid are searched;
+  // with no such line found by `survey_s` seconds or `survey_nodes` nodes
+  // the search stops (0: no such limit).
+  bool survey = false;
+  Score floor = kLow;
+  double survey_s = 0;
+  uint64_t survey_nodes = 0;
   std::atomic<bool> tiers_proven{false};  // the incumbent meets root_ub in the first `tiers`
   std::atomic<bool> prefix_mode{false};   // past time_limit_s, proving the first `tiers` only
 
@@ -687,6 +901,10 @@ class Worker {
     if (aborted_) return true;
     bool spent = false;
     if (o_.node_limit && sh_.nodes.load(std::memory_order_relaxed) >= o_.node_limit) spent = true;
+    if (sh_.survey && sh_.version.load(std::memory_order_relaxed) == 0) {
+      if (sh_.survey_nodes && sh_.nodes.load(std::memory_order_relaxed) >= sh_.survey_nodes) spent = true;
+      if (sh_.survey_s > 0 && seconds_since(sh_.start) >= sh_.survey_s) spent = true;
+    }
     if (o_.time_limit_s > 0) {
       const double t = seconds_since(sh_.start);
       if (t >= o_.time_limit_s) {
@@ -729,7 +947,7 @@ class Worker {
 
   Score alpha_of(const Score& alpha) {
     Score inc;
-    if (!incumbent(inc)) return alpha;
+    if (!incumbent(inc)) return sh_.survey ? std::max(alpha, sh_.floor) : alpha;
     if (sh_.prefix_mode.load(std::memory_order_relaxed)) inc = raised(inc, sh_.tiers);
     return std::max(alpha, inc);
   }
@@ -794,23 +1012,33 @@ class Worker {
   // in which case the interval is [NextTurn at its floor, at its cap].
   // `may_stop`: the enemy phase may end early once the outcome is cut (its
   // value is then only the bound; ranking callers want the real one).
-  Interval leaf(const Board& b, const Score& alpha, bool lazy = false, bool may_stop = true) {
+  //
+  // Grid survival (SolveOptions::grid_survival): each outcome's GridSurvival
+  // says whether the grid survived it; the leaf's are the odds over all of
+  // them and its rest the worst outcome's of its class (above). Until every
+  // outcome is known the odds are only bounded (upper), so the cut and the
+  // early stop of the phase differ while alpha may lose the grid. `key`
+  // receives LeafMemo::key.
+  Interval leaf(const Board& b, const Score& alpha, bool lazy = false, bool may_stop = true, Score* key = nullptr) {
     const bool la = o_.lookahead;
+    const bool surv = o_.grid_survival;
     lazy = lazy && la;
-    BoardHash key{};
+    BoardHash hkey{};
     if (o_.use_tt) {
-      key = hash_board(b, HashMode::EndTurn);
+      hkey = hash_board(b, HashMode::EndTurn);
       LeafMemo memo;
-      if (sh_.leaf.get(key, memo) && (may_stop || !memo.stopped) &&
+      if (sh_.leaf.get(hkey, memo) && (may_stop || !memo.stopped) &&
           (memo.v.exact() || memo.v.hi <= alpha || lazy)) {
         ++stats_.leaf_hits;
+        if (key) *key = memo.key;
         return memo.v;
       }
     }
     if (o_.use_tt && sh_.prior && may_stop) {
       LeafMemo memo;
-      if (const_cast<Shared*>(sh_.prior)->leaf.get(key, memo) && memo.v.hi <= alpha) {
+      if (const_cast<Shared*>(sh_.prior)->leaf.get(hkey, memo) && memo.v.hi <= alpha) {
         ++stats_.prior_hits;
+        if (key) *key = memo.key;
         return Interval{kLow, memo.v.hi};
       }
     }
@@ -822,8 +1050,29 @@ class Worker {
       PhaseResult pr;
     };
     std::vector<Pending> pending;
-    Score worst = kHigh;
+    Score worst = kHigh;  // every outcome so far
+    Score alive = kHigh;  // grid_survival: the outcomes so far that kept the grid
+    ChanceTree tree;      // grid_survival: every outcome so far, and their odds
+    std::vector<int32_t> vals;
     bool cut = false;
+    // Grid survival: the phase may only stop early, and one outcome settle
+    // the cut, while alpha surely keeps the grid (odds 1): then an outcome
+    // that loses it puts this leaf's odds below alpha's at once, as it put
+    // GridLost below alpha's without the odds. Under a lower alpha every
+    // outcome's share of the odds counts.
+    const bool sure = !surv || alpha.v[kSurvival] >= kSurvivalOne;    // An upper bound on this leaf's value from the outcomes so far. Odds:
+    // every outcome not yet run counted as surviving. Rest: if every outcome
+    // so far kept the grid, the worst of them (odds 1 needs every outcome to
+    // keep it); odds 0, the worst of them; odds above 0, the worst outcome
+    // that kept the grid, if any so far.
+    size_t checked = 0;
+    auto upper = [&]() -> Score {
+      if (!surv || worst.v[kSurvival] >= kSurvivalOne) return worst;
+      if (sure) return with_odds(kHigh, kSurvivalOne - 1);
+      const int32_t odds = tree.survival(sh_.resist_p, vals);
+      if (odds <= 0) return with_odds(worst, 0);
+      return with_odds(alive.v[kSurvival] >= kSurvivalOne ? alive : kHigh, odds);
+    };
     const EnumEnd end = enumerate_chance(driver_, o_.max_chance_leaves, stats_.chance_branches, [&] {
       Board after = b;
       const Clock::time_point t0 = Clock::now();
@@ -831,7 +1080,9 @@ class Worker {
       // Stop the phase once the board's tier bound is <= alpha: grid power
       // and building HP never rise (TierBounds), so the rest of the phase
       // cannot lift this outcome above it.
-      if (o_.use_bounds && may_stop) tc_.stop_early = [&](const Board& mid) { return sh_.bounds.of(mid) <= alpha; };
+      if (o_.use_bounds && may_stop && sure) {
+        tc_.stop_early = [&](const Board& mid) { return sh_.bounds.of(mid) <= alpha; };
+      }
       const PhaseResult pr = e_.end_turn(after, tc_);
       tc_.stop_early = nullptr;
       stats_.enemy_phase_s += seconds_since(t0);
@@ -840,7 +1091,12 @@ class Worker {
       if (pr.stopped) {
         ++stats_.phases_stopped;
         stopped_early = true;
-        worst = std::min(worst, sh_.bounds.of(after));
+        const Score bound = sh_.bounds.of(after);
+        worst = std::min(worst, bound);
+        if (surv) {
+          tree.add(ChanceLeaf{driver_.calls(), static_cast<int>(vals.size())});
+          vals.push_back(bound.v[kSurvival]);
+        }
         cut = true;
         return false;
       }
@@ -851,7 +1107,21 @@ class Worker {
         sh_.note("objective progress above its derived cap (objective_progress_cap is unsound here)");
       }
       worst = std::min(worst, s);
-      if (worst <= alpha) {
+      if (surv) {
+        if (s.v[kSurvival] >= kSurvivalOne) alive = std::min(alive, s);
+        tree.add(ChanceLeaf{driver_.calls(), static_cast<int>(vals.size())});
+        vals.push_back(s.v[kSurvival]);
+        // Folding the odds sorts the outcomes so far: under an alpha that
+        // may lose the grid, try the cut after 1, 2, 4, 8, ... outcomes.
+        const bool cheap = worst.v[kSurvival] >= kSurvivalOne || sure;
+        if (cheap || vals.size() >= 2 * checked) {
+          if (!cheap) checked = vals.size();
+          if (upper() <= alpha) {
+            cut = true;
+            return false;
+          }
+        }
+      } else if (worst <= alpha) {
         cut = true;
         return false;
       }
@@ -861,38 +1131,83 @@ class Worker {
     if (end == EnumEnd::Truncated) sh_.chance_exact = false;
     if (cut) ++stats_.chance_cutoffs;
     Interval r = cut ? Interval{kLow, worst} : Interval{worst, worst};
+    // Grid survival, every outcome known (a truncated tree counts those it
+    // did not reach as surviving; chance_exact is off then): the odds, and
+    // the class whose worst outcome gives the rest.
+    int32_t odds = kSurvivalOne;
+    bool in_class_alive = false;
+    if (surv) {
+      if (cut) {
+        r.hi = upper();
+      } else {
+        odds = tree.survival(sh_.resist_p, vals);
+        in_class_alive = odds > 0;
+        const Score& cls = in_class_alive ? alive : worst;
+        r = Interval{with_odds(cls, odds), with_odds(cls, odds)};
+      }
+    }
     if (la && !cut) {
       const int32_t floor = lookahead_floor(o_.lookahead_options);
       auto floor_of = [floor](Score s) {
         s[ScoreKey::NextTurn] = floor;
         return s;
       };
+      // Grid survival: only the outcomes of the class count.
+      auto outside = [&](const Pending& p) { return in_class_alive && p.s.v[kSurvival] < kSurvivalOne; };
       if (lazy) {
         Score lo = kHigh;
-        for (const Pending& p : pending) lo = std::min(lo, floor_of(p.s));
+        for (const Pending& p : pending) {
+          if (!outside(p)) lo = std::min(lo, floor_of(p.s));
+        }
         r = Interval{lo, worst};
+        if (surv) r = Interval{with_odds(lo, odds), with_odds(in_class_alive ? alive : worst, odds)};
       } else {
         // Outcomes in increasing order of their bound; one whose lowest
         // possible value cannot go below the minimum so far is skipped.
         std::stable_sort(pending.begin(), pending.end(),
                          [](const Pending& x, const Pending& y) { return x.s < y.s; });
+        // Grid survival: the odds are known. The rest decides against alpha
+        // only when the odds equal alpha's, so the class's outcomes are
+        // compared with alpha at their own odds; odds below alpha's: cut
+        // now; above: no cut.
+        Score a = alpha;
+        bool done = false;
+        if (surv) {
+          const Score whole = with_odds(in_class_alive ? alive : worst, odds);  // NextTurn at its cap
+          if (whole <= alpha) {
+            r = Interval{kLow, whole};
+            cut = done = true;
+          } else if (odds == alpha.v[kSurvival]) {
+            a.v[kSurvival] = in_class_alive ? kSurvivalOne : worst.v[kSurvival];
+          } else {
+            a = kLow;
+          }
+        }
         Score exact = kHigh;
         for (const Pending& p : pending) {
-          if (floor_of(p.s) >= exact) continue;
+          if (done) break;
+          if (outside(p) || floor_of(p.s) >= exact) continue;
           Score s = p.s;
           bool stopped = false;
-          s[ScoreKey::NextTurn] = next_turn_value_of(p.s, p.after, p.pr, alpha, stopped);
+          s[ScoreKey::NextTurn] = next_turn_value_of(p.s, p.after, p.pr, a, stopped);
           exact = std::min(exact, s);
-          if (stopped || exact <= alpha) {
+          if (stopped || exact <= a) {
             cut = true;
             break;
           }
         }
         if (cut) ++stats_.chance_cutoffs;
-        r = cut ? Interval{kLow, exact} : Interval{exact, exact};
+        if (!done) {
+          r = cut ? Interval{kLow, exact} : Interval{exact, exact};
+          if (surv) {
+            r.hi.v[kSurvival] = odds;
+            if (!cut) r.lo.v[kSurvival] = odds;
+          }
+        }
       }
     }
-    if (o_.use_tt) sh_.leaf.put(key, LeafMemo{r, stopped_early}, merge_leaf);
+    if (o_.use_tt) sh_.leaf.put(hkey, LeafMemo{r, stopped_early, worst}, merge_leaf);
+    if (key) *key = worst;
     return r;
   }
 
@@ -926,8 +1241,11 @@ class Worker {
   // engine refuses it or nothing happens. `area`: the skill's target area on
   // b, when unit_actions computed it cleanly (ActionOptions::known_area);
   // `effect`: the shot's pure effect (ActionOptions::known_effect).
+  // `tree` (grid survival): receives the chance tree, each leaf reaching its
+  // outcome's index in `outs`.
   bool execute(const Board& b, SubAction& act, std::vector<Outcome>& outs,
-               const std::vector<Point>* area = nullptr, const SkillEffect* effect = nullptr) {
+               const std::vector<Point>* area = nullptr, const SkillEffect* effect = nullptr,
+               ChanceTree* tree = nullptr) {
     outs.clear();
     bool refused = false;
     aopts_.known_area = area;
@@ -945,10 +1263,10 @@ class Worker {
       }
       driver_.mark_random(r.resolve.chances);
       const BoardHash h = hash_board(next, HashMode::Search);
-      for (const Outcome& o : outs) {
-        if (o.hash == h) return true;
-      }
-      outs.push_back(Outcome{std::move(next), h});
+      size_t k = 0;
+      while (k < outs.size() && outs[k].hash != h) ++k;
+      if (k == outs.size()) outs.push_back(Outcome{std::move(next), h});
+      if (tree) tree->add(ChanceLeaf{driver_.calls(), static_cast<int>(k)});
       return true;
     });
     aopts_.known_area = nullptr;
@@ -1119,6 +1437,7 @@ class Worker {
           c.act = act;
           c.act.chance = out[twin->child].act.chance;
           c.outcomes = out[twin->child].outcomes;
+          c.tree = out[twin->child].tree;
           if (c.outcomes.size() == 1) {  // (a single outcome is in `seen`: never reached)
             ++stats_.duplicate_children;
             continue;
@@ -1128,7 +1447,11 @@ class Worker {
         }
       }
       Child c;
-      if (!execute(b, act, c.outcomes, acts.area_of(i), fx ? &*fx : nullptr)) continue;
+      ChanceTree tree;
+      if (!execute(b, act, c.outcomes, acts.area_of(i), fx ? &*fx : nullptr, o_.grid_survival ? &tree : nullptr)) {
+        continue;
+      }
+      if (o_.grid_survival && c.outcomes.size() > 1) c.tree = std::make_shared<ChanceTree>(std::move(tree));
       if (verify_effects_ && fx) {
         // The shot run with its known effect must match a run that builds it.
         SubAction a = act;
@@ -1197,9 +1520,15 @@ class Worker {
       std::vector<State> next;
       auto consider = [&](Outcome& o, std::vector<SubAction> line, bool chance_free, uint32_t played) {
         if (!seen.insert(o.hash).second) return;
-        const Interval end = leaf(o.board, alpha_of(kLow), o_.lookahead, false);
+        const Score a = alpha_of(kLow);
+        Score old_key = kHigh;
+        const Interval end = leaf(o.board, a, o_.lookahead, false, &old_key);
         if (chance_free && end.exact()) improve(end.lo, line);
-        next.push_back(State{std::move(o.board), std::move(line), chance_free, played, end.hi});
+        // Grid survival: the beam ranks by the old key (LeafMemo::key: the
+        // worst outcome, each with its own odds 1 or 0), so it keeps what it
+        // kept without the odds (a leaf cut on its odds has lost its order).
+        next.push_back(State{std::move(o.board), std::move(line), chance_free, played,
+                             o_.grid_survival ? old_key : end.hi});
       };
       for (const State& st : beam) {
         for (size_t u = 0; u < units.size(); ++u) {
@@ -1301,17 +1630,23 @@ class Worker {
     return line;
   }
 
-  // V over the chance outcomes of one child: the minimum.
-  Interval chance_node(Child& c, Score alpha, const Score& beta, std::vector<SubAction>* pv, int depth) {
+  // alpha_of, except in a `local` search (below a grid survival chance node
+  // whose odds may be below alpha's): there the window is the node's own.
+  Score raise(const Score& alpha, bool local) { return local ? alpha : alpha_of(alpha); }
+
+  // V over the chance outcomes of one child: the minimum (with grid
+  // survival: chance_odds).
+  Interval chance_node(Child& c, Score alpha, const Score& beta, std::vector<SubAction>* pv, int depth, bool local) {
+    if (o_.grid_survival && c.tree) return chance_odds(c, alpha, beta, pv, depth, local);
     Score lo = kHigh, hi = kHigh;
     for (size_t k = 0; k < c.outcomes.size(); ++k) {
       std::vector<SubAction> sub;
       const Interval r = search(c.outcomes[k].board, c.outcomes[k].hash, alpha, std::min(beta, hi), false,
-                                k == 0 ? &sub : nullptr, depth + 1);
+                                k == 0 ? &sub : nullptr, depth + 1, local);
       if (k == 0 && pv) *pv = std::move(sub);
       lo = std::min(lo, r.lo);
       hi = std::min(hi, r.hi);
-      if (k + 1 < c.outcomes.size() && (hi <= alpha_of(alpha) || aborted_)) {
+      if (k + 1 < c.outcomes.size() && (hi <= raise(alpha, local) || aborted_)) {
         if (!aborted_) ++stats_.chance_cutoffs;
         return Interval{kLow, hi};  // the outcomes left can only lower it
       }
@@ -1319,11 +1654,108 @@ class Worker {
     return Interval{lo, hi};
   }
 
+  // Grid survival: V over the outcomes of one child is their odds folded
+  // over the action's chance tree, its rest the worst of its class
+  // (combine_odds). While alpha surely keeps the grid (odds 1) the node
+  // only beats alpha if every outcome has odds 1, where the fold is the
+  // minimum: the outcomes are searched as before (alpha, beta lowered to
+  // the bound so far). Under a lower alpha a weighted outcome may matter even
+  // below alpha (Star1): each outcome is searched in a `local` window, with
+  // no incumbent raise, cut only where its odds alone would put the node's
+  // odds below alpha's, the other outcomes counted at their upper bounds
+  // (outcomes not searched yet at their tier bound: odds 0 once the grid
+  // is gone). Thresholds only fall short of what is needed (the others'
+  // bounds only drop later), so after one pass either some outcome was cut
+  // and the node's odds are below alpha's, or every outcome is exact. An
+  // outcome with no grid left (odds 0 for sure) is only searched when the
+  // node's odds may be 0 and alpha's are not above 0: its rest counts then.
+  Interval chance_odds(Child& c, const Score& alpha, const Score& beta, std::vector<SubAction>* pv, int depth,
+                       bool local) {
+    const size_t n = c.outcomes.size();
+    ChanceTree& tree = *c.tree;
+    const double p = sh_.resist_p;
+    std::vector<Interval> r(n, Interval{kLow, kHigh});
+    Score a = raise(alpha, local);
+    const bool sure = a.v[kSurvival] >= kSurvivalOne;
+    std::vector<size_t> order;
+    if (sure) {
+      for (size_t k = 0; k < n; ++k) order.push_back(k);
+    } else {
+      for (size_t k = 0; k < n; ++k) r[k].hi = sh_.bounds.of(c.outcomes[k].board);
+      for (int dead = 0; dead < 2; ++dead) {
+        for (size_t k = 0; k < n; ++k) {
+          if ((r[k].hi.v[kSurvival] <= 0) == (dead == 1)) order.push_back(k);
+        }
+      }
+    }
+    for (size_t i = 0; i < order.size(); ++i) {
+      const size_t k = order[i];
+      Score ak = alpha, bk = beta;
+      bool loc = local;
+      if (sure) {
+        bk = std::min(beta, combine_odds(tree, p, r).hi);
+      } else if (r[k].hi.v[kSurvival] <= 0) {
+        // No grid left: its rest only counts when the node's odds are 0,
+        // which puts the node at or below an alpha with odds above 0.
+        const Interval now = combine_odds(tree, p, r);
+        if (a.v[kSurvival] > 0 || now.lo.v[kSurvival] > 0) continue;
+        ak = a;  // odds 0 for all: the minimum, alpha as it is
+        bk = kHigh;
+        loc = true;
+      } else if (a.v[kSurvival] <= 0) {
+        // Alpha's odds are 0: an outcome at or below alpha has odds 0 and
+        // only counts when the node's odds are 0 too (the minimum then).
+        ak = a;
+        bk = kHigh;
+        loc = true;
+      } else {
+        // The highest odds of outcome k that, with the others at their
+        // upper bounds, still leave the node's odds below alpha's.
+        std::vector<int32_t> vals(n);
+        for (size_t j = 0; j < n; ++j) vals[j] = clamp_odds(r[j].hi.v[kSurvival]);
+        const int32_t target = a.v[kSurvival] - 1;
+        auto odds_at = [&](int32_t t) {
+          vals[k] = t;
+          return tree.survival(p, vals);
+        };
+        int32_t t = -1;
+        if (odds_at(0) <= target) {
+          int32_t lo = 0, hi = kSurvivalOne;
+          while (lo < hi) {
+            const int32_t mid = lo + (hi - lo + 1) / 2;
+            if (odds_at(mid) <= target) {
+              lo = mid;
+            } else {
+              hi = mid - 1;
+            }
+          }
+          t = lo;
+        }
+        ak = t >= 0 ? with_odds(kHigh, t) : kLow;  // cut iff the outcome's odds are <= t
+        bk = kHigh;
+        loc = true;
+      }
+      std::vector<SubAction> sub;
+      const Interval rk = search(c.outcomes[k].board, c.outcomes[k].hash, ak, bk, false, k == 0 ? &sub : nullptr,
+                                 depth + 1, loc);
+      if (k == 0 && pv) *pv = std::move(sub);
+      r[k] = Interval{std::max(r[k].lo, rk.lo), std::min(r[k].hi, rk.hi)};
+      if (r[k].hi < r[k].lo) r[k] = rk;  // (only a truncated chance tree disagrees)
+      a = raise(alpha, local);
+      const Interval now = combine_odds(tree, p, r);
+      if (i + 1 < order.size() && (now.hi <= a || aborted_)) {
+        if (!aborted_) ++stats_.chance_cutoffs;
+        return Interval{kLow, now.hi};
+      }
+    }
+    return combine_odds(tree, p, r);
+  }
+
   Interval search(const Board& b, const BoardHash& h, Score alpha, const Score& beta, bool chance_free,
-                  std::vector<SubAction>* pv, int depth) {
+                  std::vector<SubAction>* pv, int depth, bool local = false) {
     if (pv) pv->clear();
     if (budget_exceeded()) return Interval{kLow, sh_.bounds.of(b)};
-    alpha = alpha_of(alpha);
+    alpha = raise(alpha, local);
     if (o_.use_tt) {
       TTEntry e;
       if (sh_.tt.get(h, e)) {
@@ -1362,7 +1794,7 @@ class Worker {
     SubAction best_act;
     bool has_best = false;
     if (chance_free && end.exact()) improve(end.lo, {});
-    alpha = std::max(alpha_of(alpha), lo);
+    alpha = std::max(raise(alpha, local), lo);
 
     const Score ub = sh_.bounds.of(b);
     auto finish = [&](Interval r) {
@@ -1393,7 +1825,7 @@ class Worker {
     if (o_.order_children) {
       for (Child& c : children) {
         if (budget_exceeded()) break;
-        const Score a = alpha_of(alpha);
+        const Score a = raise(alpha, local);
         if (o_.use_bounds) {
           // A child its tier bound cuts (visit) needs no end-of-turn value.
           Score cub = kLow;
@@ -1405,7 +1837,16 @@ class Worker {
         }
         Score key = kHigh;
         const bool may_stop = sh_.prefix_mode.load(std::memory_order_relaxed);
-        for (const Outcome& oc : c.outcomes) key = std::min(key, leaf(oc.board, a, true, may_stop).hi);
+        // Grid survival: the old key (LeafMemo::key), so children are tried
+        // in the order they were without the odds (on boards where every
+        // line can lose the grid it also finds the best odds sooner than the
+        // odds' bounds do: fewer buildings hit, fewer rolls).
+        const bool old_key = o_.grid_survival;
+        for (const Outcome& oc : c.outcomes) {
+          Score k = kHigh;
+          const Interval v = leaf(oc.board, a, true, may_stop, &k);
+          key = std::min(key, old_key ? k : v.hi);
+        }
         c.order = key;
       }
       std::stable_sort(children.begin(), children.end(),
@@ -1418,7 +1859,7 @@ class Worker {
     std::vector<size_t> later;
     bool cut = false;
     auto visit = [&](Child& c) {
-      alpha = std::max(alpha_of(alpha), lo);
+      alpha = std::max(raise(alpha, local), lo);
       if (o_.use_bounds) {
         Score cub = kLow;
         for (const Outcome& oc : c.outcomes) cub = std::max(cub, sh_.bounds.of(oc.board));
@@ -1432,9 +1873,9 @@ class Worker {
       path_.push_back(c.act);
       Interval r;
       if (c.outcomes.size() == 1) {
-        r = search(c.outcomes[0].board, c.outcomes[0].hash, alpha, beta, chance_free, &sub, depth + 1);
+        r = search(c.outcomes[0].board, c.outcomes[0].hash, alpha, beta, chance_free, &sub, depth + 1, local);
       } else {
-        r = chance_node(c, alpha, beta, &sub, depth);
+        r = chance_node(c, alpha, beta, &sub, depth, local);
         Score inc;
         const bool has = incumbent(inc);
         if (chance_free && r.lo > kLow && (!has || r.lo > inc)) improve(r.lo, sub);
@@ -1507,11 +1948,21 @@ struct Seed {
 
 // `prior`: tables of an earlier search whose upper bounds hold for this one
 // (Shared::prior). `keep`: receives this search's tables.
+// `survey` (grid survival): search only lines that surely keep the grid
+// (Shared::survey), and give up after `survey->first` seconds or
+// `survey->second` nodes without one. `found`: whether a plan was found.
 SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options,
-                        const Seed* seed, const Shared* prior = nullptr, std::unique_ptr<Shared>* keep = nullptr) {
+                        const Seed* seed, const Shared* prior = nullptr, std::unique_ptr<Shared>* keep = nullptr,
+                        const std::pair<double, uint64_t>* survey = nullptr, bool* found = nullptr) {
   auto owned = std::make_unique<Shared>(board, ctx, options);
   Shared& sh = *owned;
   sh.prior = prior;
+  if (survey) {
+    sh.survey = true;
+    sh.floor = with_odds(kLow, kSurvivalOne);
+    sh.survey_s = survey->first;
+    sh.survey_nodes = survey->second;
+  }
   // Hands the tables over on every return (after the workers are gone).
   struct Keep {
     std::unique_ptr<Shared>& owned;
@@ -1582,6 +2033,7 @@ SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& c
   out.timed_out = !sh.completed;
   out.extended = sh.prefix_mode;
   out.warnings = sh.warnings;
+  if (found) *found = sh.has_incumbent;
   if (!sh.has_incumbent) return out;
   if (sh.seeded) {
     out.best.actions = sh.seeded_actions;
@@ -1632,6 +2084,67 @@ SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& c
   return out;
 }
 
+void add_stats(SolveStats& out, const SolveStats& in) {
+  out.nodes += in.nodes;
+  out.sub_actions += in.sub_actions;
+  out.enemy_phases += in.enemy_phases;
+  out.chance_branches += in.chance_branches;
+  out.tt_hits += in.tt_hits;
+  out.leaf_hits += in.leaf_hits;
+  out.duplicate_children += in.duplicate_children;
+  out.bound_prunes += in.bound_prunes;
+  out.chance_cutoffs += in.chance_cutoffs;
+  out.leaf_evals += in.leaf_evals;
+  out.phases_stopped += in.phases_stopped;
+  out.same_effect_shots += in.same_effect_shots;
+  out.same_effect_mismatches += in.same_effect_mismatches;
+  out.children += in.children;
+  out.generate_s += in.generate_s;
+  out.order_s += in.order_s;
+  for (size_t d = 0; d < out.depth_nodes.size(); ++d) out.depth_nodes[d] += in.depth_nodes[d];
+  out.sub_action_s += in.sub_action_s;
+  out.enemy_phase_s += in.enemy_phase_s;
+}
+
+// The survey's share of the budget (search_survival).
+constexpr double kSurveyShare = 0.25;
+
+// Grid survival without a seed: first a survey (search_turn `survey`) that
+// only searches lines surely keeping the grid, the incumbent floored at
+// odds 1, so it runs as the search without the odds (an outcome losing the
+// grid cuts at once). As soon as it finds such a line, that line's odds are
+// 1 and every line that can lose the grid ranks below it: the survey is the
+// whole search, with the whole budget. If it finds none within
+// kSurveyShare of the budget (or proves there is none), the search with the
+// odds runs on what is left. Lines that can lose the grid are only searched
+// where no line keeps it for sure (searching them under an incumbent below
+// odds 1 costs more: no cut by building HP and below, outcomes weighed).
+SolveResult search_survival(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options,
+                            std::unique_ptr<Shared>* keep = nullptr) {
+  if (!options.grid_survival) return search_turn(engine, board, ctx, options, nullptr, nullptr, keep);
+  const Clock::time_point t0 = Clock::now();
+  const std::pair<double, uint64_t> survey{
+      options.time_limit_s > 0 ? options.time_limit_s * kSurveyShare : 0,
+      options.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(options.node_limit * kSurveyShare)) : 0};
+  bool found = false;
+  SolveResult first = search_turn(engine, board, ctx, options, nullptr, nullptr, keep, &survey, &found);
+  if (found) return first;
+  const double used = seconds_since(t0);
+  SolveOptions rest = options;
+  if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
+  if (options.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, options.max_time_s - used);
+  if (options.node_limit > 0) {
+    rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, first.stats.nodes));
+  }
+  SolveResult out = search_turn(engine, board, ctx, rest, nullptr, nullptr, keep);
+  add_stats(out.stats, first.stats);
+  out.stats.survey_s = used;
+  out.stats.time_s = seconds_since(t0);
+  out.stats.first_plan_s += used;
+  out.stats.best_plan_s += used;
+  return out;
+}
+
 }  // namespace
 
 // With the lookahead, a search without it first (LookaheadOptions::
@@ -1640,7 +2153,7 @@ SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& c
 // incumbent of the lookahead search, which gets the rest of the budget.
 SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options) {
   const double share = options.lookahead_options.base_share;
-  if (!options.lookahead || share <= 0) return search_turn(engine, board, ctx, options, nullptr);
+  if (!options.lookahead || share <= 0) return search_survival(engine, board, ctx, options);
   const Clock::time_point t0 = Clock::now();
   SolveOptions base = options;
   base.lookahead = false;
@@ -1655,12 +2168,12 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
     const double cap = whole * std::max(share, options.lookahead_options.base_max_share);
     if (cap > base.time_limit_s) {
       base.max_time_s = cap;
-      base.min_proven_tiers = static_cast<int>(ScoreKey::NextTurn);  // grid, buildings, mechs, stars
+      base.min_proven_tiers = 4;  // grid, buildings, mechs, stars: the tiers above NextTurn
     }
   }
   base.node_limit = options.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(options.node_limit * share)) : 0;
   std::unique_ptr<Shared> base_tables;
-  const SolveResult first = search_turn(engine, board, ctx, base, nullptr, nullptr, &base_tables);
+  const SolveResult first = search_survival(engine, board, ctx, base, &base_tables);
   const double used = seconds_since(t0);
   SolveOptions rest = options;
   if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
@@ -1675,25 +2188,7 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   SolveResult out = search_turn(engine, board, ctx, rest, seed ? &*seed : nullptr, base_tables.get());
   base_tables.reset();
   // Both searches' work and time.
-  out.stats.nodes += first.stats.nodes;
-  out.stats.sub_actions += first.stats.sub_actions;
-  out.stats.enemy_phases += first.stats.enemy_phases;
-  out.stats.chance_branches += first.stats.chance_branches;
-  out.stats.tt_hits += first.stats.tt_hits;
-  out.stats.leaf_hits += first.stats.leaf_hits;
-  out.stats.duplicate_children += first.stats.duplicate_children;
-  out.stats.bound_prunes += first.stats.bound_prunes;
-  out.stats.chance_cutoffs += first.stats.chance_cutoffs;
-  out.stats.leaf_evals += first.stats.leaf_evals;
-  out.stats.phases_stopped += first.stats.phases_stopped;
-  out.stats.same_effect_shots += first.stats.same_effect_shots;
-  out.stats.same_effect_mismatches += first.stats.same_effect_mismatches;
-  out.stats.children += first.stats.children;
-  out.stats.generate_s += first.stats.generate_s;
-  out.stats.order_s += first.stats.order_s;
-  for (size_t d = 0; d < out.stats.depth_nodes.size(); ++d) out.stats.depth_nodes[d] += first.stats.depth_nodes[d];
-  out.stats.sub_action_s += first.stats.sub_action_s;
-  out.stats.enemy_phase_s += first.stats.enemy_phase_s;
+  add_stats(out.stats, first.stats);
   out.stats.first_plan_s = first.stats.first_plan_s;
   out.stats.best_plan_s += used;
   out.stats.time_s = seconds_since(t0);
@@ -1723,6 +2218,72 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   return out;
 }
 
+namespace {
+
+// evaluate_plan with grid survival: one run of the plan and its enemy phase
+// per chance leaf. `player`: the chance calls of the player's actions, each
+// with the index of its sub-action (a move, then the weapon or repair, per
+// PlayerAction); `enemy`: those of the enemy phase.
+struct PlanRun {
+  std::vector<std::pair<int, ChanceCall>> player;
+  std::vector<ChanceCall> enemy;
+  Score s;
+};
+
+// The value of the plan from player call `d` on, for runs that share their
+// first d player calls, as the search values it (chance_odds, leaf): the
+// enemy phase's odds and class once the player calls end; else the odds of
+// the sub-action at call d folded over its outcomes (one per path through
+// its calls), each valued from there on, and the worst of its class.
+Score plan_value(const std::vector<PlanRun>& runs, const std::vector<size_t>& ids, size_t d, double p) {
+  const PlanRun& first = runs[ids[0]];
+  if (first.player.size() <= d) {
+    ChanceTree tree;
+    std::vector<int32_t> vals;
+    Score worst = kHigh, alive = kHigh;
+    for (size_t id : ids) {
+      const PlanRun& r = runs[id];
+      tree.add(ChanceLeaf{r.enemy, static_cast<int>(vals.size())});
+      vals.push_back(r.s.v[kSurvival]);
+      worst = std::min(worst, r.s);
+      if (r.s.v[kSurvival] >= kSurvivalOne) alive = std::min(alive, r.s);
+    }
+    const int32_t odds = tree.survival(p, vals);
+    return with_odds(odds > 0 ? alive : worst, odds);
+  }
+  const int sub = first.player[d].first;
+  // Group the runs by their path through this sub-action's calls.
+  std::map<std::vector<int>, std::vector<size_t>> groups;
+  std::map<std::vector<int>, std::vector<ChanceCall>> paths;
+  for (size_t id : ids) {
+    const PlanRun& r = runs[id];
+    std::vector<int> key;
+    std::vector<ChanceCall> path;
+    for (size_t i = d; i < r.player.size() && r.player[i].first == sub; ++i) {
+      key.push_back(r.player[i].second.chosen);
+      path.push_back(r.player[i].second);
+    }
+    groups[key].push_back(id);
+    paths.emplace(key, std::move(path));
+  }
+  ChanceTree tree;
+  std::vector<Score> values;
+  std::vector<int32_t> vals;
+  for (const auto& [key, members] : groups) {
+    tree.add(ChanceLeaf{paths[key], static_cast<int>(values.size())});
+    values.push_back(plan_value(runs, members, d + key.size(), p));
+    vals.push_back(values.back().v[kSurvival]);
+  }
+  const int32_t odds = tree.survival(p, vals);
+  Score cls = kHigh;
+  for (const Score& v : values) {
+    if (odds <= 0 || v.v[kSurvival] > 0) cls = std::min(cls, v);
+  }
+  return with_odds(cls, odds);
+}
+
+}  // namespace
+
 std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const TurnContext& ctx,
                                    const std::vector<PlayerAction>& plan, const SolveOptions& options,
                                    std::string* refused) {
@@ -1736,8 +2297,15 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
   Score worst = kHigh;
   bool bad = false;
   uint64_t extra = 0;
+  // Grid survival: every run, its chance calls tagged by sub-action.
+  std::vector<PlanRun> runs;
+  std::vector<int> tags;  // the sub-action of each player call of this run
+  auto tag = [&](int sub) {
+    while (tags.size() < d.calls().size()) tags.push_back(sub);
+  };
   auto ok = [](const ActionResult& r) { return r.ok() || r.status == ActionStatus::NoEffect; };
   enumerate_chance(d, options.max_chance_leaves, extra, [&] {
+    tags.clear();
     Board b = board;
     for (size_t i = 0; i < plan.size(); ++i) {
       const PlayerAction& a = plan[i];
@@ -1751,6 +2319,7 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
           return false;
         }
         d.mark_random(r.resolve.chances);
+        tag(static_cast<int>(2 * i));
       }
       if (a.kind == PlayerAction::Kind::None) continue;
       engine.lua().seed(kLuaSeed);
@@ -1764,7 +2333,9 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
         return false;
       }
       d.mark_random(r.resolve.chances);
+      tag(static_cast<int>(2 * i + 1));
     }
+    const size_t player_calls = d.calls().size();
     engine.lua().seed(kLuaSeed);
     const PhaseResult pr = engine.end_turn(b, tc);
     d.mark_random(pr.chances);
@@ -1773,9 +2344,22 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
       s[ScoreKey::NextTurn] = lookahead_value(engine, board, b, &pr, tc, options.lookahead_options);
     }
     worst = std::min(worst, s);
+    if (options.grid_survival) {
+      const std::vector<ChanceCall>& calls = d.calls();
+      PlanRun run;
+      for (size_t i = 0; i < player_calls; ++i) run.player.emplace_back(tags[i], calls[i]);
+      run.enemy.assign(calls.begin() + static_cast<std::ptrdiff_t>(player_calls), calls.end());
+      run.s = s;
+      runs.push_back(std::move(run));
+    }
     return true;
   });
   if (bad) return std::nullopt;
+  if (options.grid_survival && !runs.empty()) {
+    std::vector<size_t> ids(runs.size());
+    for (size_t i = 0; i < ids.size(); ++i) ids[i] = i;
+    worst = plan_value(runs, ids, 0, resist_chance(board, ctx));
+  }
   return worst;
 }
 

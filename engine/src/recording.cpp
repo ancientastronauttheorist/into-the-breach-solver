@@ -389,6 +389,30 @@ std::optional<FinalEnvState> final_env(const json& s, const char* key) {
 void load_objectives(const json& s, Recording& rec);
 void load_mission_ext(const json& s, Recording& rec);
 
+// MissionData::grid_defense, the game's Grid Defense chance (PowerBar::
+// GetDefense 0x008ed5c0: base + overpower bonus + pilot bonus). An explicit
+// "grid_defense" (percent) wins; else it is built from "grid_overflow", the
+// save's GameData.overflow (the overpower bonus PowerBar keeps, at most 25):
+// base 15, 0 on Unfair (PowerBar's constructor), plus 3 for each squad
+// pilot whose learned level-up skills include Grid (Pilot::GetDefBonus;
+// SquadControl::GetDefBonus sums the squad). Neither: -1 (unknown).
+void load_grid_defense(const json& s, Recording& rec) {
+  MissionData& m = rec.mission;
+  if (auto it = s.find("grid_defense"); it != s.end() && it->is_number()) {
+    m.grid_defense = std::clamp(it->get<int>(), 0, 100);
+    return;
+  }
+  auto ov = s.find("grid_overflow");
+  if (ov == s.end() || !ov->is_number()) return;
+  int pct = (m.difficulty == 3 ? 0 : 15) + std::max(0, ov->get<int>());
+  constexpr int kGrid = static_cast<int>(LevelSkill::Grid);
+  for (const Pawn& p : rec.board.pawns()) {
+    if (!p.mech || p.team != Team::Player) continue;
+    if ((p.pilot_level >= 1 && p.pilot_skill1 == kGrid) || (p.pilot_level >= 2 && p.pilot_skill2 == kGrid)) pct += 3;
+  }
+  m.grid_defense = std::clamp(pct, 0, 100);
+}
+
 // Stage 7 mission data: environment marks and the env/mission fields newer
 // bridges export (stage 7 spec section 2.4).
 void load_mission(const json& s, Recording& rec) {
@@ -883,6 +907,7 @@ std::optional<Recording> load_recording(const std::filesystem::path& path,
     }
   }
   load_mission(s, rec);
+  load_grid_defense(s, rec);
   reconcile_conveyors(rec);
   load_spawn_queue(s, rec);
   if (auto it = s.find("attack_order"); it != s.end() && it->is_array()) {

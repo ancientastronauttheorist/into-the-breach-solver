@@ -280,17 +280,26 @@ TEST_CASE("threat: score tier and tier views") {
   CHECK(off.describe().find("threat") == std::string::npos);
   CHECK(s.describe(true).find("threat=-2") != std::string::npos);
   CHECK(off.describe() == "grid=0 bldg_hp=0 mechs=0 obj_fail=0 mech_hp=0 obj=0 kills=0 vek_hp=0 position=-1");
-  // Tier counts.
-  CHECK(used_tier_count(false) == kScoreKeys - 2);
-  CHECK(used_tier_count(true) == kScoreKeys - 1);
-  CHECK(used_tier_count(kTierThreat | kTierNextTurn) == kScoreKeys);
-  CHECK(components_for_tiers(4, false) == 4);
-  CHECK(components_for_tiers(5, false) == 7);  // grid .. mech HP, NextTurn and Threat (0) inside
-  CHECK(components_for_tiers(5, true) == 6);   // grid .. threat, NextTurn (0) inside
-  CHECK(components_for_tiers(5, kTierNextTurn) == 5);  // grid .. next turn
-  CHECK(components_for_tiers(6, kTierThreat | kTierNextTurn) == 6);  // grid .. threat
+  // Tier counts. GridSurvival (component 0) is never a tier of its own: it
+  // goes with the grid tier, on or off.
+  CHECK(used_tier_count(false) == kScoreKeys - 3);
+  CHECK(used_tier_count(true) == kScoreKeys - 2);
+  CHECK(used_tier_count(kTierThreat | kTierNextTurn) == kScoreKeys - 1);
+  CHECK(used_tier_count(kTierThreat | kTierNextTurn | kTierSurvival) == kScoreKeys - 1);
+  CHECK(components_for_tiers(1, false) == 2);  // survival (0 when off) and grid
+  CHECK(components_for_tiers(1, kTierSurvival) == 2);
+  CHECK(components_for_tiers(4, false) == 5);
+  CHECK(components_for_tiers(5, false) == 8);  // grid .. mech HP, NextTurn and Threat (0) inside
+  CHECK(components_for_tiers(5, true) == 7);   // grid .. threat, NextTurn (0) inside
+  CHECK(components_for_tiers(5, kTierNextTurn) == 6);  // grid .. next turn
+  CHECK(components_for_tiers(6, kTierThreat | kTierNextTurn) == 7);  // grid .. threat
   CHECK(components_for_tiers(9, false) == kScoreKeys);
   CHECK(components_for_tiers(0, true) == 0);
+  // Printing shows the survival odds only with grid survival on.
+  Score odds = off;
+  odds[ScoreKey::GridSurvival] = kSurvivalOne / 4;
+  CHECK(odds.describe() == off.describe());
+  CHECK(odds.describe(kTierSurvival).starts_with("survival=0.2500 grid=0 "));
 }
 
 TEST_CASE("threat: the tier changes the plan; off, nothing changes") {

@@ -145,9 +145,10 @@ ACTION_TIMEOUT = 60.0
 MIN_TIERS = 5
 
 # The engine's score tiers in rank order (itb_live score JSON keys);
-# "next_turn" is only present with --lookahead, "threat" with --threat-tier.
-SCORE_TIERS = ("grid", "building_hp", "mechs", "objectives_failed", "next_turn", "threat", "mech_hp",
-               "objectives", "kills", "vek_hp", "position")
+# "next_turn" is only present with --lookahead, "threat" with --threat-tier,
+# "grid_survival" (a probability, part of the grid tier) with --grid-survival.
+SCORE_TIERS = ("grid_survival", "grid", "building_hp", "mechs", "objectives_failed", "next_turn", "threat",
+               "mech_hp", "objectives", "kills", "vek_hp", "position")
 
 # Psions whose mutation gives every Vek +1 HP (and max HP) the moment they
 # arrive (engine Leader 1 Soldier Psion, 7 Psion Abomination): a hidden spawn
@@ -323,7 +324,8 @@ class Engine:
               threat_tier: bool = False, threat_kills: bool = False, objectives_first: bool = False,
               mech_grid: int = -1, mech_grid_turns: bool = False, mech_grid_pilot: bool = False,
               lookahead: bool = False, lookahead_samples: int | None = None,
-              lookahead_reply: str | None = None, lookahead_fold: str | None = None) -> dict:
+              lookahead_reply: str | None = None, lookahead_fold: str | None = None,
+              grid_survival: bool = False) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
         min_tiers score tiers are proven, up to max_time. threat_tier: rank by
@@ -333,7 +335,9 @@ class Engine:
         mech_grid_pilot never below its pilot's level). lookahead: rank by
         the next-turn loss estimate (SolveOptions::lookahead: sampled AI
         plans, a greedy reply; lookahead_samples AI seeds, lookahead_reply
-        'greedy' or 'idle', lookahead_fold 'worst' or 'sum')."""
+        'greedy' or 'idle', lookahead_fold 'worst' or 'sum'). grid_survival:
+        when every line can lose the grid, rank by the odds that Grid Defense
+        keeps it (SolveOptions::grid_survival)."""
         req = {"cmd": "solve", "state": str(path), "time_limit": time_limit, "threads": self.threads}
         if min_tiers > 0 and max_time > time_limit:
             req.update(max_time=max_time, min_tiers=min_tiers)
@@ -357,6 +361,8 @@ class Engine:
                 req["lookahead_reply"] = lookahead_reply
             if lookahead_fold:
                 req["lookahead_fold"] = lookahead_fold
+        if grid_survival:
+            req["grid_survival"] = True
         return self.request(req)
 
     def predict(self, path: Path, plan: list) -> dict:
@@ -1213,14 +1219,34 @@ def ranking_options(args) -> dict:
             extra["lookahead_reply"] = args.lookahead_reply
         if getattr(args, "lookahead_fold", None):
             extra["lookahead_fold"] = args.lookahead_fold
+    if getattr(args, "grid_survival", False):
+        extra["grid_survival"] = True
     return extra
+
+
+def save_grid_overflow(path: Path | None = None) -> int | None:
+    """The Grid Defense overpower bonus from the game's save (GameData's
+    "overflow", which PowerBar saves; the engine adds the base 15, 0 on
+    Unfair, and +3 per Grid pilot), for bridges that do not export
+    grid_overflow. None when the file or the field is missing."""
+    path = path or PROFILE / "saveData.lua"
+    try:
+        head = path.read_text(errors="replace")[:4096]
+    except OSError:
+        return None
+    m = re.search(r'\["overflow"\]\s*=\s*(-?\d+)', head)
+    return int(m.group(1)) if m else None
 
 
 def plan_summary(pred: dict) -> str:
     if not pred.get("searched", True):
         return "no active unit (nothing to solve)"
     wc = pred.get("worst_case") or {}
-    tiers = " ".join(f"{k}={wc[k]}" for k in SCORE_TIERS if k in wc)
+    tiers = " ".join(f"{k}={wc[k]:.4f}" if k == "grid_survival" and isinstance(wc[k], float) else f"{k}={wc[k]}"
+                     for k in SCORE_TIERS if k in wc)
+    gd = pred.get("grid_defense")
+    if gd and "grid_survival" in wc:
+        tiers += f" (Grid Defense {gd.get('percent')}%, {gd.get('source')})"
     proof = "proven optimal" if pred.get("proven_optimal") else \
         f"best found, optimal in the first {pred.get('proven_components', 0)} tiers"
     if pred.get("extended"):
@@ -1344,6 +1370,13 @@ def play_turn(ctx) -> list:
     def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
         solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history)
+        # --grid-survival needs the game's Grid Defense chance: an older
+        # bridge does not export it, the save has its overpower bonus.
+        if getattr(args, "grid_survival", False) and "grid_overflow" not in solver_input \
+                and "grid_defense" not in solver_input:
+            overflow = save_grid_overflow()
+            if overflow is not None:
+                solver_input["grid_overflow"] = patches["grid_overflow"] = overflow
         for n in notes:
             say(f"  note: {n}")
         path = run.save_state(solver_input, label, {"patches": patches} if patches else None)
@@ -2066,6 +2099,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="with --lookahead: the next-turn reply policy (default greedy)")
     ranking.add_argument("--lookahead-fold", choices=("worst", "sum"), default=None,
                          help="with --lookahead: rank by the worst AI sample or by their sum (default worst)")
+    ranking.add_argument("--grid-survival", action="store_true",
+                         help="when every line can lose the grid, rank lines by the odds that Grid Defense keeps "
+                              "it through the turn (the game's Grid Defense chance from the bridge or the save); "
+                              "any line that surely keeps the grid ranks as before and beats them all")
     engine = argparse.ArgumentParser(add_help=False, parents=[ranking])
     engine.add_argument("--time", type=float, default=10.0,
                         help="base solver time per solve (s): the search stops here once --min-tiers are proven")

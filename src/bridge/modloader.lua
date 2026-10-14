@@ -187,6 +187,7 @@ local function _empty_save_result()
         network = nil,
         networkMax = nil,
         difficulty = nil,     -- GameData.difficulty (0=Easy, 1=Normal, 2=Hard, 3=Unfair)
+        overflow = nil,       -- GameData.overflow: the Grid Defense overpower bonus (percent, <= 25)
         queued_shots = {},
         queued_origins = {},  -- [pawn_id] = {x, y} from piOrigin (attack queue source)
         queued_targets = {},  -- [pawn_id] = {x, y} from piTarget (leap/melee landing tile)
@@ -260,6 +261,11 @@ local function _read_save_data_uncached(content)
     if net then result.network = tonumber(net) end
     local netMax = content:match('%["networkMax"%]%s*=%s*(%d+)')
     if netMax then result.networkMax = tonumber(netMax) end
+    -- Grid Defense overpower bonus (the power bar saves it beside network /
+    -- networkMax): with the difficulty's base and the pilots' Grid skill it
+    -- gives the resist chance (the engine adds those up).
+    local overflow = content:match('%["overflow"%]%s*=%s*(%-?%d+)')
+    if overflow then result.overflow = tonumber(overflow) end
 
     -- In-game difficulty: 0=Easy, 1=Normal, 2=Hard, 3=Unfair. Authoritative
     -- live value (the Python session.difficulty drifts after Timeline Lost
@@ -2627,6 +2633,15 @@ local function dump_state(out_path, out_tmp)
     -- without parsing Lua. See cmd_auto_turn difficulty cross-check.
     state.difficulty = save_data.difficulty
         or (GameData and GameData.difficulty) or 0
+
+    -- Grid Defense: the save's overpower bonus (read-only; absent when
+    -- neither the save nor GameData has it). The engine's loader adds the
+    -- base (15, 0 on Unfair) and +3 per pilot with the Grid skill.
+    local grid_overflow = save_data.overflow
+    if grid_overflow == nil and GameData and type(GameData.overflow) == "number" then
+        grid_overflow = GameData.overflow
+    end
+    if grid_overflow ~= nil then state.grid_overflow = grid_overflow end
 
     -- RNG seeds for grid-defense resist prediction probe. master_seed is the
     -- run-lifetime constant; mission_seeds is a {region_key -> aiSeed} map

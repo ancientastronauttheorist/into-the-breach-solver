@@ -232,6 +232,39 @@ const char* kExtBoard = R"({
 
 }  // namespace
 
+TEST_CASE("the Grid Defense chance comes from the state, else stays unknown") {
+  // PowerBar::GetDefense: base 15 (0 on Unfair) + the save's overpower bonus
+  // (GameData.overflow) + 3 per squad pilot with the Grid level-up skill
+  // (id 2) learned; an explicit grid_defense wins; neither: -1.
+  auto state = [](const std::string& extra, int skill1, int level) {
+    return R"({"tiles": [], "units": [
+        {"uid": 0, "type": "PunchMech", "x": 3, "y": 3, "hp": 3, "max_hp": 3, "team": 1, "mech": true,
+         "pilot": {"id": "Pilot_Original", "level": )" +
+           std::to_string(level) + R"(, "skill1": )" + std::to_string(skill1) + R"(, "skill2": 5}}])" + extra + "}";
+  };
+  std::string error;
+  auto rec = load_text("itb_recording_defense.json", state("", 2, 1), &error);
+  REQUIRE_MESSAGE(rec.has_value(), error);
+  CHECK(rec->mission.grid_defense == -1);
+  CHECK(rec->board.grid_defense == 15);  // the chance nodes' switch is untouched
+  rec = load_text("itb_recording_defense.json", state(R"(, "grid_overflow": 10, "difficulty": 2)", 0, 1), &error);
+  REQUIRE(rec.has_value());
+  CHECK(rec->mission.grid_defense == 25);
+  rec = load_text("itb_recording_defense.json", state(R"(, "grid_overflow": 25, "difficulty": 3)", 0, 2), &error);
+  REQUIRE(rec.has_value());
+  CHECK(rec->mission.grid_defense == 25);  // Unfair: no base
+  rec = load_text("itb_recording_defense.json", state(R"(, "grid_overflow": 25, "difficulty": 3)", 2, 1), &error);
+  REQUIRE(rec.has_value());
+  CHECK(rec->mission.grid_defense == 28);  // a Grid pilot
+  rec = load_text("itb_recording_defense.json", state(R"(, "grid_overflow": 25, "difficulty": 3)", 2, 0), &error);
+  REQUIRE(rec.has_value());
+  CHECK(rec->mission.grid_defense == 25);  // not learned yet
+  rec = load_text("itb_recording_defense.json", state(R"(, "grid_overflow": 4, "grid_defense": 33)", 2, 1), &error);
+  REQUIRE(rec.has_value());
+  CHECK(rec->mission.grid_defense == 33);
+  CHECK(rec->board.grid_defense == 15);
+}
+
 TEST_CASE("loads the bridge extension fields") {
   std::string error;
   auto rec = load_text("itb_recording_ext.json", kExtBoard, &error);
