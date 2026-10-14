@@ -265,6 +265,47 @@ TEST_CASE("the Grid Defense chance comes from the state, else stays unknown") {
   CHECK(rec->board.grid_defense == 15);
 }
 
+TEST_CASE("the Grid Defense base follows the difficulty the power bar was built under") {
+  // The HUD's GRID DEFENSE against the save's GameData.overflow, all Unfair,
+  // no Grid pilot (recordings/live/20261014_045942 and 20261014_120745).
+  // Runs 21 and 23 were new runs played without a restart: HUD = overflow.
+  // Run 22 was continued after a game restart with settings.lua's difficulty
+  // Hard, so its power bar has the base 15 (the bridge's grid_defense_base).
+  auto state = [](int overflow, const std::string& extra) {
+    return R"({"tiles": [], "difficulty": 3, "grid_overflow": )" + std::to_string(overflow) + extra +
+           R"(, "units": [{"uid": 0, "type": "PunchMech", "x": 3, "y": 3, "hp": 3, "max_hp": 3, "team": 1,
+           "mech": true, "pilot": {"id": "Pilot_Archive", "level": 2, "skill1": 13, "skill2": 8}}]})";
+  };
+  struct Case {
+    int overflow;
+    const char* extra;
+    int hud;
+  };
+  const Case cases[] = {
+      // Run 21 (saves m10 6, m18 8, m20 13, m26 17, m30 22, m34 25 "Max").
+      {6, "", 6}, {8, "", 8}, {13, "", 13}, {17, "", 17}, {22, "", 22}, {25, "", 25},
+      // Run 23 (m00 0, m06 4, m10 10, m16 16, m20 25).
+      {0, R"(, "grid_defense_base": 0)", 0}, {4, "", 4}, {10, "", 10}, {16, "", 16}, {25, "", 25},
+      // Run 22 after the restart (m42 0, the +6 reward 6, m52 12, m58 16, m70 24, m72 25).
+      {0, R"(, "grid_defense_base": 15)", 15}, {6, R"(, "grid_defense_base": 15)", 21},
+      {12, R"(, "grid_defense_base": 15)", 27}, {16, R"(, "grid_defense_base": 15)", 31},
+      {24, R"(, "grid_defense_base": 15)", 39}, {25, R"(, "grid_defense_base": 15)", 40},
+  };
+  for (const Case& c : cases) {
+    std::string error;
+    auto rec = load_text("itb_recording_defense_base.json", state(c.overflow, c.extra), &error);
+    REQUIRE_MESSAGE(rec.has_value(), error);
+    CHECK_MESSAGE(rec->mission.grid_defense == c.hud, "overflow " << c.overflow << c.extra);
+  }
+  // A Hard run continued under Unfair settings has no base.
+  std::string error;
+  auto rec = load_text("itb_recording_defense_base.json",
+                       R"({"tiles": [], "units": [], "difficulty": 2, "grid_overflow": 8, "grid_defense_base": 0})",
+                       &error);
+  REQUIRE_MESSAGE(rec.has_value(), error);
+  CHECK(rec->mission.grid_defense == 8);
+}
+
 TEST_CASE("loads the bridge extension fields") {
   std::string error;
   auto rec = load_text("itb_recording_ext.json", kExtBoard, &error);

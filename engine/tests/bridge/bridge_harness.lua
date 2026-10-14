@@ -429,6 +429,40 @@ do
     X._debug_at = nil
 end
 
+-- Grid Defense base: the difficulty the power bar was built under.
+do
+    eq(st.grid_defense_base, nil, "no Grid Defense base before a game is built")
+    local real_difficulty, real_game_data = GetDifficulty, rawget(_G, "GameData")
+    -- Continue after a restart: Game::LoadGame runs the save (a new GameData
+    -- table, then CreateEffect) under the settings file's Hard; then
+    -- GameMap::LoadGame sets the save's Unfair.
+    GetDifficulty = function() return 2 end
+    GameData = {overflow = 0}
+    local e = CreateEffect({cores = 1})
+    eq(e.effect.cores, 1, "CreateEffect result passed through")
+    GetDifficulty = function() return 3 end
+    CreateEffect({})
+    X._dump_state()
+    st = load_state()
+    eq(st.grid_defense_base, 15, "continued under Hard settings: base 15")
+    eq(st.grid_base_difficulty, 2, "difficulty behind the base")
+    -- Reset Turn: a new map and the undo save under the save's difficulty.
+    GameData = {overflow = 0}
+    CreateEffect({})
+    X._dump_state()
+    st = load_state()
+    eq(st.grid_defense_base, 0, "Reset Turn under Unfair: no base")
+    -- A new run chosen on Hard.
+    GetDifficulty = function() return 2 end
+    local before = MOCK_NEW_GAMES or 0
+    startNewGame()
+    eq(MOCK_NEW_GAMES, before + 1, "original startNewGame ran")
+    X._dump_state()
+    st = load_state()
+    eq(st.grid_defense_base, 15, "new run on Hard: base 15")
+    GetDifficulty, GameData = real_difficulty, real_game_data
+end
+
 ---------------------------------------------------------------- commands
 local CUR_M = M  -- the mission BaseUpdate runs for (the final section swaps it)
 local function run_command(cmd, max_frames)

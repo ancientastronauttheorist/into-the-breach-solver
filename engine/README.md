@@ -1136,13 +1136,27 @@ of the turn, in units of 10^-9 (`kSurvivalOne`).
   line is not traded for a mech either). Equal odds (0 for all when nothing
   can resist) fall back to the old order.
 - The Grid Defense chance p: the game's `PowerBar::GetDefense` (0x008ed5c0)
-  is a base of 15 (0 on Unfair, set by the power bar's constructor), plus
-  the overpower bonus (`ModifyPowerGrid` past a full grid: +2 per point while
-  below 10, then +1, at most 25; the save's `GameData.overflow`), plus 3 per
-  squad pilot whose learned level-up skills include Grid
-  (`SquadControl::GetDefBonus`). The bridge exports `grid_overflow` from the
-  save; the loader (`load_grid_defense`) adds the base by difficulty and the
-  Grid pilots into `MissionData::grid_defense` (a state may also give
+  is a base, plus the overpower bonus (`ModifyPowerGrid` past a full grid:
+  +2 per point while below 10, then +1, at most 25; the save's
+  `GameData.overflow`), plus 3 per squad pilot whose learned level-up skills
+  include Grid (`SquadControl::GetDefBonus`). This is the HUD's GRID DEFENSE
+  figure. The base is 15, or 0 when `Settings::GetDifficulty()` is Unfair
+  at the moment the power bar is built (its constructor, 0x008ed180), and
+  nothing saves or reloads it. It is built with each `GameMap`: by
+  `Game::StartGame` (a new run: the difficulty just chosen) and by
+  `Game::LoadGame` (Continue, Reset Turn), which builds the map and runs the
+  save file before `GameMap::LoadGame` sets the save's difficulty. So a run
+  continued right after the game starts gets the base of the settings
+  file's difficulty (`settings.lua`, 1 when absent), not the save's: run 22
+  (Unfair, continued after a restart with Hard in `settings.lua`) showed
+  overflow + 15 on the HUD, 15% to 40%, while runs 21 and 23 (Unfair, new
+  runs, no restart) showed the overflow alone, at most 25%. The bridge sees
+  the build (`startNewGame`, and the save file's first `CreateEffect` after
+  a new `GameData` table) and exports `grid_defense_base` (0 or 15) with
+  `grid_base_difficulty`, and `grid_overflow` from the save; the loader
+  (`load_grid_defense`) adds the base (without `grid_defense_base`: by the
+  save's difficulty, right for new runs and after Reset Turn) and the Grid
+  pilots into `MissionData::grid_defense` (a state may also give
   `grid_defense` in percent). Unknown (older states): `Board::grid_defense`,
   15. It only feeds the odds: the chance nodes still branch whenever
   `Board::grid_defense` > 0 and predictions follow the default outcome (no

@@ -838,6 +838,9 @@ factory_methods.CreatePawn = bind("PawnFactory", "CreatePawn", {{"string"}, {"st
 function SetPawn(pawn) Pawn = pawn end
 
 function GetDifficulty() return 1 end
+-- events.lua / game.lua (the bridge wraps both to see the Grid Defense base).
+function CreateEffect(data) return {effect = data} end
+function startNewGame() MOCK_NEW_GAMES = (MOCK_NEW_GAMES or 0) + 1 end
 function IsRelease() return true end
 function IsNewEnemies() return true end
 function IsPassiveSkill() return false end

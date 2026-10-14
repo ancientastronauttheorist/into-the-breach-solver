@@ -392,10 +392,22 @@ void load_mission_ext(const json& s, Recording& rec);
 // MissionData::grid_defense, the game's Grid Defense chance (PowerBar::
 // GetDefense 0x008ed5c0: base + overpower bonus + pilot bonus). An explicit
 // "grid_defense" (percent) wins; else it is built from "grid_overflow", the
-// save's GameData.overflow (the overpower bonus PowerBar keeps, at most 25):
-// base 15, 0 on Unfair (PowerBar's constructor), plus 3 for each squad
-// pilot whose learned level-up skills include Grid (Pilot::GetDefBonus;
-// SquadControl::GetDefBonus sums the squad). Neither: -1 (unknown).
+// save's GameData.overflow (the overpower bonus PowerBar keeps, at most 25),
+// plus 3 for each squad pilot whose learned level-up skills include Grid
+// (Pilot::GetDefBonus; SquadControl::GetDefBonus sums the squad), plus the
+// base. Neither: -1 (unknown).
+//
+// The base is 15, or 0 when Settings::GetDifficulty() is Unfair at the
+// moment PowerBar's constructor (0x008ed180) runs; nothing saves or reloads
+// it. The power bar is built with each GameMap: by Game::StartGame (a new
+// run, the difficulty just chosen) and by Game::LoadGame (Continue, Reset
+// Turn), which builds the map before GameMap::LoadGame sets the save's
+// difficulty. So a run continued right after the game starts gets the base
+// of the settings file's difficulty, not the save's: runs 21-23 (Unfair)
+// showed exactly overflow on the HUD, but run 22 after a restart (settings
+// difficulty Hard) showed overflow + 15, up to 40%. The bridge exports the
+// base it saw as "grid_defense_base"; without it the save's difficulty
+// decides (right for a new run and after Reset Turn).
 void load_grid_defense(const json& s, Recording& rec) {
   MissionData& m = rec.mission;
   if (auto it = s.find("grid_defense"); it != s.end() && it->is_number()) {
@@ -404,7 +416,9 @@ void load_grid_defense(const json& s, Recording& rec) {
   }
   auto ov = s.find("grid_overflow");
   if (ov == s.end() || !ov->is_number()) return;
-  int pct = (m.difficulty == 3 ? 0 : 15) + std::max(0, ov->get<int>());
+  int base = m.difficulty == 3 ? 0 : 15;
+  if (auto b = s.find("grid_defense_base"); b != s.end() && b->is_number()) base = std::max(0, b->get<int>());
+  int pct = base + std::max(0, ov->get<int>());
   constexpr int kGrid = static_cast<int>(LevelSkill::Grid);
   for (const Pawn& p : rec.board.pawns()) {
     if (!p.mech || p.team != Team::Player) continue;

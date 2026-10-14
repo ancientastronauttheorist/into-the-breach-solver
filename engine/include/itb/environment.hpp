@@ -107,7 +107,8 @@ struct MissionData {
   std::vector<int32_t> launching;  // satellite rockets with a queued launch
   int difficulty = -1;
   // The game's Grid Defense chance in percent (PowerBar::GetDefense): base
-  // 15 (0 on Unfair) + the overpower bonus (save GameData.overflow) + 3 per
+  // 15 (0 when the power bar was built under Unfair settings; see
+  // load_grid_defense) + the overpower bonus (save GameData.overflow) + 3 per
   // squad pilot with the Grid level-up skill. -1: the state does not carry
   // it. Only the solver's grid survival odds read it; the chance nodes
   // themselves depend on Board::grid_defense alone.

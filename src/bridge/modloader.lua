@@ -2635,13 +2635,19 @@ local function dump_state(out_path, out_tmp)
         or (GameData and GameData.difficulty) or 0
 
     -- Grid Defense: the save's overpower bonus (read-only; absent when
-    -- neither the save nor GameData has it). The engine's loader adds the
-    -- base (15, 0 on Unfair) and +3 per pilot with the Grid skill.
+    -- neither the save nor GameData has it) and the power bar's base as
+    -- the bridge saw it built (ITBX.grid_base; absent when unknown). The
+    -- engine's loader adds them and +3 per pilot with the Grid skill.
     local grid_overflow = save_data.overflow
     if grid_overflow == nil and GameData and type(GameData.overflow) == "number" then
         grid_overflow = GameData.overflow
     end
     if grid_overflow ~= nil then state.grid_overflow = grid_overflow end
+    local ok_base, grid_base, grid_base_difficulty = pcall(ITBX.grid_base)
+    if ok_base and grid_base ~= nil then
+        state.grid_defense_base = grid_base
+        state.grid_base_difficulty = grid_base_difficulty
+    end
 
     -- RNG seeds for grid-defense resist prediction probe. master_seed is the
     -- run-lifetime constant; mission_seeds is a {region_key -> aiSeed} map
@@ -6588,6 +6594,61 @@ if _orig_PlanEnvironment then
     Mission.PlanEnvironment = function(self, ...)
         ITBX.hook_work("on_plan_environment", ITBX.on_plan_environment, self, dump_state)
         return _orig_PlanEnvironment(self, ...)
+    end
+end
+
+--------------------------------------------------------------------
+-- Grid Defense base. PowerBar's constructor (0x008ed180) sets it to 15, or
+-- 0 when Settings::GetDifficulty() is Unfair, and nothing saves or reloads
+-- it. The power bar is built with each GameMap: by Game::StartGame (a new
+-- run: the difficulty just chosen) and by Game::LoadGame (Continue, Reset
+-- Turn), which builds the map and runs the save file before
+-- GameMap::LoadGame sets the save's difficulty. A run continued right
+-- after the game starts so gets the settings file's difficulty (an Unfair
+-- run continued under Hard settings shows overflow + 15). The bridge reads
+-- GetDifficulty() at the first Lua call between the build and that change:
+-- startNewGame() (GameMap::Start of a new run) and the save file's first
+-- CreateEffect (the file assigns a new GameData table first, then builds
+-- RegionData's rewards with CreateEffect). Both wraps call the original
+-- once, outside pcall, and return its results.
+_ITB_BRIDGE_ORIGINALS.CreateEffect =
+    _ITB_BRIDGE_ORIGINALS.CreateEffect or rawget(_G, "CreateEffect")
+_ITB_BRIDGE_ORIGINALS.startNewGame =
+    _ITB_BRIDGE_ORIGINALS.startNewGame or rawget(_G, "startNewGame")
+
+function ITBX.note_grid_base(source)
+    local d = GetDifficulty()
+    if type(d) == "number" then
+        _ITB_BRIDGE_GRID_BASE = {difficulty = d, source = source}
+    end
+end
+
+-- The base the bridge saw (0 or 15) and the difficulty behind it; nil
+-- when no game was started or loaded since the bridge loaded.
+function ITBX.grid_base()
+    local g = _ITB_BRIDGE_GRID_BASE
+    if type(g) ~= "table" or type(g.difficulty) ~= "number" then return nil end
+    return (g.difficulty == 3) and 0 or 15, g.difficulty, g.source
+end
+
+local _orig_CreateEffect = _ITB_BRIDGE_ORIGINALS.CreateEffect
+local _orig_startNewGame = _ITB_BRIDGE_ORIGINALS.startNewGame
+
+if type(_orig_CreateEffect) == "function" then
+    CreateEffect = function(...)
+        local gd = rawget(_G, "GameData")
+        if type(gd) == "table" and not rawequal(gd, _ITB_BRIDGE_GRID_BASE_GAMEDATA) then
+            _ITB_BRIDGE_GRID_BASE_GAMEDATA = gd
+            pcall(ITBX.note_grid_base, "load")
+        end
+        return _orig_CreateEffect(...)
+    end
+end
+
+if type(_orig_startNewGame) == "function" then
+    startNewGame = function(...)
+        pcall(ITBX.note_grid_base, "new")
+        return _orig_startNewGame(...)
     end
 end
 
