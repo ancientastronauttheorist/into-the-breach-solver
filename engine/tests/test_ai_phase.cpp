@@ -355,3 +355,57 @@ TEST_CASE("deployment: outcome boards and a small search on a recorded drop zone
   const DeployResult rb = deploy_search(E, rec.board, ctx, zone, bad);
   CHECK_FALSE(rb.ok);
 }
+
+// Mission_Final (live run 24, m40): the seven pylon buildings drop at the
+// start of the enemy turn that follows the deployment (Mission_Final:
+// NextTurn at turn count 0), before the AI plans. The deployed board has
+// none of them; the turn-1 boards must, so the AI can aim at them and the
+// search values the placement by them.
+TEST_CASE("deployment: Mission_Final's pylons drop before the AI plans") {
+  NEED_ENGINE();
+  const Recording rec = fixture("live_final_t0_deployed.json");
+  REQUIRE(rec.mission.mission_id == "Mission_Final");
+  const TurnContext ctx = turn_context(rec, Visibility::Player);
+  const auto zone_it = rec.mission.zones.find("pylons");
+  REQUIRE(zone_it != rec.mission.zones.end());
+  const std::vector<Point> pylons = zone_it->second;
+  REQUIRE(pylons.size() == 7);
+  for (Point p : pylons) CHECK_FALSE(rec.board.tile(p).is_building());
+
+  // The enemy phase alone: the hook raises populated 2-HP buildings once.
+  Board phase = rec.board;
+  const PhaseResult pr = E.end_turn(phase, ctx);
+  CHECK(pr.count(PhaseEventType::MissionHook) == 1);
+  CHECK(pr.exact);
+  for (Point p : pylons) {
+    const Tile& t = phase.tile(p);
+    CHECK(t.is_building());
+    CHECK(t.hp == 2);
+    CHECK(t.max_hp == 2);
+    CHECK(t.populated);
+  }
+
+  const std::vector<int32_t> mechs = deploy_mechs(rec.board);
+  const std::vector<Point> live{{3, 6}, {2, 2}, {3, 4}};  // the live placement
+  int aimed = 0;
+  for (int s = 0; s < 4; ++s) {
+    Score cost;
+    const Board t1 = deploy_outcome(E, rec.board, ctx, mechs, live, deploy_sample_seed(1, s), &cost);
+    for (Point p : pylons) CHECK(t1.tile(p).hp == 2);
+    // Their arrival is no gain for the phase; nothing is lost yet.
+    CHECK(cost[ScoreKey::BuildingHpLost] == 0);
+    CHECK(cost[ScoreKey::GridLost] == 0);
+    for (const Pawn& p : t1.pawns()) {
+      if (p.team == Team::Enemy && p.queued.active() &&
+          std::find(pylons.begin(), pylons.end(), p.queued.target) != pylons.end()) {
+        ++aimed;
+      }
+    }
+    // Turn 1 does not drop them again.
+    Board end = t1;
+    const PhaseResult pr1 = E.end_turn(end, ctx);
+    CHECK(pr1.count(PhaseEventType::MissionHook) == 0);
+  }
+  MESSAGE("queued shots at pylons over 4 seeds: " << aimed);
+  CHECK(aimed > 0);
+}

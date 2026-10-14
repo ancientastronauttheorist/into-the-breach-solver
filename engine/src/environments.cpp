@@ -337,10 +337,24 @@ class SnowStormEnv final : public AttackEnv {
 // rocks are DAMAGE_DEATH + fire artillery from the super-volcano, lava turns
 // the tile into lava. Mission_Final:UpdateMission keeps the super-volcano
 // whole.
+//
+// Mission_Final:NextTurn, once, at the start of the enemy turn that follows
+// the deployment (turn count 0, enemy team; state 2, before the spawns and
+// the AI's planning): after a 4.5 s pause, every tile of the map's "pylons"
+// zone gets a building, in random order, 0.5 s apart. Each drop is a
+// SpaceDamage(tile, 0) with iTerrain = TERRAIN_BUILDING applied twice (two
+// AddDropper), which makes a populated 2-HP building. When the hook finds a
+// pawn (or corpse) on a pylon tile, that drop and every later one in its
+// draw order carry DAMAGE_DEATH (the script never resets it). The deploy UI
+// refuses pylon tiles and the mission blocks spawns there for good, so in
+// practice nothing stands on them; when something does, the zone order
+// stands in for the random one (EnvInexact).
 class VolcanoEnv final : public AttackEnv {
  public:
   explicit VolcanoEnv(const MissionData& m) {
     ordered_ = true;
+    if (auto it = m.zones.find("pylons"); it != m.zones.end()) pylons_ = it->second;
+    zones_known_ = !m.zones.empty();
     if (m.volcano && m.volcano->complete) {
       lava_ = m.volcano->mode == 2;
       locations_ = m.volcano->locations;
@@ -370,6 +384,36 @@ class VolcanoEnv final : public AttackEnv {
   std::string name() const override { return "Env_Volcano"; }
   void begin(EnvHost& host) override {
     if (ambiguous_) host.note(PhaseEventType::EnvInexact, "volcano mode unknown for a single marked tile (rocks used)");
+  }
+  void next_turn(EnvHost& host) override {
+    if (host.turn() != 0) return;
+    if (pylons_.empty()) {
+      if (!zones_known_) {
+        host.note(PhaseEventType::EnvInexact, "Mission_Final: no pylons zone recorded (the turn-0 building drop is left out)");
+      }
+      return;
+    }
+    const Board& b = host.board();
+    SkillEffect fx = hook_effect();
+    fx.add_delay(4.5f);
+    SpaceDamage drop = space_damage(Point{0, 0}, 0);
+    drop.terrain = static_cast<int>(Terrain::Building);
+    bool occupied = false;
+    for (Point p : pylons_) {
+      drop.loc = p;
+      if (pawn_space(b, p)) {
+        drop.damage = kDamageDeath;
+        occupied = true;
+      }
+      fx.add_dropper(drop, "combat/tiles_grass/building_fall.png");
+      fx.add_dropper(drop, "combat/tiles_grass/building_fall.png");
+      fx.add_delay(0.5f);
+    }
+    if (occupied) {
+      host.note(PhaseEventType::EnvInexact, "Mission_Final: a pawn on a pylon tile (the drop order is random; zone order used)");
+    }
+    host.add_effect(std::move(fx));
+    host.note(PhaseEventType::MissionHook, "the pylons drop", kInvalidPoint, -1, static_cast<int>(pylons_.size()));
   }
   bool has_update() const override { return true; }
   void update(EnvHost& host) override {
@@ -408,6 +452,8 @@ class VolcanoEnv final : public AttackEnv {
  private:
   bool lava_ = false;
   bool ambiguous_ = false;
+  std::vector<Point> pylons_;  // zone "pylons" (fixed by the map)
+  bool zones_known_ = false;
 };
 
 // Env_Final (missions/final/env_final.lua, Mission_Final_Cave): Ordered,

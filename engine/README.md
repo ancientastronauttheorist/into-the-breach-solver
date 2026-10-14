@@ -670,7 +670,7 @@ used when present.
 | Mission_SnowStorm (Env_SnowStorm) | 3x3 block frozen in one frame | exact (`environment_freeze`) |
 | Mission_Wind (Env_RandomWind) | two columns pushed from the downwind edge, 0.2 s after occupied rows | exact with `environment_wind_dir`; old recordings: chance node `EnvChoice` (Down/Up) + EnvInexact |
 | Mission_Belt / BeltRandom (Env_Belt) | belts push in `Belts` list order (downstream first), 0.2 s after occupied belts | exact with the bridge's `env_instance` Belts/BeltsDir; else from the tiles, exact unless chains feed each other; a belt breaking mid-phase is EnvInexact (CheckBelts quirk) |
-| Mission_Final (Env_Volcano) | rocks: fire artillery DAMAGE_DEATH; lava: tile to lava; super-volcano repaired | exact with `mission_final_volcano`; old: mode and order from the tile pattern (EnvInexact for a single tile) |
+| Mission_Final (Env_Volcano) | rocks: fire artillery DAMAGE_DEATH; lava: tile to lava; super-volcano repaired; NextTurn at turn 0 (the enemy phase after the deployment, before the spawns and the AI): the 7 pylons drop, a populated 2-HP building on every tile of zone `pylons` | exact with `mission_final_volcano`; old: mode and order from the tile pattern (EnvInexact for a single tile); pylons from the bridge zones (none recorded: EnvInexact, no drop) |
 | Mission_Final_Cave (Env_Final) | rocks drop (DAMAGE_DEATH, ground), tentacles (DAMAGE_DEATH, lava); bomb re-drop (UpdateMission on an idle board: in the enemy phase not before the status ticks and the environment's steps are done, so a bomb the Psion Tyrant kills comes back after the strikes, struck tiles allowed; a drop on a Vek kills it) | exact with `mission_final_cave`; old: phase from the turn number (EnvInexact), phase-2 order a chance node; bomb drop a chance node `MissionRandom` |
 | Mission_AcidStorm | every pawn ACID every frame while the generator lives | exact |
 | Mission_Shields | new pawns shielded; generator death drops every shield | assumes every recorded pawn already had its shield (`ShieldedUnits` not recorded) |
@@ -1928,7 +1928,14 @@ options)`:
    case over the sample.
 
 The turn-1 boards have no spawn markers and keep the deployment's
-environment data (both decided during that phase and hidden). Budget:
+environment data (both decided during that phase and hidden). Mission_Final
+raises its seven pylon buildings in that phase (`Mission_Final:NextTurn` at
+turn count 0, enemy team: state 2, before the spawns and the AI), so the
+deployed board has none of them and the turn-1 boards do; the AI aims at
+them and the phase's cost counts what happens to them, not their arrival
+(live run 24, m40: without them the search planned turn 1 on a board with
+no buildings; the drop tiles are fixed by each of the 15 final-island
+maps). Budget:
 `time_limit` (the screen takes at most half). Cost: a 14-tile zone has 364
 sets; 2 seeds each screened in 17 s on 2 threads (about 23 ms per AI phase
 and turn-1 end), and a turn-1 solve needs about 0.5 s to find the beam's

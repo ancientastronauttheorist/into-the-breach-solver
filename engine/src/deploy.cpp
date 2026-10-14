@@ -136,6 +136,10 @@ namespace {
 struct Placed {
   Board placed;
   Board before_ai;
+  // `placed` with the buildings the phase itself raised (Mission_Final's
+  // turn-0 pylon drop) as they landed: the phase's cost counts what happens
+  // to them, not their arrival.
+  Board scored_from;
 };
 
 Placed place(Engine& engine, const Board& deployed, const TurnContext& ctx, const std::vector<int32_t>& mechs,
@@ -150,6 +154,15 @@ Placed place(Engine& engine, const Board& deployed, const TurnContext& ctx, cons
   }
   out.before_ai = b;
   engine.end_turn(out.before_ai, ctx);
+  out.scored_from = b;
+  for (int x = 0; x < kBoardSize; ++x) {
+    for (int y = 0; y < kBoardSize; ++y) {
+      const Point p{x, y};
+      if (out.before_ai.tile(p).is_building() && !b.tile(p).is_building()) {
+        out.scored_from.tile(p) = out.before_ai.tile(p);
+      }
+    }
+  }
   return out;
 }
 
@@ -172,7 +185,7 @@ Board outcome(Engine& engine, const Placed& pl, const TurnContext& ctx, uint32_t
     if (p.controlled() && p.alive() && p.pos.valid() && p.movement.powered) p.active = true;
   }
   if (phase_cost) {
-    *phase_cost = score_turn(pl.placed, b, &ctx, nullptr, score_opts);
+    *phase_cost = score_turn(pl.scored_from, b, &ctx, nullptr, score_opts);
     // End-board tiers belong to turn 1's own score (its solve or the screen).
     (*phase_cost)[ScoreKey::Position] = 0;
     (*phase_cost)[ScoreKey::Threat] = 0;
