@@ -74,6 +74,12 @@ bool apply_board_write(Resolver& r, RulesContext& rules, const LuaWrite& w) {
     return false;
   }
   const Point* p = arg_point(w, 0);
+  if (m == "Bounce") {
+    const double* amount = arg_num(w, 1);
+    if (!p || !amount) return false;
+    r.bounce(*p, static_cast<int>(*amount));
+    return true;
+  }
   // Tile setters: off-board writes go to the game's dummy tile (no effect).
   if (m == "SetTerrain" || m == "SetLava" || m == "SetSmoke" || m == "SetFrozen" || m == "SetAcid" ||
       m == "SetCracked" || m == "AddShield" || m == "RemoveShield" || m == "SetItem") {

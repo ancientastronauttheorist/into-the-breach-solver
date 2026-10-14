@@ -804,6 +804,8 @@ const std::vector<Mutator>& board_mutators() {
        Ret::Int},
       {"AddEffect", {V{A::SE}, V{A::SD}}},
       {"DamageSpace", {V{A::SD}, V{A::Point, A::Int}}},
+      // Not only cosmetic: a bouncing tile is busy for 0.5 s (Resolver::bounce).
+      {"Bounce", {V{A::Point, A::Int}}},
       // Cosmetic / UI: checked but not reported.
       {"MarkSpaceImage", {V{A::Point, A::Str, A::Color}}, Ret::Void, false},
       {"MarkSpaceSimpleColor", {V{A::Point, A::Color}}, Ret::Void, false},
@@ -815,7 +817,6 @@ const std::vector<Mutator>& board_mutators() {
       {"AddAnimation", {V{A::Point, A::Str, A::Int}}, Ret::Void, false},
       {"AddAlert", {V{A::Point, A::Str}}, Ret::Void, false},
       {"AddBurst", {V{A::Point, A::Str, A::Int}}, Ret::Void, false},
-      {"Bounce", {V{A::Point, A::Int}}, Ret::Void, false},
       {"Ping", {V{A::Point, A::Color}}, Ret::Void, false},
       {"StartShake", {V{A::Num}}, Ret::Void, false},
       {"StartPopEvent", {V{A::Str}}, Ret::Void, false},

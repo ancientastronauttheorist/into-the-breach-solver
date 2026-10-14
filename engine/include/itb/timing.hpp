@@ -116,6 +116,8 @@ struct Durations {
   float fall = 0.4f;          // Pawn::Fall tracker: the pawn's default tracker length
   float hole = 0.5f;          // deferred chasm bounce (BounceAnim, eased)
   float hole_ease = 0.15f;    // its ease in/out
+  float bounce = 0.5f;        // Board:Bounce (SkillEffect:AddBounce): the tile's BounceAnim
+  float bounce_ease = 0.15f;  // its ease in/out, for amounts 0 and 100 only
   float teleport_out = 0.3f;  // estimate: teleport vanish animation
   float teleport_in = 0.3f;   // estimate: teleport appear animation
   float teleport_pause = 0.1f;  // AddDelay after a teleport lands

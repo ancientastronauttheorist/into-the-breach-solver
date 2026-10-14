@@ -12,6 +12,7 @@
 #include "itb/movement.hpp"
 #include "itb/pilot_xp.hpp"
 #include "itb/recording.hpp"
+#include "itb/timing.hpp"
 
 using namespace itb;
 
@@ -375,6 +376,83 @@ TEST_CASE("pilot xp: a kill heals with Viscera Nanobots, boosts a KO_Boost pilot
   CHECK(P(b, m).hp == 3);
   CHECK(P(b, m).boosted);
   CHECK(base_move(b, P(b, m)) == move_before + 1);
+}
+
+// Vice Fist (Prime_Shift) throws the target behind the mech; its damage lands
+// in a FULL_DELAY chunk with no animation, followed by AddBounce on that tile.
+// The bounce keeps the tile busy for 0.5 s, so the shot is still the last
+// shot when the victim's death is processed on the next frame: the kill is
+// the Judo's. Without the bounce's busy time the last shot ended first.
+TEST_CASE("pilot xp: a Vice Fist throw that kills heals with Viscera Nanobots") {
+  NEED_ENGINE();
+  Board b;
+  const int32_t m = place(b, "JudoMech", {3, 3}, true);
+  const int32_t v = place(b, "Mosquito1", {3, 4});
+  hp(b, v, 1, 2);
+  hp(b, m, 1, 3);
+  b.passives |= kPassiveLeechKill;
+  const ActionResult r = E.fire_weapon(b, m, "Prime_Shift", {3, 4});
+  REQUIRE(r.ok());
+  CHECK(dead(b, v));
+  CHECK(P(b, m).pos == Point{3, 3});
+  CHECK(P(b, m).hp == 2);
+}
+
+TEST_CASE("executor: Board:Bounce keeps the tile busy for 0.5 s") {
+  NEED_ENGINE();
+  auto frames = [&](const std::string& script, Point at) {
+    Board b;
+    place(b, "PunchMech", {0, 0}, true);
+    if (at.valid()) place(b, "Dam_Pawn", at);
+    SkillEffect fx;
+    SpaceDamage sd;
+    sd.script = script;
+    fx.effect.push_back(sd);
+    fx.owner = 0;
+    const ResolveResult r = E.resolve(b, fx, WeaponInfo{}, ActionOptions{});
+    return r.end_frame - r.start_frame;
+  };
+  const int64_t none = frames("", kInvalidPoint);
+  const int64_t bounce = frames("Board:Bounce(Point(3,3),3)", kInvalidPoint);
+  const int64_t half_second = FrameClock::steady().tracker_updates(0.5f);
+  CHECK(half_second >= 30);
+  CHECK(bounce - none == half_second);
+  // Off the board: the dummy tile bounces and nothing waits.
+  CHECK(frames("Board:Bounce(Point(-1,-1),3)", kInvalidPoint) == none);
+  // A small bounce skips a tile whose first pawn spans two tiles (the dam);
+  // a big one does not.
+  CHECK(frames("Board:Bounce(Point(3,3),3)", {3, 3}) == none);
+  CHECK(frames("Board:Bounce(Point(3,3),10)", {3, 3}) - none == half_second);
+}
+
+// ---- Recorded boards (live 2026-10-14, Unfair, Mission_Dam turn 3) ---------------------
+
+TEST_CASE("pilot xp: the Judo's throw kill heals it with Viscera Nanobots (live)") {
+  // Live 2026-10-14 run 23 (Unfair, m00 Mission_Dam, turn 3): JudoMech#0 on
+  // G3 (4/5 HP, acid) throws Mosquito1 (1 HP) from G4 to G2 with
+  // Prime_Shift; the NanoMech carries Passive_Leech. The game showed the
+  // Judo at 5 HP; the engine had credited the kill to nobody (4 HP).
+  NEED_ENGINE();
+  const Recording before = live_fixture("live_dam_t3_step1.json");
+  const Recording after = live_fixture("live_dam_t3_step2.json");
+  const TurnContext ctx = turn_context(before, Visibility::Player);
+  const int32_t judo = 0;
+  REQUIRE(symbol_name(before.board.find_pawn(judo)->type) == "JudoMech");
+  CHECK(before.board.find_pawn(judo)->hp == 4);
+  CHECK(before.board.has_passive(kPassiveLeechKill));
+
+  Board b = before.board;
+  const ActionResult r = E.fire_weapon(b, judo, "Prime_Shift", {4, 1}, std::nullopt, action_options(ctx));
+  REQUIRE(r.ok());
+  CHECK(r.unapplied.empty());
+  CHECK(P(b, judo).hp == 5);
+  for (const Pawn& q : after.board.pawns()) {
+    const Pawn* p = b.find_pawn(q.uid);
+    REQUIRE(p != nullptr);
+    CHECK_MESSAGE(p->hp == q.hp, symbol_name(q.type));
+    CHECK(p->pos == q.pos);
+  }
+  CHECK(dead(b, 16175));
 }
 
 // ---- Recorded boards (live 2026-10-10, Hard, Mission_Survive turn 2) -----------------
