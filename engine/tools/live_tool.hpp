@@ -31,7 +31,10 @@
 //       the deployment search (itb/deploy.hpp) on a state with the mechs on
 //       the board and a drop_zone (or deployment_zone): "best" and the ranked
 //       "finalists", tiles in ascending mech uid order ("placements": only
-//       those; "always": also those)
+//       those; "always": also those). The solve request's ranking options
+//       ("threat_tier" ... "lookahead", "lookahead_samples", ...) rank the
+//       search's turn-1 solves as the turns will be ranked (absent: plain
+//       tiers); the scores then carry those tiers
 //   {"cmd": "ping"}
 //
 // The state is a bridge dump (bare, or a recording wrapper with

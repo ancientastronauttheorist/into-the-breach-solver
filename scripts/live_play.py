@@ -365,10 +365,13 @@ class Engine:
     def board(self, path: Path) -> dict:
         return self.request({"cmd": "board", "state": str(path)})["board"]
 
-    def deploy(self, path: Path, time_limit: float, always: list | None = None) -> dict:
+    def deploy(self, path: Path, time_limit: float, always: list | None = None, ranking: dict | None = None) -> dict:
         """The engine's deployment search (itb_live deploy) on a state with
-        the mechs on the board: the best tiles, in ascending uid order."""
+        the mechs on the board: the best tiles, in ascending uid order.
+        ranking: the solve request's ranking options (ranking_options), for
+        the search's turn-1 solves."""
         req = {"cmd": "deploy", "state": str(path), "time_limit": time_limit, "threads": self.threads}
+        req.update(ranking or {})
         if always:
             req["always"] = [[list(p) for p in tiles] for tiles in always]
         return self.request(req)
@@ -1813,7 +1816,7 @@ def engine_deploy(ctx, path: Path, heuristic: list) -> dict | None:
         ctx.engine = Engine(args.threads, args.game, run.path / "itb_live.log")
     say(f"  engine deployment search ({args.search_time:.0f} s, {args.threads} thread(s))...")
     try:
-        reply = ctx.engine.deploy(path, args.search_time, always=[heuristic])
+        reply = ctx.engine.deploy(path, args.search_time, always=[heuristic], ranking=ranking_options(args))
     except (Refused, Anomaly) as e:
         say(f"  NOTE: the engine could not search this deployment ({e}); keeping the heuristic placement")
         run.event("deploy_search", {"error": str(e)})
@@ -2036,7 +2039,34 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--dry-run", action="store_true", help="solve / choose and print, never act")
     common.add_argument("--max-heartbeat-age", type=float, default=10.0, help="refuse if the heartbeat is older (s)")
     common.add_argument("--loadout", help="JSON {mech type: [weapon ids]} for bridges without weapons_exact")
-    engine = argparse.ArgumentParser(add_help=False)
+    # Ranking options: every turn solve, and the deployment search's turn-1 solves.
+    ranking = argparse.ArgumentParser(add_help=False)
+    ranking.add_argument("--threat-tier", action="store_true",
+                         help="experimental: rank plans by the next-turn threat tier (enemies able to hit a "
+                              "building next turn) between objectives failed and mech HP")
+    ranking.add_argument("--threat-kills", action="store_true",
+                         help="experimental: with --threat-tier, threats then kills in that tier (kills alone without)")
+    ranking.add_argument("--objectives-first", action="store_true",
+                         help="experimental: with --threat-tier / --threat-kills, objective progress ranks above "
+                              "the threat in that tier")
+    ranking.add_argument("--mech-grid", type=int, default=-1, metavar="N",
+                         help="experimental: a mech lost is worth more than N grid power (less than N+1): plans may "
+                              "give up to N grid to keep a mech, never the last grid (default -1: off)")
+    ranking.add_argument("--mech-grid-turns", action="store_true",
+                         help="experimental: with --mech-grid, cap N by the mission's turns left after this one")
+    ranking.add_argument("--mech-grid-pilot", action="store_true",
+                         help="experimental: with --mech-grid, a mech's rate is at least its pilot's level (0-2, "
+                              "capped by N), turns left or not: a dead pilot is lost for the rest of the run")
+    ranking.add_argument("--lookahead", action="store_true",
+                         help="experimental: rank plans by the next turn's loss (the AI's planning sampled, a greedy "
+                              "reply) right after objectives failed; it adds a tier to --min-tiers counts")
+    ranking.add_argument("--lookahead-samples", type=int, default=None, metavar="K",
+                         help="with --lookahead: AI seeds per end board, worst case taken (engine default 8)")
+    ranking.add_argument("--lookahead-reply", choices=("greedy", "idle"), default=None,
+                         help="with --lookahead: the next-turn reply policy (default greedy)")
+    ranking.add_argument("--lookahead-fold", choices=("worst", "sum"), default=None,
+                         help="with --lookahead: rank by the worst AI sample or by their sum (default worst)")
+    engine = argparse.ArgumentParser(add_help=False, parents=[ranking])
     engine.add_argument("--time", type=float, default=10.0,
                         help="base solver time per solve (s): the search stops here once --min-tiers are proven")
     engine.add_argument("--max-time", type=float, default=120.0,
@@ -2044,31 +2074,6 @@ def build_parser() -> argparse.ArgumentParser:
     engine.add_argument("--min-tiers", type=int, default=MIN_TIERS,
                         help="score tiers to prove before stopping at --time (5: grid, buildings, mechs lost, "
                              "objectives failed, mech HP; 0: always stop at --time)")
-    engine.add_argument("--threat-tier", action="store_true",
-                        help="experimental: rank plans by the next-turn threat tier (enemies able to hit a "
-                             "building next turn) between objectives failed and mech HP")
-    engine.add_argument("--threat-kills", action="store_true",
-                        help="experimental: with --threat-tier, threats then kills in that tier (kills alone without)")
-    engine.add_argument("--objectives-first", action="store_true",
-                        help="experimental: with --threat-tier / --threat-kills, objective progress ranks above "
-                             "the threat in that tier")
-    engine.add_argument("--mech-grid", type=int, default=-1, metavar="N",
-                        help="experimental: a mech lost is worth more than N grid power (less than N+1): plans may "
-                             "give up to N grid to keep a mech, never the last grid (default -1: off)")
-    engine.add_argument("--mech-grid-turns", action="store_true",
-                        help="experimental: with --mech-grid, cap N by the mission's turns left after this one")
-    engine.add_argument("--mech-grid-pilot", action="store_true",
-                        help="experimental: with --mech-grid, a mech's rate is at least its pilot's level (0-2, "
-                             "capped by N), turns left or not: a dead pilot is lost for the rest of the run")
-    engine.add_argument("--lookahead", action="store_true",
-                        help="experimental: rank plans by the next turn's loss (the AI's planning sampled, a greedy "
-                             "reply) right after objectives failed; it adds a tier to --min-tiers counts")
-    engine.add_argument("--lookahead-samples", type=int, default=None, metavar="K",
-                        help="with --lookahead: AI seeds per end board, worst case taken (engine default 8)")
-    engine.add_argument("--lookahead-reply", choices=("greedy", "idle"), default=None,
-                        help="with --lookahead: the next-turn reply policy (default greedy)")
-    engine.add_argument("--lookahead-fold", choices=("worst", "sum"), default=None,
-                        help="with --lookahead: rank by the worst AI sample or by their sum (default worst)")
     engine.add_argument("--threads", type=int, default=8)
     engine.add_argument("--game", help="game install for the engine (default: ITB_GAME_DIR / build default)")
     engine.add_argument("--max-resolves", type=int, default=3, help="re-solves per turn before giving up")
@@ -2085,7 +2090,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("end-turn", parents=[common, engine, ending], help="End Turn and check the enemy phase")
     p = sub.add_parser("mission", parents=[common, engine, ending], help="turns until the mission ends")
     p.add_argument("--max-turns", type=int, default=10)
-    p = sub.add_parser("deploy", parents=[common], help="place the mechs in the drop zone")
+    p = sub.add_parser("deploy", parents=[common, ranking], help="place the mechs in the drop zone")
     p.add_argument("--tiles", help="tiles in mech uid order: C5,D6,E5 or 3,5;2,4;4,4")
     p.add_argument("--uids", help="mech uids when they aren't on the board yet, e.g. 0,1,2")
     p.add_argument("--heuristic", action="store_true",

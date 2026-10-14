@@ -62,7 +62,7 @@ target_compile_options(itb_engine PRIVATE -Wall -Wextra -Wpedantic -ffp-contract
 
 add_executable(itb_inspect tools/itb_inspect.cpp tools/replay.cpp tools/turn_replay.cpp tools/score_tool.cpp
   tools/solve_tool.cpp tools/predict_tool.cpp tools/diff_weapons.cpp tools/threat_tool.cpp tools/ai_tool.cpp
-  tools/lookahead_tool.cpp)
+  tools/lookahead_tool.cpp tools/two_turn_tool.cpp)
 target_compile_options(itb_inspect PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(itb_inspect PRIVATE itb_engine nlohmann_json::nlohmann_json)
 

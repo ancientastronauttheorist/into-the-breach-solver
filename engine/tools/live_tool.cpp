@@ -7,6 +7,7 @@
 //   itb_live [--game DIR] board <state.json> [--pretty]
 //   itb_live [--game DIR] deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N]
 //            [--screen-samples N] [--solve-time S] [--solve-nodes N] [--seed N]
+//            [--threat-tier ... --lookahead ...: the turn-1 solves' ranking, as for solve]
 //            [--placements JSON|@FILE] [--always JSON|@FILE] [--out FILE] [--pretty]
 //   itb_live [--game DIR] serve [--threads N]
 //
@@ -355,6 +356,23 @@ LookaheadOptions lookahead_options(const json& request, const std::vector<std::p
   return o;
 }
 
+// The request's ranking options (solve and deploy alike): the experimental
+// tiers (SolveOptions::threat_tier, threat_kills, objectives_first), the
+// mech exchange (mech_grid, mech_grid_turns, mech_grid_pilot) and the
+// next-turn lookahead (lookahead.hpp). Absent: all off.
+SolveOptions ranking_options(const json& request, const std::vector<std::pair<int32_t, std::string>>& repair) {
+  SolveOptions tiers;
+  tiers.threat_tier = request.value("threat_tier", false);
+  tiers.threat_kills = request.value("threat_kills", false);
+  tiers.objectives_first = request.value("objectives_first", false);
+  tiers.mech_grid = request.value("mech_grid", -1);
+  tiers.mech_grid_turns = request.value("mech_grid_turns", false);
+  tiers.mech_grid_pilot = request.value("mech_grid_pilot", false);
+  tiers.lookahead = request.value("lookahead", false);
+  if (tiers.lookahead) tiers.lookahead_options = lookahead_options(request, repair);
+  return tiers;
+}
+
 std::string read_text_arg(const std::string& arg) {
   if (arg.empty() || arg[0] != '@') return arg;
   std::ifstream in(arg.substr(1));
@@ -410,20 +428,21 @@ std::vector<std::vector<Point>> parse_placements(const json& j) {
   return out;
 }
 
-json summary_json(const DeploySummary& s) {
+// `tiers`: the optional tiers the turn-1 solves ranked by (threat, next turn).
+json summary_json(const DeploySummary& s, TierSet tiers) {
   json mean = json::object();
   for (int i = 0; i < kScoreKeys && i < static_cast<int>(s.mean.size()); ++i) {
-    if (i == static_cast<int>(ScoreKey::Threat)) continue;
+    if (i == static_cast<int>(ScoreKey::Threat) && !tier_used(i, tiers)) continue;
     mean[kTierNames[i]] = s.mean[static_cast<size_t>(i)];
   }
-  return json{{"worst_case", score_json(s.worst)},
-              {"tier_min", score_json(s.tier_min)},
+  return json{{"worst_case", score_json(s.worst, tiers)},
+              {"tier_min", score_json(s.tier_min, tiers)},
               {"mean", mean},
               {"outcomes", s.outcomes},
               {"seeds", s.seeds}};
 }
 
-json candidate_json(const DeployCandidate& c, const std::vector<int32_t>& mechs) {
+json candidate_json(const DeployCandidate& c, const std::vector<int32_t>& mechs, TierSet tiers) {
   json tiles = json::array();
   json by_uid = json::object();
   for (size_t i = 0; i < c.tiles.size(); ++i) {
@@ -435,8 +454,8 @@ json candidate_json(const DeployCandidate& c, const std::vector<int32_t>& mechs)
   return json{{"tiles", tiles},
               {"visual", visual},
               {"by_uid", by_uid},
-              {"screen", summary_json(c.screen)},
-              {"value", c.value ? summary_json(*c.value) : json(nullptr)},
+              {"screen", summary_json(c.screen, tiers)},
+              {"value", c.value ? summary_json(*c.value, tiers) : json(nullptr)},
               {"all_proven", c.all_proven}};
 }
 
@@ -571,6 +590,8 @@ json LiveSession::handle(const json& request) {
       o.seed = request.value("seed", o.seed);
       if (request.contains("placements")) o.placements = parse_placements(request["placements"]);
       if (request.contains("always")) o.always = parse_placements(request["always"]);
+      // The turn-1 solves rank as the turns will (the same ranking options).
+      o.solve = ranking_options(request, l.repair_skills);
       o.solve.repair_skills = l.repair_skills;
       const int beam = request.value("beam_width", -1);
       if (beam >= 0) o.solve.beam_width = beam;
@@ -591,27 +612,16 @@ json LiveSession::handle(const json& request) {
       out["solves"] = r.solves;
       out["timed_out"] = r.timed_out;
       out["time"] = json{{"screen_s", r.screen_s}, {"finalists_s", r.finalist_s}, {"total_s", r.total_s}};
-      out["best"] = r.best ? candidate_json(*r.best, r.mechs) : json(nullptr);
+      out["best"] = r.best ? candidate_json(*r.best, r.mechs, o.solve.tiers()) : json(nullptr);
       json fin = json::array();
-      for (const DeployCandidate& c : r.finalists) fin.push_back(candidate_json(c, r.mechs));
+      for (const DeployCandidate& c : r.finalists) fin.push_back(candidate_json(c, r.mechs, o.solve.tiers()));
       out["finalists"] = fin;
       out["warnings"] = warnings;
       return out;
     }
     std::vector<std::string> warnings;
     std::vector<PlayerAction> plan;
-    // Experimental tiers (SolveOptions::threat_tier, threat_kills, objectives_first).
-    SolveOptions tiers;
-    tiers.threat_tier = request.value("threat_tier", false);
-    tiers.threat_kills = request.value("threat_kills", false);
-    tiers.objectives_first = request.value("objectives_first", false);
-    // Experiment: a mech is worth up to mech_grid grid (SolveOptions::mech_grid).
-    tiers.mech_grid = request.value("mech_grid", -1);
-    tiers.mech_grid_turns = request.value("mech_grid_turns", false);
-    tiers.mech_grid_pilot = request.value("mech_grid_pilot", false);
-    // Next-turn lookahead (SolveOptions::lookahead, lookahead.hpp).
-    tiers.lookahead = request.value("lookahead", false);
-    if (tiers.lookahead) tiers.lookahead_options = lookahead_options(request, l.repair_skills);
+    const SolveOptions tiers = ranking_options(request, l.repair_skills);
     if (const int rate = mech_grid_rate(l.board, tiers.score_options()); rate >= 0) {
       out["mech_grid_rate"] = rate;
       if (tiers.mech_grid_pilot) {
@@ -693,7 +703,8 @@ int usage() {
                "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | "
                "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
-               "[--solve-time S] [--solve-nodes N] [--seed N] [--placements JSON|@FILE] [--always JSON|@FILE] | "
+               "[--solve-time S] [--solve-nodes N] [--seed N] [--placements JSON|@FILE] [--always JSON|@FILE] "
+               "[ranking options as for solve] | "
                "serve [--threads N]) "
                "[--out FILE] [--pretty]\n";
   return 2;
@@ -748,6 +759,8 @@ int run_live(int argc, char** argv) {
   } else if (cmd != "serve") {
     return usage();
   }
+  // Ranking options: solve, predict and deploy (its turn-1 solves).
+  const bool ranked = cmd == "solve" || cmd == "predict" || cmd == "deploy";
   try {
     for (; i < args.size(); ++i) {
       const bool more = i + 1 < args.size();
@@ -775,25 +788,25 @@ int run_live(int argc, char** argv) {
         request["max_time"] = std::stod(args[++i]);
       } else if (args[i] == "--min-tiers" && more && cmd == "solve") {
         request["min_tiers"] = std::stoi(args[++i]);
-      } else if (args[i] == "--threat-tier" && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--threat-tier" && ranked) {
         request["threat_tier"] = true;
-      } else if (args[i] == "--threat-kills" && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--threat-kills" && ranked) {
         request["threat_kills"] = true;
-      } else if (args[i] == "--objectives-first" && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--objectives-first" && ranked) {
         request["objectives_first"] = true;
-      } else if (args[i] == "--mech-grid" && more && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--mech-grid" && more && ranked) {
         request["mech_grid"] = std::stoi(args[++i]);
-      } else if (args[i] == "--mech-grid-turns" && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--mech-grid-turns" && ranked) {
         request["mech_grid_turns"] = true;
-      } else if (args[i] == "--mech-grid-pilot" && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--mech-grid-pilot" && ranked) {
         request["mech_grid_pilot"] = true;
-      } else if (args[i] == "--lookahead" && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--lookahead" && ranked) {
         request["lookahead"] = true;
-      } else if (args[i] == "--lookahead-samples" && more && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--lookahead-samples" && more && ranked) {
         request["lookahead_samples"] = std::stoi(args[++i]);
-      } else if (args[i] == "--lookahead-reply" && more && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--lookahead-reply" && more && ranked) {
         request["lookahead_reply"] = args[++i];
-      } else if (args[i] == "--lookahead-fold" && more && (cmd == "solve" || cmd == "predict")) {
+      } else if (args[i] == "--lookahead-fold" && more && ranked) {
         request["lookahead_fold"] = args[++i];
       } else if (args[i] == "--beam" && more && (cmd == "solve" || cmd == "deploy")) {
         request["beam_width"] = std::stoi(args[++i]);

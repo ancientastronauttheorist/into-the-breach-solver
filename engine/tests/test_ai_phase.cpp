@@ -282,6 +282,26 @@ TEST_CASE("deployment: outcome boards and a small search on a recorded drop zone
   CHECK_FALSE(deploy_better(r.finalists[1].value.value(), r.finalists[0].value.value()));
   CHECK(r.solves >= 2);
 
+  // The turn-1 solves can rank with the live options (threat tier, mech
+  // exchange, next-turn lookahead): the values then carry those tiers; the
+  // phase's own cost adds no threat (that is turn 1's end board's).
+  DeployOptions ranked = o;
+  ranked.solve.threat_tier = true;
+  ranked.solve.mech_grid = 2;
+  ranked.solve.mech_grid_turns = true;
+  ranked.solve.lookahead = true;
+  ranked.solve.lookahead_options.samples = 2;
+  const DeployResult rr = deploy_search(E, rec.board, ctx, zone, ranked);
+  REQUIRE_MESSAGE(rr.ok, rr.error);
+  REQUIRE(rr.finalists.size() == 2);
+  for (const DeployCandidate& c : rr.finalists) {
+    REQUIRE(c.value.has_value());
+    CHECK(c.value->worst[ScoreKey::NextTurn] <= 0);
+    CHECK(c.value->worst[ScoreKey::NextTurn] >= kNextTurnFloor);
+    CHECK(c.value->worst[ScoreKey::Threat] <= 0);
+  }
+  for (const DeployCandidate& c : r.finalists) CHECK(c.value->worst[ScoreKey::NextTurn] == 0);
+
   // A placement with the wrong tile count is refused.
   DeployOptions bad = o;
   bad.placements = {{{2, 2}}};
