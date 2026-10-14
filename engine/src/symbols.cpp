@@ -31,8 +31,9 @@ Table& table() {
 
 }  // namespace
 
-Symbol intern(std::string_view name) {
-  if (name.empty()) return kNoSymbol;
+namespace {
+
+Symbol intern_shared(std::string_view name) {
   Table& t = table();
   {
     std::shared_lock lock(t.mu);
@@ -45,6 +46,20 @@ Symbol intern(std::string_view name) {
   t.names.emplace_back(name);
   t.ids.emplace(t.names.back(), id);
   t.by_id[id].store(&t.names.back(), std::memory_order_release);
+  return id;
+}
+
+}  // namespace
+
+Symbol intern(std::string_view name) {
+  if (name.empty()) return kNoSymbol;
+  // Each thread keeps the names it has seen (keys point at the table's own
+  // copies, which never move): with several search threads, every lookup
+  // through the shared lock contended on it.
+  thread_local std::unordered_map<std::string_view, Symbol> seen;
+  if (auto it = seen.find(name); it != seen.end()) return it->second;
+  const Symbol id = intern_shared(name);
+  seen.emplace(symbol_name(id), id);
   return id;
 }
 

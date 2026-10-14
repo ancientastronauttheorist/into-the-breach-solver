@@ -976,6 +976,27 @@ root) raises every alpha.
   `active`, bonus move, Kickoff bonus).
 - Children (deduplicated by board) are ordered by the value of ending the
   turn right after them; boards that threaten buildings get fixed first.
+  A child the tier bound cuts gets no end-of-turn value for ordering.
+- Same-effect shots: a weapon's target only reaches the board through the
+  effect it builds (`Engine::pure_weapon_effect`: prepared, alterations
+  applied, no random draw or Lua error; `SkillEffect::target` is never read
+  once prepared, and effects with a queued part keep their target). Two
+  targets of one unit's slot with equal effects (every `SpaceDamage` field)
+  give the same outcomes, so the second is not run: projectiles and charges
+  aimed anywhere along a line, artillery shots that land the same way. The
+  effect computed for the check is handed to the run
+  (`ActionOptions::known_effect`). Nodes, enemy phases, TT hits and values
+  are unchanged (120 sample boards at a node budget, one thread: identical
+  in every one of those counters); `ITB_VERIFY_EFFECTS=1` runs every skipped
+  or known-effect shot the old way and warns on any other board,
+  `ITB_SAME_EFFECT=0` turns it off.
+- Early stop of the enemy phase (`TurnContext::stop_early`): once the board
+  between two steps of the phase (after the status ticks, each environment
+  step, each queued shot) has a tier bound `<= alpha`, the outcome is cut
+  there: grid power and building HP never rise, so the rest of the phase
+  cannot lift it. The end-of-turn memo marks such values (`LeafMemo::
+  stopped`, only the bound); the beam's ranking, and child ordering outside
+  the tier proof of the adaptive budget, take full phases.
 - A beam pre-pass over whole unit turns (optional move, then optional
   action) keeps the best states for every set of units that have played
   and seeds the incumbent; plans whose value appears only once every unit
@@ -1037,7 +1058,13 @@ rest of the budget (time, or nodes). That search can only return something
 better under the full order, so grid, buildings, mechs and stars are never
 worse than the base search's at that share of the budget (before seeding,
 2 of 60 turns lost grid to it at 20 s and 2 threads). A sample stops when
-the budget runs out (the leaf reports the bound so far).
+the budget runs out (the leaf reports the bound so far). The base search's
+tables stay alive for the lookahead search, whose values are at most the
+base search's (NextTurn only falls below its cap): a node or end-of-turn
+value whose base upper bound is `<= alpha` is cut at once, and the result
+carries the tighter of the two root bounds, so tiers the base search proved
+stay proven (`SolveStats::base_proven_components`; before, a lookahead
+search cut by the budget reported its own, often 0).
 
 **Anytime.** With a time or node budget the result is the best plan found,
 `proven_optimal = false`, an `upper_bound` (the root's interval, sound
