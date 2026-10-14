@@ -963,6 +963,90 @@ class LivePlayTest(unittest.TestCase):
         manifest = json.loads((self.run_dir() / "manifest.json").read_text())
         self.assertEqual(manifest["engine_underground"]["units"], {})
 
+    # ---------------------------------------------------------------- Mission_Reactivation
+    # Live 2026-10-14 m12: the mission thawed Snowtank1#13089 at turn 0, the
+    # Ice Mech re-froze it, and the game kept it frozen. The engine is given
+    # the list a player can know (frozen at the start, minus seen thaws), never
+    # the mission's own Enemies list.
+
+    @staticmethod
+    def reactivation_state():
+        st = base_state()
+        st["mission_id"] = "Mission_Reactivation"
+        for uid, x in ((110, 7), (111, 5), (112, 1)):
+            st["units"].append({"uid": uid, "type": "Scorpion1", "x": x, "y": 0, "hp": 3, "max_hp": 3, "team": 6,
+                                "mech": False, "active": False, "frozen": True})
+        # The mission's hidden list, deliberately different: never used.
+        st["mission_state"] = {"instance": {"Enemies": [111, 999]}}
+        return st
+
+    def test_reactivation_visible_list_follows_the_seen_thaws(self):
+        self.bridge(self.reactivation_state())
+
+        def thaw(s, uids):
+            for uid in uids:
+                unit(s, uid)["frozen"] = False
+            return s
+
+        # The engine's default branch thaws 110 and 111; the game thaws 110 and 112.
+        phase = {"mission_ended": False, "events": [
+            {"type": "thawed", "uid": uid, "amount": 3, "detail": "candidates 110,111,112"} for uid in (110, 111)]}
+        self.fb.next_turn = lambda s: thaw(FakeBridge.default_next(s), (110, 112))
+        eng = FakeEngine(after_enemy=lambda b: compact(thaw(copy.deepcopy(b), (110, 111))), enemy_phase=phase)
+        code, text = self.quiet(["turn"], eng)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng.solves[0]["reactivation_visible_list"], [110, 111, 112])
+        # The hidden list is compared for diagnostics only.
+        self.assertIn("note: Mission_Reactivation visible list [110, 111, 112]; [110, 112] already drawn", text)
+        code, text = self.quiet(["end-turn", "--run", str(self.run_dir())], eng)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng.predict_states[0]["reactivation_visible_list"], [110, 111, 112])
+        self.assertIn("random thaw: the game thawed", text)
+        manifest = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertEqual(manifest["reactivation"]["list"], [111])
+        self.assertEqual(manifest["reactivation"]["turn"], 2)
+
+        # Turn 2: the player re-freezes 110 (thawed by the mission: stays off
+        # the list); a later turn keeps the list.
+        unit(self.fb.state, 110)["frozen"] = True
+        self.fb.write_state()
+        eng2 = FakeEngine()
+        code, text = self.quiet(["turn", "--run", str(self.run_dir())], eng2)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng2.solves[0]["reactivation_visible_list"], [111])
+
+    def test_reactivation_list_unknown_when_joining_the_mission_late(self):
+        st = self.reactivation_state()
+        st["turn"] = 3
+        self.bridge(st)
+        eng = FakeEngine()
+        code, text = self.quiet(["turn"], eng)
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("reactivation_visible_list", eng.solves[0])  # the engine falls back
+
+    def test_reactivation_list_starts_at_deployment(self):
+        st = self.deploy_state()
+        st["mission_id"] = "Mission_Reactivation"
+        unit(st, 100)["frozen"] = True
+        st["units"].append({"uid": 110, "type": "Scorpion1", "x": 7, "y": 0, "hp": 3, "max_hp": 3, "team": 6,
+                            "mech": False, "active": False, "frozen": True})
+        self.bridge(st)
+        eng = FakeEngine()
+        self.assertEqual(self.run_cmd(["deploy"], engine=eng), 0)
+        self.assertEqual(eng.deploys[0][0]["reactivation_visible_list"], [100, 110])
+        # Turn 0's enemy phase: the mission thawed 100 (only it thaws anything then).
+        s = self.fb.state
+        s.update(turn=1, deploying=False)
+        unit(s, 100)["frozen"] = False
+        for u in s["units"]:
+            if u["team"] == 1:
+                u["active"], u["moved"] = True, False
+        self.fb.write_state()
+        eng = FakeEngine()
+        code, text = self.quiet(["turn", "--run", str(self.run_dir())], eng)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng.solves[0]["reactivation_visible_list"], [110])
+
     @staticmethod
     def building_not_resisted(st):
         """The engine's worst case: the building at (2, 2) (F6) does not resist."""
@@ -1632,3 +1716,64 @@ class DiffBoardsTest(unittest.TestCase):
         self.assertEqual(lp.unit_uid_map(got, got, {1}), {})
         got["units"][1]["x"] = 4
         self.assertEqual(lp.unit_uid_map(want, got, {1}), {})
+
+
+class ReactivationAfterTest(unittest.TestCase):
+    """Mission_Reactivation's visible list across an enemy phase
+    (reactivation_after): the engine's thaw events name the draw's
+    candidates, the game's board shows which ones it thawed."""
+
+    @staticmethod
+    def pred(cands, thawed=None, events=()):
+        detail = "candidates " + ",".join(str(u) for u in cands)
+        ev = [{"type": "thawed", "uid": u, "amount": len(cands), "detail": detail}
+              for u in (thawed if thawed is not None else cands[:2])]
+        return {"enemy_phase": {"mission_ended": False, "events": ev + list(events)}}
+
+    @staticmethod
+    def live(frozen, unfrozen):
+        return {"units": [{"uid": u, "frozen": True} for u in frozen] + [{"uid": u, "frozen": False} for u in unfrozen]}
+
+    def test_more_than_two_candidates_the_game_picks_the_pair(self):
+        listed = [10, 11, 12, 13]
+        got, notes = lp.reactivation_after(listed, self.pred([10, 11, 12, 13]), self.live([11, 13], [10, 12]))
+        self.assertEqual((got, notes), ([11, 13], []))
+
+    def test_a_thawed_unit_stays_off_the_list_when_frozen_again(self):
+        got, _ = lp.reactivation_after([10, 11, 12], self.pred([10, 11, 12]), self.live([12], [10, 11]))
+        self.assertEqual(got, [12])
+        # Next turn the player re-froze 10: the engine gets the list as is.
+        state = {"mission_id": "Mission_Reactivation", "units": [{"uid": 10, "team": 6, "hp": 3, "frozen": True},
+                                                                 {"uid": 12, "team": 6, "hp": 3, "frozen": True}]}
+        fixed, patches = lp.patch_state(state, {}, set(), reactivation=got)
+        self.assertEqual(fixed["reactivation_visible_list"], [12])
+        self.assertEqual(patches["reactivation_visible_list"], [12])
+        got, _ = lp.reactivation_after(got, self.pred([12]), self.live([10], [12]))
+        self.assertEqual(got, [])
+
+    def test_a_unit_unfrozen_by_damage_stays_listed(self):
+        # 12 was unfrozen by an attack before the draw: not a candidate, and
+        # with exactly two candidates the third entry may or may not have been
+        # drawn (hidden): it stays listed.
+        got, _ = lp.reactivation_after([10, 11, 12], self.pred([10, 11]), self.live([], [10, 11, 12]))
+        self.assertEqual(got, [12])
+
+    def test_fewer_than_two_candidates_empty_the_list(self):
+        self.assertEqual(lp.reactivation_after([10, 11], self.pred([10]), self.live([], [10, 11]))[0], [])
+        none = {"enemy_phase": {"mission_ended": False, "events": []}}
+        self.assertEqual(lp.reactivation_after([10, 11], none, self.live([], [10, 11]))[0], [])
+
+    def test_mission_end_keeps_the_list(self):
+        ended = {"enemy_phase": {"mission_ended": True, "events": []}}
+        self.assertEqual(lp.reactivation_after([10, 11], ended, self.live([10, 11], []))[0], [10, 11])
+
+    def test_a_spawn_bump_after_the_draw_is_ambiguous(self):
+        bump = [{"type": "spawn blocked", "uid": 12}]
+        got, notes = lp.reactivation_after([10, 11, 12, 13], self.pred([10, 11, 12, 13], events=bump),
+                                           self.live([13], [10, 11, 12]))
+        self.assertEqual((got, notes), ([12, 13], []))
+        # Still more than two: nothing leaves the list (worst case), with a note.
+        got, notes = lp.reactivation_after([10, 11, 12, 13], self.pred([10, 11, 12, 13]),
+                                           self.live([13], [10, 11, 12]))
+        self.assertEqual(got, [10, 11, 12, 13])
+        self.assertTrue(notes)

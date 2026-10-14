@@ -1442,10 +1442,10 @@ TEST_CASE("chance: Mission_Reactivation thaws two of three frozen Vek") {
 }
 
 // Live 2026-10-14 m12 (Unfair) turn 2: the mission had thawed Snowtank1 at
-// turn 0 (drawn from its Enemies list) and the Ice Mech re-froze it; the game
-// kept it frozen and thawed the one frozen unit still listed. Units outside
-// the list (drawn already, or never placed by the mission) are never thawed.
-TEST_CASE("Mission_Reactivation thaws only frozen units still in its Enemies list") {
+// turn 0 and the Ice Mech re-froze it; the game kept it frozen and thawed the
+// one frozen unit still listed. Units off the visible list (seen thawed by
+// the mission already, or never placed by it) are never thawed.
+TEST_CASE("Mission_Reactivation thaws only frozen units on its visible list") {
   NEED_ENGINE();
   Board b;
   const int32_t refrozen = place(b, "Snowtank1", {5, 4});
@@ -1462,6 +1462,13 @@ TEST_CASE("Mission_Reactivation thaws only frozen units still in its Enemies lis
   CHECK_FALSE(P(b, listed).frozen);
   CHECK(r.count(PhaseEventType::Thawed) == 1);
   CHECK(r.chances.empty());
+  // The event names the draw's candidates (live_play reads them).
+  for (const PhaseEvent& e : r.events) {
+    if (e.type != PhaseEventType::Thawed) continue;
+    CHECK(e.uid == listed);
+    CHECK(e.amount == 1);
+    CHECK(e.detail == "candidates " + std::to_string(listed));
+  }
   // Fewer than two thaws: every entry was drawn, the list is empty.
   for (const Pawn& p : b.pawns()) CHECK_FALSE(p.reactivation_listed);
 
@@ -1507,6 +1514,36 @@ TEST_CASE("chance: Mission_Reactivation picks a pair among its listed frozen uni
     CHECK(P(b, outsider).frozen);
     CHECK(P(b, awake).reactivation_listed);  // may have been drawn: kept (worst case)
   }
+}
+
+// The visible list across two simulated enemy phases: a unit the mission
+// thawed stays off the list when the player freezes it again; a listed unit
+// that was unfrozen by damage (never drawn while frozen) and frozen again is
+// still a candidate.
+TEST_CASE("Mission_Reactivation's list carries across turns") {
+  NEED_ENGINE();
+  Board b;
+  const int32_t a = place(b, "Scorpion1", {1, 1});
+  const int32_t c = place(b, "Scorpion1", {3, 1});
+  const int32_t hit = place(b, "Scorpion1", {5, 1});  // listed, unfrozen by a hit
+  for (int32_t uid : {a, c, hit}) P(b, uid).reactivation_listed = true;
+  P(b, a).frozen = true;
+  P(b, c).frozen = true;
+  TurnContext ctx = context("Mission_Reactivation");
+  ctx.mission.reactivation_known = true;
+  PhaseResult r = E.end_turn(b, ctx);
+  CHECK(r.count(PhaseEventType::Thawed) == 2);
+  CHECK(r.chances.empty());
+  CHECK_FALSE(P(b, a).reactivation_listed);
+  CHECK_FALSE(P(b, c).reactivation_listed);
+  CHECK(P(b, hit).reactivation_listed);  // possibly drawn and discarded: kept
+  // The player freezes all three again.
+  for (int32_t uid : {a, c, hit}) P(b, uid).frozen = true;
+  r = E.end_turn(b, ctx);
+  CHECK(P(b, a).frozen);
+  CHECK(P(b, c).frozen);
+  CHECK_FALSE(P(b, hit).frozen);
+  CHECK(r.count(PhaseEventType::Thawed) == 1);
 }
 
 TEST_CASE("chance: the final cave's destroyed bomb drops again at a random tile") {

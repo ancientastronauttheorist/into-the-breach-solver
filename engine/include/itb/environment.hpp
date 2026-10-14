@@ -97,10 +97,11 @@ struct MissionData {
   bool belts_known = false;
   int32_t hacking_bot = -1;      // Mission_Hacking BotID
   int32_t hacking_building = -1;  // Mission_Hacking HackID
-  // Mission_Reactivation's Enemies list (mission instance) was recorded; its
-  // members carry Pawn::reactivation_listed on the board, which keeps the
-  // list across simulated turns. False: old recordings, every frozen enemy
-  // is a candidate.
+  // Mission_Reactivation's visible list was given (the state's
+  // "reactivation_visible_list", built by live_play.py; never the mission's
+  // hidden Enemies list); its members carry Pawn::reactivation_listed on the
+  // board, which keeps the list across simulated turns. False: old
+  // recordings, every frozen enemy is a candidate.
   bool reactivation_known = false;
   std::optional<bool> infinite_spawn;
   std::vector<int32_t> launching;  // satellite rockets with a queued launch

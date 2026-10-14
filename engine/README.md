@@ -184,6 +184,22 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   dove from; `<uid>.underground` in `patches`), and counts it as a known
   unit: one that resurfaces after the enemy phase is matched by uid (type
   and HP; a note, not a spawn).
+- **Mission_Reactivation's thaw list** is kept from what a player sees,
+  never from the mission's own `Enemies` list (hidden, like the AI seed).
+  The driver starts it from the frozen enemies at deployment or at the
+  start of turn 1 (a turn-0 list is narrowed at turn 1 to the ones still
+  frozen), keeps it per mission in `manifest.json` (`reactivation`), and
+  gives it to every solve and prediction as `reactivation_visible_list`.
+  After each enemy phase, the prediction's `thawed` events name the
+  draw's candidates E (listed units alive and frozen at the draw): with
+  |E| < 2 the mission drew its whole list, which empties; with |E| = 2 both
+  leave it; with more, the two the game shows unfrozen leave it (a spawn
+  bump after the draw also breaks ice: such a unit is ambiguous, and more
+  than two left unfrozen keep the list as is). Entries the draws dropped
+  unseen stay listed (worst case). A mission joined later than turn 1
+  gives no list, and the engine takes every frozen enemy as a candidate.
+  Each solve notes where the list differs from the bridge's `Enemies`
+  (diagnostics only).
 - **deploy** uses the bridge's `drop_zone` (refused tiles are already left
   out, and `DEPLOY` refuses them anyway). It places the mechs with the
   heuristic first (unplaced mechs are not in the bridge's dump; once placed,
@@ -581,7 +597,7 @@ used when present.
 | Mission_Train / Armored_Train | train fires after every Vek; wreck replaces a dead train | queued move inferred (bridge omits team-1 shots) |
 | Mission_Satellite | queued launch: DAMAGE_DEATH around, rocket flies away; NextTurn powering | exact with `queued_launch` |
 | Mission_Volatile | last enemy retreats | exact with `is_infinite_spawn` |
-| Mission_Reactivation | NextTurn draws from the mission's `Enemies` list (the units it placed frozen) until 2 are thawed or the list is empty; a drawn unit thaws only if alive and frozen, and every drawn entry leaves the list, so a unit the player re-freezes after its thaw stays frozen | with the bridge's `mission_state.instance.Enemies`: the list rides on the pawns (`Pawn::reactivation_listed`), candidates are listed alive frozen units, chance node `MissionRandom` over their pairs; discarded draws stay listed when 2 thaw (which ones is hidden; worst case). Old recordings: every frozen enemy is a candidate |
+| Mission_Reactivation | NextTurn draws from the mission's `Enemies` list (the units it placed frozen) until 2 are thawed or the list is empty; a drawn unit thaws only if alive and frozen, and every drawn entry leaves the list, so a unit the player re-freezes after its thaw stays frozen | player-visible list only (the mission's own `Enemies`, exported as `mission_state.instance.Enemies`, is hidden and never read): the state's `reactivation_visible_list` from live_play.py (units frozen at the start minus those the mission was seen to thaw) rides on the pawns (`Pawn::reactivation_listed`); candidates are listed alive frozen units, chance node `MissionRandom` over their pairs; discarded draws stay listed when 2 thaw (which ones is hidden; worst case); each `thawed` event names the draw's candidates (`detail` "candidates u1,u2,...", `amount` their count). Without the list (old recordings, a mission joined late): every frozen enemy is a candidate |
 | anything else with marks | none | `EnvUnsupported` (NanoStorm, Sandstorm, LandChange are unshipped) |
 
 Conveyor directions come from the live belts: the Env_Belt instance's
