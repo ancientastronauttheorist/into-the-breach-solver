@@ -246,6 +246,11 @@ struct Pawn {
   // a psion of another type, which does not affect it, is the board psion.
   bool health_bonus = false;
   bool fallen = false;   // fell into a chasm: off the board, never a corpse
+  // Mission state carried on the pawn: listed in Mission_Reactivation's
+  // Enemies (the frozen units the mission placed and has not drawn yet), so
+  // the mission may still thaw it (environments.cpp ReactivationMission).
+  // Only meaningful with MissionData::reactivation_known.
+  bool reactivation_listed = false;
   // When the pawn entered its tile (Board::stamp_arrival). Natively each tile
   // keeps its occupants in arrival order; pawns that share a stamp (0 for
   // boards loaded without that history) fall back to board-list order.

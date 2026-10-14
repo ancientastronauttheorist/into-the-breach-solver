@@ -581,7 +581,7 @@ used when present.
 | Mission_Train / Armored_Train | train fires after every Vek; wreck replaces a dead train | queued move inferred (bridge omits team-1 shots) |
 | Mission_Satellite | queued launch: DAMAGE_DEATH around, rocket flies away; NextTurn powering | exact with `queued_launch` |
 | Mission_Volatile | last enemy retreats | exact with `is_infinite_spawn` |
-| Mission_Reactivation | NextTurn thaws 2 random frozen enemies | chance node `MissionRandom` over the pairs |
+| Mission_Reactivation | NextTurn draws from the mission's `Enemies` list (the units it placed frozen) until 2 are thawed or the list is empty; a drawn unit thaws only if alive and frozen, and every drawn entry leaves the list, so a unit the player re-freezes after its thaw stays frozen | with the bridge's `mission_state.instance.Enemies`: the list rides on the pawns (`Pawn::reactivation_listed`), candidates are listed alive frozen units, chance node `MissionRandom` over their pairs; discarded draws stay listed when 2 thaw (which ones is hidden; worst case). Old recordings: every frozen enemy is a candidate |
 | anything else with marks | none | `EnvUnsupported` (NanoStorm, Sandstorm, LandChange are unshipped) |
 
 Conveyor directions come from the live belts: the Env_Belt instance's

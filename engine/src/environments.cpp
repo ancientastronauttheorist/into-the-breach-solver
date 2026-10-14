@@ -1056,20 +1056,37 @@ class HackingMission final : public Environment {
   bool bot_inferred_ = false;
 };
 
-// Mission_Reactivation (missions/snow/mission_reactivation.lua): NextTurn with
-// the enemy team thaws up to two random frozen enemies.
+// Mission_Reactivation (missions/snow/mission_reactivation.lua). At mission
+// start the mission keeps the uids of the units it placed frozen in its
+// Enemies list. Its NextTurn with the enemy team draws entries uniformly at
+// random, removing each from the list, until two have been thawed or the list
+// is empty; a drawn unit is thawed only if it is alive and frozen, otherwise
+// it is dropped. So the mission never thaws a unit it has already drawn (one
+// the player re-froze stays frozen), nor one it did not place.
+//
+// The list lives on the board (Pawn::reactivation_listed) so that it carries
+// across simulated turns. With E the listed units that are alive and frozen:
+// |E| <= 2 thaws all of E; |E| > 2 thaws a uniformly random pair of E (chance
+// node MissionRandom over the pairs). Every listed unit is drawn when |E| < 2.
+// Otherwise the listed units outside E that the draws discarded before the
+// second thaw are random; they stay listed (worst case: the mission may still
+// thaw them if they are frozen again).
+//
+// Without the recorded list (old bridges) every frozen enemy is a candidate.
 class ReactivationMission final : public Environment {
  public:
+  explicit ReactivationMission(const MissionData& m) : known_(m.reactivation_known) {}
   std::string name() const override { return "Mission_Reactivation"; }
   void next_turn(EnvHost& host) override {
     Board& b = host.board();
     std::vector<int32_t> frozen;
     for (const Pawn& p : b.pawns()) {
-      if (p.team == Team::Enemy && p.alive() && p.frozen) frozen.push_back(p.uid);
+      const bool candidate = known_ ? p.reactivation_listed : p.team == Team::Enemy;
+      if (candidate && p.alive() && p.frozen) frozen.push_back(p.uid);
     }
     std::vector<int32_t> thaw = frozen;
     if (frozen.size() > 2) {
-      // random_removal over the mission's enemy list: any pair, uniformly.
+      // random_removal over the list: any pair of candidates, uniformly.
       std::vector<std::pair<int32_t, int32_t>> pairs;
       for (size_t i = 0; i < frozen.size(); ++i) {
         for (size_t j = i + 1; j < frozen.size(); ++j) pairs.emplace_back(frozen[i], frozen[j]);
@@ -1078,13 +1095,20 @@ class ReactivationMission final : public Environment {
           host.choose(ChanceKind::MissionRandom, static_cast<int>(pairs.size())))];
       thaw = {a, c};
     }
+    if (known_ && frozen.size() < 2) {
+      for (Pawn& p : b.pawns()) p.reactivation_listed = false;  // the whole list was drawn
+    }
     for (int32_t uid : thaw) {
       if (Pawn* p = b.find_pawn(uid)) {
         set_pawn_frozen(b, *p, false);
+        p->reactivation_listed = false;
         host.note(PhaseEventType::Thawed, "", p->pos, uid);
       }
     }
   }
+
+ private:
+  bool known_ = false;
 };
 
 }  // namespace
@@ -1110,7 +1134,7 @@ std::unique_ptr<Environment> make_native_environment(const MissionData& m) {
   if (id == "Mission_AcidStorm") return std::make_unique<AcidStormMission>();
   if (id == "Mission_Shields") return std::make_unique<ShieldsMission>();
   if (id == "Mission_Hacking") return std::make_unique<HackingMission>(m);
-  if (id == "Mission_Reactivation") return std::make_unique<ReactivationMission>();
+  if (id == "Mission_Reactivation") return std::make_unique<ReactivationMission>(m);
   if (!m.danger.empty() || !m.freeze.empty()) return std::make_unique<UnsupportedEnv>(m);
   return std::make_unique<NullEnv>(id.empty() ? "Env_Null" : id);
 }

@@ -357,6 +357,30 @@ TEST_CASE("unpowered weapons cannot fire and unpowered passives do nothing") {
   CHECK(b.has_passive(kPassiveFlameImmune));
 }
 
+TEST_CASE("Mission_Reactivation's Enemies list marks its pawns") {
+  auto board = [](const std::string& enemies) {
+    return R"({"mission_id": "Mission_Reactivation", "tiles": [], "units": [
+        {"uid": 7, "type": "Snowtank1", "x": 5, "y": 4, "hp": 1, "max_hp": 1, "team": 6, "frozen": true},
+        {"uid": 8, "type": "Leaper2", "x": 5, "y": 5, "hp": 3, "max_hp": 3, "team": 6, "frozen": true}],
+      "mission_state": {"instance": {)" + enemies + "}}}";
+  };
+  std::string error;
+  auto rec = load_text("itb_recording_reactivation.json", board(R"("Enemies": [8, 99])"), &error);
+  REQUIRE_MESSAGE(rec.has_value(), error);
+  CHECK(rec->mission.reactivation_known);
+  CHECK_FALSE(rec->board.find_pawn(7)->reactivation_listed);
+  CHECK(rec->board.find_pawn(8)->reactivation_listed);
+
+  rec = load_text("itb_recording_reactivation.json", board(R"("Enemies": {})"), &error);  // empty Lua table
+  REQUIRE_MESSAGE(rec.has_value(), error);
+  CHECK(rec->mission.reactivation_known);
+  CHECK_FALSE(rec->board.find_pawn(8)->reactivation_listed);
+
+  rec = load_text("itb_recording_reactivation.json", board(""), &error);  // not recorded
+  REQUIRE_MESSAGE(rec.has_value(), error);
+  CHECK_FALSE(rec->mission.reactivation_known);
+}
+
 TEST_CASE("boards without the extension fields load as before") {
   std::string error;
   auto rec = load_recording(kFixture, nullptr, &error);

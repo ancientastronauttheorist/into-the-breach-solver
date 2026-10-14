@@ -195,6 +195,8 @@ BoardHash hash_board(const Board& b, HashMode mode) {
       if (q.arrival < p.arrival || (q.arrival == p.arrival && j < i)) ++rank;
     }
     hash_pawn(h, p, rank, mode);
+    // Only when set, so boards outside Mission_Reactivation hash as before.
+    if (p.reactivation_listed) h.word(0x52454143u);
   }
   return h.done();
 }

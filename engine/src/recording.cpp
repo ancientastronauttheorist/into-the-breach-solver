@@ -469,6 +469,20 @@ void load_mission_ext(const json& s, Recording& rec) {
     if (auto c = ms.find("class_chain"); c != ms.end()) m.mission_classes = strings(*c);
     if (auto c = ms.find("env_class_chain"); c != ms.end()) m.env_classes = strings(*c);
     if (auto i = ms.find("instance"); i != ms.end()) m.mission_instance_json = i->dump();
+    // Mission_Reactivation's Enemies: the uids it may still thaw (an empty
+    // Lua table dumps as {}). Members are marked on the board's pawns.
+    if (auto i = ms.find("instance"); i != ms.end() && i->is_object() && m.mission_id == "Mission_Reactivation") {
+      if (auto e = i->find("Enemies"); e != i->end() && (e->is_array() || (e->is_object() && e->empty()))) {
+        m.reactivation_known = true;
+        for (Pawn& p : rec.board.pawns()) p.reactivation_listed = false;
+        if (e->is_array()) {
+          for (const json& uid : *e) {
+            if (!uid.is_number()) continue;
+            if (Pawn* p = rec.board.find_pawn(static_cast<int32_t>(uid.get<double>()))) p->reactivation_listed = true;
+          }
+        }
+      }
+    }
     if (auto e = ms.find("env_instance"); e != ms.end() && e->is_object()) {
       m.env_instance_json = e->dump();
       // Env_Attack's planned Locations, in the order Ordered environments
