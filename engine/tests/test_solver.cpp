@@ -340,6 +340,48 @@ TEST_CASE("solver: one Vek threatens a building; the punch saves it") {
   CHECK(r.warnings.empty());
 }
 
+TEST_CASE("enemy phase: stop_early ends the phase between steps, never otherwise") {
+  NEED_ENGINE();
+  // Two Hornets, each queued on its own building.
+  Board b;
+  place(b, "PunchMech", {6, 6}, true);
+  const int32_t h1 = place(b, "Hornet1", {3, 3});
+  const int32_t h2 = place(b, "Hornet1", {5, 3});
+  queue(b, h1, {3, 2});
+  queue(b, h2, {5, 2});
+  set_building(b, {3, 2});
+  set_building(b, {5, 2});
+
+  TurnContext plain = context();
+  Board full = b;
+  const PhaseResult pr = E.end_turn(full, plain);
+  CHECK_FALSE(pr.stopped);
+  CHECK(full.tile({3, 2}).hp == 0);
+  CHECK(full.tile({5, 2}).hp == 0);
+
+  // A hook that never stops changes nothing.
+  TurnContext never = context();
+  int asked = 0;
+  never.stop_early = [&](const Board&) {
+    ++asked;
+    return false;
+  };
+  Board same = b;
+  const PhaseResult pn = E.end_turn(same, never);
+  CHECK_FALSE(pn.stopped);
+  CHECK(asked >= 2);  // after the status ticks and after each shot
+  CHECK(hash_board(same) == hash_board(full));
+  CHECK(pn.events.size() == pr.events.size());
+
+  // Stop once a building is down: the second shot never fires.
+  TurnContext stop = context();
+  stop.stop_early = [](const Board& mid) { return mid.tile({3, 2}).hp == 0 || mid.tile({5, 2}).hp == 0; };
+  Board part = b;
+  const PhaseResult ps = E.end_turn(part, stop);
+  CHECK(ps.stopped);
+  CHECK((part.tile({3, 2}).hp == 0) != (part.tile({5, 2}).hp == 0));
+}
+
 // Live run 2026-10-12: the Shifty re-activation was taken as a fresh action
 // and the plan fired and repaired one mech dozens of times. In the UI the
 // mech may only step one tile after attacking.

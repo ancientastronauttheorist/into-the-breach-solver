@@ -62,6 +62,13 @@ struct TurnContext {
   std::function<uint32_t(const Pawn& dying)> death_seed;
   std::function<int(Resolver&, const Pawn& pawn, const std::vector<Point>& tiles)> spider_egg;
 
+  // Optional early stop (the solver's bound): asked with the board on an
+  // idle frame between the steps of the enemy phase (after the status ticks,
+  // after each environment step and each queued shot); true ends the phase
+  // there with PhaseResult::stopped set and the board as it is (not a board
+  // the game reaches). Empty: the phase runs to its end.
+  std::function<bool(const Board&)> stop_early;
+
   // Optional logs.
   std::vector<RulesEvent>* events = nullptr;
   std::vector<ResolveEvent>* log = nullptr;
@@ -83,6 +90,8 @@ struct PhaseResult {
   bool quiescent = true;  // false: some step never settled
   // False if an EnvInexact or EnvUnsupported event was raised.
   bool exact = true;
+  // TurnContext::stop_early ended the phase before its end.
+  bool stopped = false;
 
   bool timing_sensitive() const { return !timing.empty(); }
   int count(PhaseEventType type) const;

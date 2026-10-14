@@ -88,6 +88,8 @@ struct SpaceDamage {
     return !path.empty() && move_kind != MoveKind::Melee && projectile == ProjectileKind::None;
   }
   bool is_melee() const { return move_kind == MoveKind::Melee && !path.empty(); }
+
+  bool operator==(const SpaceDamage&) const = default;  // every field
 };
 
 // SpaceDamage(loc, damage, push), the Lua constructor's common form.

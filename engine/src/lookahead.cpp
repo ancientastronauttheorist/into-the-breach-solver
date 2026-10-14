@@ -450,6 +450,7 @@ NextTurnLoss lookahead_sample(Engine& engine, const Board& root, const Board& af
   next.choose = nullptr;
   next.death_seed = nullptr;
   next.spider_egg = nullptr;
+  next.stop_early = nullptr;
   const Board start = next_turn_start(engine, root, after, phase, next, lookahead_seed(options, k), options);
   return reply_loss(engine, start, next, options);
 }
