@@ -153,8 +153,11 @@ Placed place(Engine& engine, const Board& deployed, const TurnContext& ctx, cons
   return out;
 }
 
-// The AI's planning with `ai_seed`, then the start of turn 1.
-Board outcome(Engine& engine, const Placed& pl, const TurnContext& ctx, uint32_t ai_seed, Score* phase_cost) {
+// The AI's planning with `ai_seed`, then the start of turn 1. The phase's
+// cost is scored with `score_opts` (the turn-1 solves' ranking, so the two
+// add up slot by slot: the mech exchange folds mechs into the grid slot).
+Board outcome(Engine& engine, const Placed& pl, const TurnContext& ctx, uint32_t ai_seed, Score* phase_cost,
+              const ScoreOptions& score_opts = {}) {
   Board b = pl.before_ai;
   AiPhaseOptions ao;
   ao.seed = ai_seed;
@@ -169,8 +172,10 @@ Board outcome(Engine& engine, const Placed& pl, const TurnContext& ctx, uint32_t
     if (p.controlled() && p.alive() && p.pos.valid() && p.movement.powered) p.active = true;
   }
   if (phase_cost) {
-    *phase_cost = score_turn(pl.placed, b, &ctx);
+    *phase_cost = score_turn(pl.placed, b, &ctx, nullptr, score_opts);
+    // End-board tiers belong to turn 1's own score (its solve or the screen).
     (*phase_cost)[ScoreKey::Position] = 0;
+    (*phase_cost)[ScoreKey::Threat] = 0;
   }
   return b;
 }
@@ -218,7 +223,7 @@ DeployResult deploy_search(Engine& engine, const Board& deployed, const TurnCont
     const Placed pl = place(e, deployed, ctx, out.mechs, tiles);
     for (int s = 0; s < std::max(1, options.screen_samples); ++s) {
       Score cost;
-      const Board start = outcome(e, pl, ctx, deploy_sample_seed(options.seed, s), &cost);
+      const Board start = outcome(e, pl, ctx, deploy_sample_seed(options.seed, s), &cost, score_opts);
       Board end = start;
       const PhaseResult pr = e.end_turn(end, ctx);
       values.emplace_back(add(cost, score_turn(start, end, &ctx, &pr, score_opts)), 1);
@@ -319,7 +324,7 @@ DeployResult deploy_search(Engine& engine, const Board& deployed, const TurnCont
     const Placed pl = place(e, deployed, ctx, out.mechs, finals[f].tiles);
     for (int s = 0; s < samples; ++s) {
       Score cost;
-      Board b = outcome(e, pl, ctx, deploy_sample_seed(options.seed, s), &cost);
+      Board b = outcome(e, pl, ctx, deploy_sample_seed(options.seed, s), &cost, score_opts);
       const BoardHash h = hash_board(b, HashMode::Search);
       auto it = seen.find(h);
       if (it != seen.end()) {

@@ -39,6 +39,7 @@
 #include <vector>
 
 #include <fstream>
+#include <sstream>
 
 #include <nlohmann/json.hpp>
 
@@ -51,6 +52,7 @@
 #include "predict_tool.hpp"
 #include "replay.hpp"
 #include "lookahead_tool.hpp"
+#include "two_turn_tool.hpp"
 #include "solve_tool.hpp"
 
 namespace fs = std::filesystem;
@@ -62,6 +64,7 @@ int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
                "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] [--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle]] [--threat-eval] | "
+               "--two-turn <state.json> [--arm base|laN|sumN|idleN]... [--plan FILE]... [--time S] [--next-time S] [--next-seeds N] [--seed N] [--threads N] [--deploy [--placement C5,D6,E5]... [--deploy-top N [--search-time S --search-samples N --search-finalists N]] [--deploy-seeds N] [--spawn F1,...] [--no-state-placement]] [--json FILE] [--verbose] | "
                "--lookahead-study (<recording.json> | DIR) [--time S] [--next-time S] [--threads N] [--samples N] [--seed N] [--compare [--skip-base] [--la-samples N] [--la-reply greedy|idle] [--la-sum]] [--no-spawns] [--json FILE] [--verbose] | "
                "--threat-check DIR | --ai DIR [--samples N] [--show N] | "
                "--predict <state.json> [--actions JSON|@FILE] [--no-enemy] [--branches [N]] [--json FILE] | "
@@ -500,6 +503,66 @@ int main(int argc, char** argv) {
       }
     }
     return tools::run_lookahead_study(o);
+  }
+  if (args[0] == "--two-turn") {
+    if (args.size() < 2) return usage();
+    tools::TwoTurnOptions o;
+    o.target = args[1];
+    o.game = game;
+    auto points = [](const std::string& v) {
+      std::vector<Point> out;
+      std::stringstream ss(v);
+      std::string t;
+      while (std::getline(ss, t, ',')) {
+        if (auto p = from_visual(t)) out.push_back(*p);
+      }
+      return out;
+    };
+    for (size_t i = 2; i < args.size(); ++i) {
+      const bool more = i + 1 < args.size();
+      if (args[i] == "--time" && more) {
+        o.time = std::stod(args[++i]);
+      } else if (args[i] == "--next-time" && more) {
+        o.next_time = std::stod(args[++i]);
+      } else if (args[i] == "--threads" && more) {
+        o.threads = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--next-seeds" && more) {
+        o.next_seeds = std::max(0, std::stoi(args[++i]));
+      } else if (args[i] == "--seed" && more) {
+        o.seed = static_cast<uint32_t>(std::stoul(args[++i]));
+      } else if (args[i] == "--arm" && more) {
+        o.arms.push_back(args[++i]);
+      } else if (args[i] == "--plan" && more) {
+        o.plan_files.push_back(args[++i]);
+      } else if (args[i] == "--deploy") {
+        o.deploy = true;
+      } else if (args[i] == "--deploy-seeds" && more) {
+        o.deploy_seeds = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--deploy-seed" && more) {
+        o.deploy_seed = static_cast<uint32_t>(std::stoul(args[++i]));
+      } else if (args[i] == "--deploy-top" && more) {
+        o.deploy_top = std::stoi(args[++i]);
+      } else if (args[i] == "--search-time" && more) {
+        o.deploy_options.time_limit_s = std::stod(args[++i]);
+      } else if (args[i] == "--search-samples" && more) {
+        o.deploy_options.samples = std::stoi(args[++i]);
+      } else if (args[i] == "--search-finalists" && more) {
+        o.deploy_options.finalists = std::stoi(args[++i]);
+      } else if (args[i] == "--placement" && more) {
+        o.placements.push_back(points(args[++i]));
+      } else if (args[i] == "--no-state-placement") {
+        o.state_placement = false;
+      } else if (args[i] == "--spawn" && more) {
+        for (Point p : points(args[++i])) o.spawns.push_back(p);
+      } else if (args[i] == "--json" && more) {
+        o.json_out = args[++i];
+      } else if (args[i] == "--verbose") {
+        o.verbose = true;
+      } else {
+        return usage();
+      }
+    }
+    return tools::run_two_turn(o);
   }
   if (args[0] == "--diff-weapons") {
     tools::DiffWeaponsOptions o;

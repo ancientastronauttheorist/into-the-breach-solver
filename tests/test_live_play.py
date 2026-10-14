@@ -130,6 +130,7 @@ class FakeEngine:
         # {uid: (x, y)} = these tiles; an exception = the engine fails.
         self.deploy_tiles = None
         self.deploys = []  # (state, time_limit, always) per deploy request
+        self.deploy_rankings = []  # the ranking options of each deploy request
         self.budgets = []  # (time_limit, max_time, min_tiers) per solve
         self.tiers = []  # ranking options (threat_tier, mech_grid, ...) per solve
         self.predicts = []
@@ -186,9 +187,10 @@ class FakeEngine:
     def board(self, path):
         return compact(self._state(path))
 
-    def deploy(self, path, time_limit, always=None):
+    def deploy(self, path, time_limit, always=None, ranking=None):
         st = self._state(path)
         self.deploys.append((st, time_limit, always))
+        self.deploy_rankings.append(ranking)
         if isinstance(self.deploy_tiles, Exception):
             raise self.deploy_tiles
         mechs = sorted(u["uid"] for u in st["units"] if u.get("team") == 1 and u.get("mech"))
@@ -1055,12 +1057,23 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual(self.placed_tiles(), {0: h[1], 1: free})
         state, budget, always = engine.deploys[0]
         self.assertEqual(always, [[h[0], h[1]]])  # the heuristic is a candidate
+        self.assertEqual(engine.deploy_rankings, [{}])  # no ranking options: the request is as before
         self.assertEqual(sorted(u["uid"] for u in state["units"] if u.get("mech")), [0, 1])  # mechs on the board
         self.assertEqual(budget, 45.0)
         deploys = [c for c in self.acting() if c.startswith("DEPLOY")]
         self.assertEqual(deploys[2:], [f"DEPLOY 1 {free[0]} {free[1]}", f"DEPLOY 0 {h[1][0]} {h[1][1]}"])
         names = [p.name for p in self.run_dir().iterdir()]
         self.assertIn("m00_turn_00_deployed_02.json", names)
+
+    def test_deploy_passes_the_ranking_options(self):
+        self.bridge(self.deploy_state())
+        engine = FakeEngine()
+        args = ["deploy", "--threat-tier", "--objectives-first", "--mech-grid", "2", "--mech-grid-turns",
+                "--mech-grid-pilot", "--lookahead"]
+        self.assertEqual(self.run_cmd(args, engine=engine), 0)
+        self.assertEqual(engine.deploy_rankings, [{"threat_tier": True, "objectives_first": True, "mech_grid": 2,
+                                                   "mech_grid_turns": True, "mech_grid_pilot": True,
+                                                   "lookahead": True}])
 
     def test_deploy_engine_search_swaps_through_a_free_tile(self):
         self.bridge(self.deploy_state())

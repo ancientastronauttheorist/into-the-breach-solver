@@ -44,6 +44,8 @@ engine/build/itb_inspect --solve recordings --threat-tier --threat-eval --json o
 engine/build/itb_inspect --threat-check recordings                       # threat proxy vs engine and games, cost
 engine/build/itb_inspect --solve state.json --lookahead [--lookahead-samples 8] # experimental next-turn tier
 engine/build/itb_inspect --lookahead-study state.json --compare [--samples 8] [--next-time 4]  # plans vs next turn
+engine/build/itb_inspect --two-turn state.json --arm la8 --arm sum8 --plan solve.json [--next-seeds 16]  # plans over two turns
+engine/build/itb_inspect --two-turn deployed.json --deploy --deploy-top 6 [--spawn F1] # placements over two turns
 engine/build/itb_inspect --predict state.json --actions @actions.json --branches   # live validation
 engine/build/itb_inspect --ai recordings [--samples 64] [--show N] [--verbose]       # enemy AI planning vs the live saves
 engine/build/itb_live deploy deployed_state.json --time 45 --threads 8            # deployment search (JSON)
@@ -194,7 +196,10 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   placement stays, with a note. `--heuristic` skips the search, `--tiles`
   places by hand. It checks every mech's tile in the state (the final board
   is `m<MM>_turn_00_deployed_02.json` when the search moved them) and leaves
-  Confirm to you.
+  Confirm to you. `deploy` takes the ranking options of `turn` / `mission`
+  (`--threat-tier ... --lookahead`); given, the search's turn-1 solves rank
+  as the turns will (off by default: plain tiers, as before; see
+  "Enemy AI planning and deployment").
 - Bridges without `weapons_exact` (before the extension) need
   `--loadout FILE` (`{"PunchMech": ["Prime_Punchmech_B", ...]}`); without
   `moved` the driver marks the units it moved.
@@ -1394,6 +1399,75 @@ base search 7.5-90 s and the lookahead search the rest. Suggested live
 trial: `live_play.py mission ... --lookahead --min-tiers 7` with the live
 flags (7 tiers: grid through mech HP with the threat and next-turn tiers).
 
+**Two-turn measurement** (`itb_inspect --two-turn`, 2026-10-13, after
+Unfair run 18 went from grid 7 to 1 and lost the Charge Mech on
+Mission_Solar, `live/20261013_180011` m24, every turn proven optimal with
+the live flags and `--lookahead`). Turn mode solves a turn-start board with
+several arms (`base` = the live flags; `laN` / `sumN` / `idleN` = with the
+lookahead, worst or sum of N samples, or the idle reply) plus recorded plans
+(`--plan`, e.g. the run's `_solve.json`), plays each distinct plan through
+its enemy phase and judges the next turn on `--next-seeds` independent AI
+seeds by a real live-flags solve of each board (plain grid, mechs, building
+HP, stars, mech HP of its plan). Deploy mode (`--deploy`) plays placements
+(`--placement`, the state's own, the deployment search's `--deploy-top N`)
+through the deployment's AI phase for `--deploy-seeds` seeds, solves each
+distinct turn-1 board with one arm and judges turn 2 the same way; turn 1's
+spawn tiles are hidden at deployment, `--spawn` adds them (a retrospective
+study can take them from the recorded turn-1 board).
+
+The mission: 7 building tiles with 9 HP for grid 7, two of them the Solar
+Farms (B3, D7: Mission_Critical, 1 star = 1 grid power at mission end each,
+lost when the farm is damaged); Scorpions, two Burrowers, a Spider and a
+boosting Jelly. Grid 7 -> 7 -> 6 -> 5 -> 1: turns 2 and 3 were each 3 grid
+in the worst case and lost 1 (Grid Defense resisted twice at F3), turn 4
+(the last) forced 4 grid and the 1-HP Charge Mech (proven: keeping the
+mech cost all 5 grid in the worst case). Findings (2 threads):
+
+- Deployment: the search (re-run with 16 seeds, 4 finalist sets) picks the
+  live placement again (B5 Judo, F6 Charge, C6 Grav: the only finalist
+  whose sampled AI outcomes cost no grid on turn 1). Over two turns (8
+  deployment seeds, turn 1 solved with `la8` 8 s, turn 2 judged on 6 seeds)
+  the nine placements tried (it, live_play's heuristic B5/E5/E7 and the
+  search's next seven) lose 1.8-2.8 grid in turns 1-2 on average and 5 in
+  the worst outcome, every one: the G-side placements (G6/B6/G5, G7/B6/G5)
+  lose about 1 grid on turn 1 and 1 on turn 2, the B/F/C ones 0.25 and 1.6.
+  No placement avoids the losses; the live one is among the best (1.85).
+  With the ranking options (`--threat-tier ... --lookahead`) the search
+  picks the same placement (its turn-1 next-turn estimate is the worst of
+  the finalists, but it is the only one with no turn-1 grid loss).
+- Turn 1: `base`, `la8` (the live plan), `la16`, `la32`, `sum8`, `sum16`
+  give four distinct plans, each losing nothing on turn 1; on 16
+  independent seeds every one loses grid on turn 2 in 15-16 of them (mean
+  2.2-2.5, `la32`'s 3.6, worst 4-5). The board already forced the losses.
+- Turn 3 (next turn the last): the live plan (`la8`, also `la16`) leaves
+  turn 4 losing 1.31 grid and 0.56 mechs on average (worst 2 grid and 2
+  mechs); the `base` / `sum8` / `sum16` plan, the same on turn 3 itself,
+  0.69 grid and 0.12 mechs (worst 1 and 1). The game's turn 4 took 4 grid
+  and a mech, worse than any sample of either. Turn 2: 1.31 (live) against
+  1.19 (`sum8`).
+
+The sum fold looked better here, so it was measured on 139 turn starts of
+runs 10-18 (every 7th from three offsets, not last turns; `la8` against
+`sum8`, 10 s each, 8 next-turn seeds of 3 s): the plans differ on 32, the
+turn itself is the same (grid, mechs, stars; mech HP 109 against 119 lost),
+next-turn grid lost (sum of the per-turn means) 25.5 against 24.1, mechs
+2.25 against 3.0, turns better by grid + 2 x mechs 8 against 9. No clear
+gain: the default stays the worst of 8.
+
+The deployment search with the live ranking options (`itb_live deploy
+--threat-tier --objectives-first --mech-grid 2 --mech-grid-turns
+--mech-grid-pilot --lookahead`) against the plain one, on 18 live
+deployments of runs 10-18 (every 6th; 30 s each on 2 threads; each chosen
+placement judged over two turns: 6 fresh deployment seeds, turn 1 solved
+with `la8` for 6 s and the recorded turn-1 spawn tiles added, turn 2 on 4
+seeds of 2 s): the same placement on 2; on the other 16 the plain search's
+placements lose 6.0 grid on turns 0-1 and 4.8 on turn 2 (sums of the
+means), 1 star and 0.25 mechs, the ranked search's 10.3 and 2.7, 2.3 stars
+and 0.04 mechs; lower grid + 2 x mechs over the two turns 9 against 5. The
+0.5 s turn-1 solves leave the lookahead search little time, and trading
+certain turn-1 losses for estimated turn-2 ones does not pay: the option
+stays off.
+
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state
 dump, each under pcall with failures listed in `bridge_errors`: the
@@ -1564,6 +1638,15 @@ and its `drop_zone` / `deployment_zone`: `{"cmd": "deploy", "state",
 `zone`, `sets`, `best` and the ranked `finalists` (each `tiles`, `visual`,
 `by_uid`, `screen` and `value`: `worst_case`, `tier_min`, `mean`,
 `outcomes`, `seeds`), `solves`, `time`, `timed_out` and `warnings`.
+The solve request's ranking options (`threat_tier`, `objectives_first`,
+`mech_grid`, `mech_grid_turns`, `mech_grid_pilot`, `lookahead`, ...; CLI
+`--threat-tier ... --lookahead`, `live_play.py deploy` passes its own) go
+to `DeployOptions::solve`: the turn-1 solves then rank as the live turns do,
+the values carry the threat and next-turn tiers, and the phase's own cost
+is scored with the same options (mechs folded into the grid slot by the
+exchange; no threat, which is turn 1's end board's). Absent, nothing
+changes. Measured in "Two-turn measurement" below: worse placements than
+the plain search on the sampled live deployments, so it stays off.
 
 ### Open questions for live-game testing
 
