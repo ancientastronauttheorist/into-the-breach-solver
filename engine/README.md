@@ -453,10 +453,11 @@ Done so far (build order from the decompile):
      every mech weapon and queued Vek attack in the recordings runs cleanly:
      `itb_inspect --weapons recordings`.
    - C++ ports of the hottest weapon scripts (`weapon_ports_list.cpp`; Lua
-     stays the reference): 58 Lua functions (`GetTargetArea` /
+     stays the reference): 62 Lua functions (`GetTargetArea` /
      `GetSkillEffect` of Move, repair, the base tank / artillery / laser
-     classes, 40-odd squad and Vek weapons and a few mission units): 545
-     weapon methods, 99.4% of those calls on the 60-board sample. A port is
+     classes, 40-odd squad and Vek weapons, a few mission units and the
+     deployable tanks): 574 weapon methods, 99.4% of those calls on the
+     60-board sample. A port is
      bound to a weapon table only when the method resolves to the very Lua
      function it mirrors (source file, line and an FNV-1a hash of its text,
      likewise for the helpers it stands in for: `GetProjectileEnd`,
@@ -582,6 +583,57 @@ Done so far (build order from the decompile):
      the enemy phase before turn 1 and the AI's sampled answers, each turn-1
      board solved.
 
+### Deployable units
+
+The support weapons that drop a player-controlled tank
+(`weapons_deploy.lua`: `DeploySkill_Tank`, `_AcidTank`, `_ShieldTank`,
+`_PullTank`, `_IceTank`, each with `_A` / `_B` / `_AB`) work end to end:
+engine, solver, loader and live play. No squad starts with one (they come
+from shops and rewards); the AE Bombermechs and Arachnophiles create player
+units the same way (`Ranged_DeployBomb`'s walking bomb, `Ranged_Arachnoid`'s
+spider), and the live runs of 2026-10-11 to 10-14 played 59 turns in which a
+bomb created that turn moved and acted, every step matching the game.
+
+- **The weapon.** `Deployable` (`weapons_base.lua`): LineArtillery's target
+  area with `OnlyEmpty` (2 to 8 tiles in a line, none blocked for ground
+  units: no pawn, mountain, building, water or chasm), `Limited = 1` (one
+  use per battle; the bridge's `weapon_slots` give the uses left), and one
+  artillery shot whose SpaceDamage carries `sPawn = self.Deployed`. The
+  upgrades are pawn types (`Deploy_TankA` +2 Health, `Deploy_TankB` the
+  2-damage shot, `Deploy_PullTankB` flying, ...; the Ice Tank's `_A` and
+  `_B` point at each other's pawns), so the unit's type carries them.
+- **The unit.** `Board::DamageSpace` (B6) creates it with its type's default
+  team (TEAM_PLAYER), and `Board::AddPawn` sets it active
+  (`Pawn::SetActive(true)`, which refuses only a pawn whose one skill is
+  Move and whose move speed is 0): it moves and fires in the turn it lands,
+  then every turn after, one move and one action like a mech without a
+  pilot. It is not a mech (`Pawn::SetMech` is for squad units), has no
+  Repair, and the engine numbers it `Board::next_uid`.
+- **Score.** Its death is no mech loss and costs no star (it is not a
+  mission unit); Vek target it like a mech (`Skill:ScoreList`: any
+  enemy-team pawn that is neither dead nor a TempUnit scores ScoreEnemy).
+  The position tier counts it (+2 alive, +1 per HP), so a dead tank never
+  scores better than a living one next to a Vek (the -1 for an enemy next
+  to a player non-mech unit would otherwise reward losing it).
+- **Ports.** `Deployable:GetSkillEffect`, `Deploy_AcidTankShot`,
+  `Deploy_ShieldTankShot` and `Deploy_ShieldTankShot2` run natively (the
+  other tank shots were already: TankDefault, Science_Pullmech); `itb_inspect
+  --diff-weapons recordings --random 300` finds no difference for them.
+- **Live play.** The deploy is an ordinary `ATTACK` (the mech's slot of the
+  exact weapon id). The bridge lists a unit created this turn at once,
+  active, with its type's SkillList as `weapons` and no `weapons_exact` /
+  `weapon_slots` (the save has no record of it until the next turn); the
+  game numbers it itself. `live_play.py turn` matches it after the deploy
+  step by type and tile (`unit_uid_map`) and sends the tank's `MOVE_NATIVE`
+  and `ATTACK` under the game's uid (slot from `weapons`). From the next
+  turn on it is an ordinary unit of the board. No bridge change was needed.
+- Tests: `test_deployables.cpp` (every upgrade's unit, the drop area and the
+  one use, acting the turn it lands, each tank's shot, score, Vek targeting,
+  the solver dropping a tank and firing it, keeping it alive),
+  `test_live.cpp` (the live bomb turn replayed against the game's board, a
+  deploy tank through `itb_live`), `test_weapon_ports.cpp`, and
+  `tests/test_live_play.py` (the uid mapping and commands).
+
 ### Environments and mission hooks
 
 "Exact" means: reproduced from what today's recordings contain. Newer bridge
@@ -687,7 +739,9 @@ over chance outcomes, the score judges one concrete outcome.
    -3 per mech on fire (not fire-immune), -2 per mech with ACID, -2 per
    frozen mech, -1 per mech on smoke, -2 per mech at 1 HP; -1 per (enemy,
    adjacent building) pair (-2 for an objective building) and per enemy next
-   to a player-team non-mech unit; +1 per enemy on fire or frozen. One pass
+   to a player-team non-mech unit; +1 per enemy on fire or frozen; +2 per
+   living deployed unit and +1 per HP it has (a support tank or an
+   Arachnoid spider, `is_deployed_unit`; see "Deployable units"). One pass
    over the pawns. Spawn tiles are left out: a blocked spawn stays queued and
    hurts its blocker again next turn, so occupying one is not a clear gain.
 

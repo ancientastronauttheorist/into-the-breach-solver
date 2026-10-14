@@ -598,3 +598,144 @@ TEST_CASE("live: a hurt Burrower leaves the board and is exported underground (l
   CHECK((*still)["hp"] == 1);
   fs::remove(carried);
 }
+
+// ---- Units a weapon creates (Bombling bombs, deploy tanks) ------------------------------
+//
+// Live 20261013_104302 m00 (Mission_Airstrike) turn 2: the Bombling Mech
+// dropped a walking bomb (Ranged_DeployBomb at E6); the engine numbered it
+// 7507, the game 7511. live_play matched it by type and tile, then moved it
+// to E5 and fired DeployUnit_SelfDamage there under 7511. The bridge lists a
+// unit created this turn active, with its type's SkillList as `weapons` and
+// no weapons_exact / weapon_slots (no save record until the next turn); a
+// deploy tank (DeploySkill_*) comes out the same way.
+
+namespace {
+
+json fixture_json(const std::string& name) {
+  std::ifstream in(std::string(ITB_FIXTURE_DIR) + "/" + name);
+  return json::parse(in);
+}
+
+json* state_unit(json& wrapped, int uid) {
+  for (json& u : wrapped["data"]["bridge_state"]["units"]) {
+    if (u["uid"] == uid) return &u;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST_CASE("live: a unit created this turn acts under the game's uid (live 20261013_104302 m00 t2)") {
+  NEED_SESSION();
+  const std::string start = std::string(ITB_FIXTURE_DIR) + "/live_bomby_t2_step2.json";
+  const json board = S.handle({{"cmd", "board"}, {"state", start}});
+  REQUIRE_MESSAGE(board["ok"].get<bool>(), board.dump());
+  const json* bomb = board_unit(board["board"], 7511);
+  REQUIRE(bomb);
+  CHECK((*bomb)["type"] == "DeployUnit_Bomby");
+  CHECK((*bomb)["team"] == 1);
+  CHECK((*bomb)["mech"] == false);
+  // The rest of the turn's plan for the bomb, as played: move to E5, blow up.
+  const json plan = json::array({{{"uid", 7511},
+                                  {"move", {3, 3}},
+                                  {"kind", "weapon"},
+                                  {"weapon", "DeployUnit_SelfDamage"},
+                                  {"target", {3, 3}}}});
+  const json r = S.handle({{"cmd", "predict"}, {"state", start}, {"plan", plan}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  REQUIRE(r["refused"] == -1);
+  REQUIRE(r["steps"].size() == 2);
+  // The game's board after the blast (step 4 of that turn): same units, tiles
+  // and HP, and the same buildings.
+  const json live = S.handle({{"cmd", "board"}, {"state", std::string(ITB_FIXTURE_DIR) + "/live_bomby_t2_step4.json"}});
+  REQUIRE(live["ok"].get<bool>());
+  const json& want = r["steps"].back()["board"];
+  CHECK(uids(want) == uids(live["board"]));
+  for (const json& u : live["board"]["units"]) {
+    const json* p = board_unit(want, u["uid"].get<int>());
+    REQUIRE(p);
+    INFO(u.dump());
+    CHECK((*p)["type"] == u["type"]);
+    CHECK((*p)["x"] == u["x"]);
+    CHECK((*p)["y"] == u["y"]);
+    CHECK((*p)["hp"] == u["hp"]);
+  }
+  CHECK(want["buildings"] == live["board"]["buildings"]);
+  // The solver plans for the bomb too, under its live uid.
+  const json solved = S.handle({{"cmd", "solve"}, {"state", start}, {"time_limit", 3.0}});
+  REQUIRE_MESSAGE(solved["ok"].get<bool>(), solved.dump());
+  bool bomb_acts = false;
+  for (const json& s : solved["steps"]) bomb_acts = bomb_acts || s["uid"] == 7511;
+  CHECK(bomb_acts);
+}
+
+TEST_CASE("live: a deploy weapon's tank, the turn it lands and the turns after") {
+  NEED_SESSION();
+  // The same board with the GuardMech carrying a Light Tank (Limited = 1)
+  // and, in the bomb's place, the tank as the bridge exports one dropped this
+  // turn (the B upgrade's 2-damage shot from the type's SkillList).
+  json wrapped = fixture_json("live_bomby_t2_step2.json");
+  json& guard = *state_unit(wrapped, 0);
+  guard["weapons_exact"] = {"Prime_ShieldBash", "DeploySkill_Tank_AB"};
+  guard["weapon_slots"] = json::array(
+      {{{"slot", 0}, {"id", "Prime_ShieldBash"}, {"limited", 0}, {"powered", true}},
+       {{"slot", 1}, {"id", "DeploySkill_Tank_AB"}, {"limited", 1}, {"uses", 1}, {"uses_saved", 1}, {"powered", true}}});
+  json& tank = *state_unit(wrapped, 7511);
+  tank["type"] = "Deploy_TankAB";
+  tank["hp"] = 3;
+  tank["max_hp"] = 3;
+  tank["weapons"] = {"Deploy_TankShot2"};
+  const fs::path mid = temp_file("itb_live_test_deploy_mid.json", wrapped);
+
+  const json board = S.handle({{"cmd", "board"}, {"state", mid.string()}});
+  REQUIRE_MESSAGE(board["ok"].get<bool>(), board.dump());
+  const json* t = board_unit(board["board"], 7511);
+  REQUIRE(t);
+  CHECK((*t)["type"] == "Deploy_TankAB");
+  CHECK((*t)["hp"] == 3);
+  CHECK((*t)["mech"] == false);
+
+  // The tank shoots this turn: Deploy_TankShot2 (2 damage, push) at the
+  // Hornet2 at D5 (3,4) from (2,4).
+  const json shot = json::array({{{"uid", 7511},
+                                  {"move", {2, 4}},
+                                  {"kind", "weapon"},
+                                  {"weapon", "Deploy_TankShot2"},
+                                  {"target", {3, 4}}}});
+  const json r = S.handle({{"cmd", "predict"}, {"state", mid.string()}, {"plan", shot}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  CHECK(r["refused"] == -1);
+
+  // The Guard drops a second tank (its one use): numbered one past the
+  // board's largest uid; after that, no use left.
+  const json drop = json::array({{{"uid", 0}, {"kind", "weapon"}, {"weapon", "DeploySkill_Tank_AB"}, {"target", {1, 2}}}});
+  const json d = S.handle({{"cmd", "predict"}, {"state", mid.string()}, {"plan", drop}});
+  REQUIRE_MESSAGE(d["ok"].get<bool>(), d.dump());
+  CHECK(d["refused"] == -1);
+  int dropped = -1;
+  for (const json& u : d["after_player"]["units"]) {
+    if (u["type"] == "Deploy_TankAB" && u["uid"] != 7511) dropped = u["uid"].get<int>();
+  }
+  CHECK(dropped == 7512);
+  guard["weapon_slots"][1]["uses"] = 0;
+  const fs::path spent = temp_file("itb_live_test_deploy_spent.json", wrapped);
+  const json no = S.handle({{"cmd", "predict"}, {"state", spent.string()}, {"plan", drop}});
+  REQUIRE_MESSAGE(no["ok"].get<bool>(), no.dump());
+  CHECK(no["refused"] == 0);
+  const json solved = S.handle({{"cmd", "solve"}, {"state", spent.string()}, {"time_limit", 2.0}});
+  REQUIRE_MESSAGE(solved["ok"].get<bool>(), solved.dump());
+  for (const json& s : solved["steps"]) CHECK(s.value("weapon", "") != "DeploySkill_Tank_AB");
+
+  // A later turn: the save now has the tank, so the bridge exports its exact
+  // weapon and slots (as for any player unit, e.g. ArchiveArtillery).
+  tank["weapons_exact"] = {"Deploy_TankShot2"};
+  tank["weapon_slots"] = json::array({{{"slot", 0}, {"id", "Deploy_TankShot2"}, {"limited", 0}, {"powered", true}}});
+  const fs::path later = temp_file("itb_live_test_deploy_later.json", wrapped);
+  const json l = S.handle({{"cmd", "predict"}, {"state", later.string()}, {"plan", shot}});
+  REQUIRE_MESSAGE(l["ok"].get<bool>(), l.dump());
+  CHECK(l["refused"] == -1);
+  CHECK(l["after_player"] == r["after_player"]);
+  fs::remove(mid);
+  fs::remove(spent);
+  fs::remove(later);
+}

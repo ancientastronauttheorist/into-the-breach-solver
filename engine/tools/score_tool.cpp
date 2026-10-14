@@ -70,9 +70,9 @@ void print_score(const Score& s, const ObjectiveReport& obj, const PositionTerms
               obj.enemy_kills, obj.acid_kills, obj.spawns_blocked, obj.mountains_destroyed, obj.repairs_used);
   std::printf(
       "position %d: mech fire %d acid %d frozen %d smoke %d at-1hp %d | building threat %d unit threat %d | "
-      "enemy fire %d frozen %d\n",
+      "enemy fire %d frozen %d | deployed units %d hp %d\n",
       pos.total(), pos.mech_fire, pos.mech_acid, pos.mech_frozen, pos.mech_smoke, pos.mech_fragile,
-      pos.building_threat, pos.unit_threat, pos.enemy_fire, pos.enemy_frozen);
+      pos.building_threat, pos.unit_threat, pos.enemy_fire, pos.enemy_frozen, pos.deployed, pos.deployed_hp);
 }
 
 int run_score(const fs::path& input, const fs::path& game) {

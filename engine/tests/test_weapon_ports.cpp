@@ -111,3 +111,25 @@ TEST_CASE("weapon ports: identical to Lua on a recorded board") {
   check(total);
   CHECK(total.effects > 1000);
 }
+
+TEST_CASE("weapon ports: the deployable weapons and their tanks' shots") {
+  NEED_GAME();
+  const char* tables[] = {"DeploySkill_Tank",     "DeploySkill_Tank_AB",    "DeploySkill_AcidTank_B",
+                          "DeploySkill_PullTank", "DeploySkill_ShieldTank", "DeploySkill_IceTank_A",
+                          "Deploy_AcidTankShot",  "Deploy_AcidTankShot2",   "Deploy_ShieldTankShot",
+                          "Deploy_ShieldTankShot2"};
+  for (const char* w : tables) {
+    INFO(w);
+    CHECK_FALSE(H.native_port(w, "GetSkillEffect").empty());
+  }
+  CHECK(H.native_port("DeploySkill_Tank", "GetSkillEffect") == "weapons_base.lua:355");
+  const std::vector<std::string> pool = H.weapon_ids();
+  std::mt19937 rng(20261014);
+  WeaponDiffStats total;
+  for (int i = 0; i < 3; ++i) {
+    const Board b = random_board(*G.data, pool, rng);
+    for (const char* w : tables) diff_weapon(H, b, w, total);
+  }
+  check(total);
+  CHECK(total.effects > 1000);
+}
