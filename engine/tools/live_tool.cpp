@@ -52,16 +52,22 @@ namespace {
 // it follows the plan's default outcome exactly.
 constexpr uint32_t kLuaSeed = 1;
 
-const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "next_turn", "threat",
-                                      "mech_hp", "objectives",  "kills", "vek_hp",            "position"};
+const char* kTierNames[kScoreKeys] = {"grid_survival", "grid",       "building_hp", "mechs",  "objectives_failed",
+                                      "next_turn",     "threat",     "mech_hp",     "objectives", "kills",
+                                      "vek_hp",        "position"};
 
 // The tiers in use: "threat" only with the threat tier, "next_turn" only
-// with the lookahead.
+// with the lookahead, "grid_survival" (a probability) only with
+// grid_survival.
 json score_json(const Score& s, TierSet threat = 0) {
   json j = json::object();
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (!tier_used(i, threat)) continue;
+    if (!tier_shown(i, threat)) continue;
     const int32_t v = s.v[static_cast<size_t>(i)];
+    if (i == static_cast<int>(ScoreKey::GridSurvival) && v >= 0 && v <= kSurvivalOne) {
+      j[kTierNames[i]] = static_cast<double>(v) / kSurvivalOne;
+      continue;
+    }
     j[kTierNames[i]] = v == INT32_MAX ? json(nullptr) : json(v);
   }
   return j;
@@ -360,8 +366,9 @@ LookaheadOptions lookahead_options(const json& request, const std::vector<std::p
 
 // The request's ranking options (solve and deploy alike): the experimental
 // tiers (SolveOptions::threat_tier, threat_kills, objectives_first), the
-// mech exchange (mech_grid, mech_grid_turns, mech_grid_pilot) and the
-// next-turn lookahead (lookahead.hpp). Absent: all off.
+// mech exchange (mech_grid, mech_grid_turns, mech_grid_pilot), the
+// next-turn lookahead (lookahead.hpp) and the Grid Defense survival odds
+// (grid_survival). Absent: all off.
 SolveOptions ranking_options(const json& request, const std::vector<std::pair<int32_t, std::string>>& repair) {
   SolveOptions tiers;
   tiers.threat_tier = request.value("threat_tier", false);
@@ -372,6 +379,7 @@ SolveOptions ranking_options(const json& request, const std::vector<std::pair<in
   tiers.mech_grid_pilot = request.value("mech_grid_pilot", false);
   tiers.lookahead = request.value("lookahead", false);
   if (tiers.lookahead) tiers.lookahead_options = lookahead_options(request, repair);
+  tiers.grid_survival = request.value("grid_survival", false);
   return tiers;
 }
 
@@ -434,7 +442,10 @@ std::vector<std::vector<Point>> parse_placements(const json& j) {
 json summary_json(const DeploySummary& s, TierSet tiers) {
   json mean = json::object();
   for (int i = 0; i < kScoreKeys && i < static_cast<int>(s.mean.size()); ++i) {
-    if (i == static_cast<int>(ScoreKey::Threat) && !tier_used(i, tiers)) continue;
+    if ((i == static_cast<int>(ScoreKey::Threat) || i == static_cast<int>(ScoreKey::GridSurvival)) &&
+        !tier_shown(i, tiers)) {
+      continue;
+    }
     mean[kTierNames[i]] = s.mean[static_cast<size_t>(i)];
   }
   return json{{"worst_case", score_json(s.worst, tiers)},
@@ -640,6 +651,12 @@ json LiveSession::handle(const json& request) {
       }
     }
     const TierSet threat = tiers.tiers();
+    if (tiers.grid_survival) {
+      // The Grid Defense chance the survival odds use, and where it came from.
+      const int known = l.ctx.mission.grid_defense;
+      out["grid_defense"] = json{{"percent", known >= 0 ? known : l.board.grid_defense},
+                                 {"source", known >= 0 ? "state" : "default"}};
+    }
     if (cmd == "predict") {
       if (!request.contains("plan")) throw std::invalid_argument("predict needs a 'plan'");
       plan = parse_plan(request["plan"]);
@@ -659,6 +676,7 @@ json LiveSession::handle(const json& request) {
         so.mech_grid_pilot = tiers.mech_grid_pilot;
         so.lookahead = tiers.lookahead;
         so.lookahead_options = tiers.lookahead_options;
+        so.grid_survival = tiers.grid_survival;
         const int beam = request.value("beam_width", -1);
         if (beam >= 0) so.beam_width = beam;
         so.repair_skills = l.repair_skills;
@@ -707,7 +725,7 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
                "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] "
-               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] | "
+               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] [--grid-survival] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | "
                "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
                "[--solve-time S] [--solve-nodes N] [--seed N] [--placements JSON|@FILE] [--always JSON|@FILE] "
@@ -815,6 +833,8 @@ int run_live(int argc, char** argv) {
         request["lookahead_reply"] = args[++i];
       } else if (args[i] == "--lookahead-fold" && more && ranked) {
         request["lookahead_fold"] = args[++i];
+      } else if (args[i] == "--grid-survival" && ranked) {
+        request["grid_survival"] = true;
       } else if (args[i] == "--beam" && more && (cmd == "solve" || cmd == "deploy")) {
         request["beam_width"] = std::stoi(args[++i]);
       } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve" || cmd == "deploy")) {

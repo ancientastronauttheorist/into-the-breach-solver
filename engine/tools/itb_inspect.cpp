@@ -63,7 +63,7 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
-               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] [--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle]] [--threat-eval] | "
+               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] [--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle]] [--grid-survival] [--threat-eval] | "
                "--two-turn <state.json> [--arm base|laN|sumN|idleN]... [--plan FILE]... [--time S] [--next-time S] [--next-seeds N] [--seed N] [--threads N] [--deploy [--placement C5,D6,E5]... [--deploy-top N [--search-time S --search-samples N --search-finalists N]] [--deploy-seeds N] [--spawn F1,...] [--no-state-placement]] [--json FILE] [--verbose] | "
                "--lookahead-study (<recording.json> | DIR) [--time S] [--next-time S] [--threads N] [--samples N] [--seed N] [--compare [--skip-base] [--la-samples N] [--la-reply greedy|idle] [--la-sum]] [--no-spawns] [--json FILE] [--verbose] | "
                "--threat-check DIR | --ai DIR [--samples N] [--show N] | "
@@ -456,6 +456,8 @@ int main(int argc, char** argv) {
         o.lookahead_sum = args[++i] == "sum";
       } else if (args[i] == "--kills-tier") {
         o.kills_tier = true;
+      } else if (args[i] == "--grid-survival") {
+        o.grid_survival = true;
       } else if (args[i] == "--threat-eval") {
         o.threat_eval = true;
       } else {

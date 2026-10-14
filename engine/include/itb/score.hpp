@@ -5,7 +5,9 @@
 // tier and an earlier tier always dominates a later one, so "optimal" has one
 // exact meaning. Tiers (decided with the project owner):
 //
-//   1. grid and buildings: grid power lost, then building HP lost
+//   1. grid and buildings: [the odds the grid survives the turn, only with
+//                          ScoreOptions::grid_survival], grid power lost,
+//                          then building HP lost
 //   2. mech survival:      mechs destroyed, then objective stars failed
 //                          (objectives.hpp), then [next-turn loss, only with
 //                          the lookahead (lookahead.hpp)], then [next-turn
@@ -33,7 +35,16 @@ struct TurnContext;
 struct PhaseResult;
 
 enum class ScoreKey : int {
-  GridLost = 0,      // -(grid power lost)
+  // The probability that the grid is still above 0 at the end of the turn,
+  // in kSurvivalOne units, over the Grid Defense rolls (and the game's
+  // random picks) of the turn. score_turn sets one outcome's value
+  // (kSurvivalOne if the grid survives it, else 0); the solver folds the
+  // outcomes into the probability (solver.cpp, README "Grid survival").
+  // Only with ScoreOptions::grid_survival; off it is 0 everywhere and left
+  // out of printed scores. It is never a tier of its own in tier counts: it
+  // refines the grid tier (tier_used).
+  GridSurvival = 0,
+  GridLost,          // -(grid power lost)
   BuildingHpLost,    // -(building HP lost, populated or not)
   MechsLost,         // -(mechs destroyed) (+1 for a revived corpse)
   ObjectivesFailed,  // -(objective stars lost this turn)
@@ -55,6 +66,9 @@ enum class ScoreKey : int {
 };
 
 inline constexpr int kScoreKeys = static_cast<int>(ScoreKey::Count);
+
+// ScoreKey::GridSurvival's unit: probability 1 (the grid surely survives).
+inline constexpr int32_t kSurvivalOne = 1000000000;
 
 // Runtime choices of score_turn.
 struct ScoreOptions {
@@ -92,15 +106,22 @@ struct ScoreOptions {
   // The NextTurn tier is in use (the solver fills it in; score_turn leaves
   // it at 0). Only tier counts and printing read this.
   bool next_turn = false;
+  // Score ScoreKey::GridSurvival (README "Grid survival"): kSurvivalOne when
+  // the grid ends the turn above 0, else 0. Off: 0.
+  bool grid_survival = false;
 };
 
-// Optional tiers in use, as a bit set: Threat (threat_tier or threat_kills)
-// and NextTurn (the lookahead). Every other tier is always in use.
+// Optional tiers in use, as a bit set: Threat (threat_tier or threat_kills),
+// NextTurn (the lookahead) and GridSurvival (grid_survival, printed only:
+// it is part of the grid tier in tier counts). Every other tier is always
+// in use.
 using TierSet = unsigned;
 inline constexpr TierSet kTierThreat = 1u;
 inline constexpr TierSet kTierNextTurn = 2u;
+inline constexpr TierSet kTierSurvival = 4u;
 inline TierSet tier_set(const ScoreOptions& o) {
-  return (o.tier_on() ? kTierThreat : 0u) | (o.next_turn ? kTierNextTurn : 0u);
+  return (o.tier_on() ? kTierThreat : 0u) | (o.next_turn ? kTierNextTurn : 0u) |
+         (o.grid_survival ? kTierSurvival : 0u);
 }
 
 // Larger than any spread of the threat / kills part of the slot (threats and
@@ -142,20 +163,29 @@ inline int32_t mech_grid_slot_w(int grid, int weighted_mechs, int grid_after) {
 // Threat when the threat tier is off and NextTurn when the lookahead is off
 // (a bool argument means the threat tier alone, as before NextTurn). Tier
 // counts (SolveOptions::min_proven_tiers, SolveResult::proven_components)
-// and printed scores count these.
+// count these. GridSurvival is never counted: with grid_survival it sits in
+// front of GridLost as one tier with it ("grid"), so tier counts mean the
+// same with it on or off (components_for_tiers includes it).
 inline bool tier_used(int key, TierSet tiers) {
+  if (key == static_cast<int>(ScoreKey::GridSurvival)) return false;
   if (key == static_cast<int>(ScoreKey::Threat)) return (tiers & kTierThreat) != 0;
   if (key == static_cast<int>(ScoreKey::NextTurn)) return (tiers & kTierNextTurn) != 0;
   return true;
 }
+// The components printed and listed in score vectors: the tiers in use, and
+// GridSurvival with grid_survival.
+inline bool tier_shown(int key, TierSet tiers) {
+  if (key == static_cast<int>(ScoreKey::GridSurvival)) return (tiers & kTierSurvival) != 0;
+  return tier_used(key, tiers);
+}
 inline int used_tier_count(TierSet tiers) {
-  return kScoreKeys - ((tiers & kTierThreat) ? 0 : 1) - ((tiers & kTierNextTurn) ? 0 : 1);
+  return kScoreKeys - 1 - ((tiers & kTierThreat) ? 0 : 1) - ((tiers & kTierNextTurn) ? 0 : 1);
 }
 // The number of leading ScoreKey components that hold the first `tiers`
 // tiers in use (an unused optional tier, constant, is only counted when it
 // lies before a used tier).
 int components_for_tiers(int tiers, TierSet used);
-// Short tier names ("grid", "bldg_hp", ...), by ScoreKey index.
+// Short tier names ("survival", "grid", "bldg_hp", ...), by ScoreKey index.
 const char* score_key_name(int key);
 
 struct Score {
@@ -168,7 +198,8 @@ struct Score {
   auto operator<=>(const Score&) const = default;
   bool operator==(const Score&) const = default;
 
-  // "grid=0 bldg_hp=-1 ...": the tiers in use.
+  // "grid=0 bldg_hp=-1 ...": the tiers shown (tier_shown); GridSurvival as
+  // a probability ("survival=0.2500").
   std::string describe(TierSet tiers = 0) const;
 };
 

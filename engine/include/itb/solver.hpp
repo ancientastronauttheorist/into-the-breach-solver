@@ -103,9 +103,24 @@ struct SolveOptions {
   // ScoreOptions::mech_grid_pilot: a levelled pilot keeps a rate of at
   // least its level on the mission's last turns.
   bool mech_grid_pilot = false;
+  // Grid survival (README "Grid survival"): ScoreKey::GridSurvival, first,
+  // holds the probability that the grid is still above 0 at the end of the
+  // turn, over the Grid Defense rolls of the player's actions and of the
+  // enemy phase (each resisting with the game's Grid Defense chance:
+  // TurnContext::mission.grid_defense when the state carries it, else
+  // Board::grid_defense) and the game's random picks (uniform), every other
+  // chance node at its worst. Below it, a chance node's rest is its worst
+  // outcome among those with odds above 0 (all of them when its odds are 0).
+  // A line whose every outcome keeps the grid scores exactly 1, so it beats
+  // every line that can lose the grid and ranks among such lines as before;
+  // the odds only decide between lines that can all lose it. Off (the
+  // default): the component is 0 everywhere, so results are unchanged.
+  bool grid_survival = false;
   bool tier_on() const { return threat_tier || threat_kills; }
   // The optional tiers in use (score.hpp TierSet).
-  TierSet tiers() const { return (tier_on() ? kTierThreat : 0u) | (lookahead ? kTierNextTurn : 0u); }
+  TierSet tiers() const {
+    return (tier_on() ? kTierThreat : 0u) | (lookahead ? kTierNextTurn : 0u) | (grid_survival ? kTierSurvival : 0u);
+  }
   ScoreOptions score_options() const {
     ScoreOptions s;
     s.threat_tier = threat_tier;
@@ -115,6 +130,7 @@ struct SolveOptions {
     s.mech_grid_turns = mech_grid_turns;
     s.mech_grid_pilot = mech_grid_pilot;
     s.next_turn = lookahead;
+    s.grid_survival = grid_survival;
     return s;
   }
   // Repair skill per unit uid (Engine::repair_skill of its pilot). Units not
@@ -191,6 +207,9 @@ struct SolveStats {
   double base_search_s = 0;  // the search without the lookahead that seeded it
   int base_proven_components = 0;  // ... and the leading tiers it proved
   double base_best_plan_s = 0;     // ... and when it found its plan
+  // SolveOptions::grid_survival: the time of a survey that found no line
+  // surely keeping the grid (solver.cpp search_survival), 0 if it found one.
+  double survey_s = 0;
   // Profile (summed over threads): end-of-turn evaluations computed (not
   // from the memo), children generated at expanded nodes, thread time in
   // generating children and in ordering them, nodes expanded per depth

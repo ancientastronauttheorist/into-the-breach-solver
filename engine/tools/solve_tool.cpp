@@ -31,23 +31,32 @@ using nlohmann::json;
 namespace itb::tools {
 namespace {
 
-const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "next_turn", "threat",
-                                      "mech_hp", "objectives",  "kills", "vek_hp",            "position"};
+const char* kTierNames[kScoreKeys] = {"grid_survival", "grid",       "building_hp", "mechs",  "objectives_failed",
+                                      "next_turn",     "threat",     "mech_hp",     "objectives", "kills",
+                                      "vek_hp",        "position"};
 
 Point json_point(const json& j) {
   if (!j.is_array() || j.size() < 2 || !j[0].is_number() || !j[1].is_number()) return kInvalidPoint;
   return {j[0].get<int>(), j[1].get<int>()};
 }
 
-// The tiers in use (score.hpp tier_used): Threat only with the threat tier.
+// The tiers shown (score.hpp tier_shown): Threat only with the threat tier,
+// GridSurvival (as a probability) only with grid_survival.
 std::string score_text(const Score& s, TierSet threat) {
   std::string out;
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (!tier_used(i, threat)) continue;
+    if (!tier_shown(i, threat)) continue;
     if (!out.empty()) out += " ";
     out += kTierNames[i];
     out += "=";
-    out += s.v[static_cast<size_t>(i)] == INT32_MAX ? std::string("inf") : std::to_string(s.v[static_cast<size_t>(i)]);
+    const int32_t x = s.v[static_cast<size_t>(i)];
+    if (i == static_cast<int>(ScoreKey::GridSurvival) && x >= 0 && x <= kSurvivalOne) {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "%.4f", static_cast<double>(x) / kSurvivalOne);
+      out += buf;
+      continue;
+    }
+    out += x == INT32_MAX ? std::string("inf") : std::to_string(x);
   }
   return out;
 }
@@ -55,7 +64,7 @@ std::string score_text(const Score& s, TierSet threat) {
 std::vector<int32_t> score_vector(const Score& s, TierSet threat) {
   std::vector<int32_t> v;
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (tier_used(i, threat)) v.push_back(s.v[static_cast<size_t>(i)]);
+    if (tier_shown(i, threat)) v.push_back(s.v[static_cast<size_t>(i)]);
   }
   return v;
 }
@@ -134,7 +143,8 @@ double percentile(std::vector<double> v, double q) {
 
 int run_solve(const SolveToolOptions& opt) {
   const TierSet tier_on =
-      ((opt.threat_tier || opt.kills_tier) ? kTierThreat : 0u) | (opt.lookahead ? kTierNextTurn : 0u);
+      ((opt.threat_tier || opt.kills_tier) ? kTierThreat : 0u) | (opt.lookahead ? kTierNextTurn : 0u) |
+      (opt.grid_survival ? kTierSurvival : 0u);
   std::unique_ptr<Engine> engine;
   try {
     engine = Engine::create(opt.game);
@@ -224,6 +234,7 @@ int run_solve(const SolveToolOptions& opt) {
     so.mech_grid_turns = opt.mech_grid_turns;
     so.mech_grid_pilot = opt.mech_grid_pilot;
     so.lookahead = opt.lookahead;
+    so.grid_survival = opt.grid_survival;
     so.lookahead_options.samples = std::max(1, opt.lookahead_samples);
     if (opt.lookahead_idle) so.lookahead_options.reply = LookaheadOptions::Reply::Idle;
     so.lookahead_options.sum = opt.lookahead_sum;
@@ -363,7 +374,11 @@ int run_solve(const SolveToolOptions& opt) {
         eo.objectives_first = false;
         eo.mech_grid = -1;
         eo.helper_engines.clear();
-        if (const auto e = evaluate_plan(*engine, board, ctx, r.best.actions, eo)) j["threat_eval"] = e->v;
+        if (const auto e = evaluate_plan(*engine, board, ctx, r.best.actions, eo)) {
+          std::vector<int32_t> ev(e->v.begin(), e->v.end());
+          if (!eo.grid_survival) ev.erase(ev.begin());  // as before GridSurvival existed
+          j["threat_eval"] = ev;
+        }
       }
       if (plain) j["plain"] = score_vector(*plain, tier_on);
       if (row.recorded) {
@@ -372,7 +387,7 @@ int run_solve(const SolveToolOptions& opt) {
         // As a position among the tiers in use (the "ours" vector's index).
         int tier = row.tier;
         for (int i = 0; i < row.tier; ++i) {
-          if (!tier_used(i, tier_on)) --tier;
+          if (!tier_shown(i, tier_on)) --tier;
         }
         j["tier"] = tier;
       } else if (!row.recorded_refused.empty()) {

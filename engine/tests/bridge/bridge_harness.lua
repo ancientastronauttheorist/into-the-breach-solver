@@ -185,7 +185,7 @@ if not io.open(save_dir .. "/.probe", "w") then
     real_execute('mkdir -p "' .. save_dir .. '"')
 end
 write_file(save_dir .. "/saveData.lua",
-    'GameData = {["network"] = 5, ["networkMax"] = 7, ["difficulty"] = 1, ["seed"] = 42, '
+    'GameData = {["network"] = 5, ["networkMax"] = 7, ["overflow"] = 12, ["difficulty"] = 1, ["seed"] = 42, '
     .. '["weapons"] = {"Prime_Punchmech_B", "Passive_Electric_A", "Ranged_Limited", "", "", "", }, }\n'
     .. 'RegionData = {\n' .. region1 .. region3 .. '["iBattleRegion"] = 3, }\n')
 
@@ -299,6 +299,7 @@ do
     eq(#st.tiles, 64, "64 tiles")
     eq(st.phase, "combat_player", "phase")
     eq(st.grid_power, 5, "grid from the save")
+    eq(st.grid_overflow, 12, "Grid Defense overpower bonus from the save")
     eq(st.mission_id, "Mission_Lightning", "mission id")
     eq(st.total_turns, 5, "TurnLimit")
     check(unit(st, 60, true) ~= nil, "train extra tile still emitted")

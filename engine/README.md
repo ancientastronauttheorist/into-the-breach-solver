@@ -43,6 +43,7 @@ engine/build/itb_inspect --solve recordings --sample 60 --time 120 --threads 8 -
 engine/build/itb_inspect --solve recordings --threat-tier --threat-eval --json on.jsonl  # experimental threat tier
 engine/build/itb_inspect --threat-check recordings                       # threat proxy vs engine and games, cost
 engine/build/itb_inspect --solve state.json --lookahead [--lookahead-samples 8] # experimental next-turn tier
+engine/build/itb_inspect --solve state.json --grid-survival                     # Grid Defense odds when every line can lose the grid
 engine/build/itb_inspect --lookahead-study state.json --compare [--samples 8] [--next-time 4]  # plans vs next turn
 engine/build/itb_inspect --two-turn state.json --arm la8 --arm sum8 --plan solve.json [--next-seeds 16]  # plans over two turns
 engine/build/itb_inspect --two-turn deployed.json --deploy --deploy-top 6 [--spawn F1] # placements over two turns
@@ -141,10 +142,15 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   re-solve of the turn): `--threat-tier`, `--threat-kills`,
   `--objectives-first`, `--mech-grid N [--mech-grid-turns]
   [--mech-grid-pilot]` and `--lookahead [--lookahead-samples K]
-  [--lookahead-reply greedy|idle]` ("Turn score" below). With
+  [--lookahead-reply greedy|idle]` ("Turn score" below), and
+  `--grid-survival` ("Grid survival" below). With
   `--lookahead` the plan line adds the next-turn estimate of the plan's end
   board, and the tier counts of `--min-tiers` include NextTurn (with
-  `--threat-tier`, `--min-tiers 7` reaches mech HP).
+  `--threat-tier`, `--min-tiers 7` reaches mech HP). `--grid-survival` adds
+  no tier to the counts; the plan line shows the odds and the Grid Defense
+  chance used. A bridge without `grid_overflow` (before 2026-10-14) gets it
+  from the profile's `saveData.lua` (`grid_overflow` in the state's
+  `patches`).
 - **end-turn** predicts the enemy phase from the board as left, sends
   `END_TURN` (it deactivates the mechs, so the "units can still act" dialog
   never appears; on this build the bridge cannot end the turn itself and
@@ -258,13 +264,15 @@ base time), `contingent`, `stats` and `warnings`. Requests take
 `time_limit`, `node_limit`, `beam_width`, `threads`, and for the adaptive
 budget `max_time` and `min_tiers`; the ranking options are `threat_tier`,
 `threat_kills`, `objectives_first`, `mech_grid`, `mech_grid_turns`,
-`mech_grid_pilot` (then also `mech_rates` by uid) and `lookahead`
+`mech_grid_pilot` (then also `mech_rates` by uid), `lookahead`
 (`lookahead_samples`, `lookahead_reply` "greedy" | "idle", `lookahead_seed`;
 then `worst_case` has `next_turn`, `stats` has `lookahead_evals`,
 `lookahead_hits` and `lookahead_s`, and `next_turn` gives the plan's own
 end board's estimate: worst grid, mechs and building HP lost and each AI
-sample's). CLI: `--mech-grid-pilot`, `--lookahead [--lookahead-samples K]
-[--lookahead-reply greedy|idle]`. The
+sample's) and `grid_survival` (then `worst_case` has `grid_survival`, a
+probability, and the reply has `grid_defense`: the `percent` used and its
+`source`, "state" or "default"). CLI: `--mech-grid-pilot`, `--lookahead
+[--lookahead-samples K] [--lookahead-reply greedy|idle]`, `--grid-survival`. The
 simulation follows the plan's default chance outcome (no Grid Defense
 resist, first branch), reseeding Lua as the solver does. Boards are compact:
 `grid_power`, `buildings` (x, y, hp) and living on-board `units` sorted by
@@ -652,8 +660,9 @@ the start of the player's turn with the board after the enemy phase. Tiers
 are strict and compared lexicographically; the search takes the worst case
 over chance outcomes, the score judges one concrete outcome.
 
-1. **Grid and buildings.** Grid power, then structure HP over building
-   tiles, both as net changes. Unpopulated and objective buildings count; a
+1. **Grid and buildings.** [With `--grid-survival`: first the odds that the
+   grid survives the turn, see "Grid survival" under the search.] Grid
+   power, then structure HP over building tiles, both as net changes. Unpopulated and objective buildings count; a
    destroyed building (rubble, or water for a building on water) has left
    the sum with all its HP. A grid gain counts for the player (none happens
    mid-turn in the shipped missions).
@@ -1090,6 +1099,115 @@ value whose base upper bound is `<= alpha` is cut at once, and the result
 carries the tighter of the two root bounds, so tiers the base search proved
 stay proven (`SolveStats::base_proven_components`; before, a lookahead
 search cut by the budget reported its own, often 0).
+
+**Grid survival (off by default).** Chance is taken at its worst, so with
+the grid low every line may end with the grid at 0 in its worst outcome.
+Those lines tie in the grid tier, and the tiers below it (building HP,
+mechs, ...) pick among them, although one may need a single Grid Defense
+resist to keep the grid and another three. `SolveOptions::grid_survival`
+(`itb_inspect --solve --grid-survival`, itb_live / Python `"grid_survival":
+true`, `live_play.py --grid-survival`) puts `ScoreKey::GridSurvival` in front
+of the grid tier: the probability that the grid is still above 0 at the end
+of the turn, in units of 10^-9 (`kSurvivalOne`).
+
+- Per outcome `score_turn` gives it 1 (the grid survived) or 0. The value of
+  a chance node folds its outcomes over its chance tree (the calls each run
+  made, `ChanceTree`): a Grid Defense roll weighs the resisted branch by p and
+  the other by 1 - p, a game's random pick (`MissionRandom`: the Final Cave's
+  bomb drop, the Reactivation thaw; a spider egg's tile) averages its
+  branches, every other call takes its worst branch (environment orders and
+  hidden parameters, XP splits, sampled death-effect seeds). Rolls are
+  independent. This holds for the enemy phase (the end-of-turn value) and
+  for chance during the player's own actions (a resist when the player's
+  shot or bump hits a building): the player then sees the roll and plays on
+  (the plan is contingent), so the node is the expectation over its
+  outcomes' values.
+- The rest of a chance node's value is its worst outcome's, among the
+  outcomes with odds above 0 when the node's odds are above 0 (how the turn
+  goes given the grid survives: an outcome that surely ends the run does not
+  count), else among all of them (as without the odds).
+- Rounding guard: the odds are exactly 1 only if no outcome can lose the grid,
+  else at most 1 - 10^-9. So a line that surely keeps the grid scores 1,
+  beats every line that can lose it and ranks among such lines exactly as
+  before: the odds only decide between lines that can all lose the grid,
+  i.e. when the best worst case is a lost game. Then they rank first, above
+  building HP, mechs, stars and mech HP (if the grid goes the run ends and
+  nothing below matters), and in front of the mech exchange's grid slot (a
+  line is not traded for a mech either). Equal odds (0 for all when nothing
+  can resist) fall back to the old order.
+- The Grid Defense chance p: the game's `PowerBar::GetDefense` (0x008ed5c0)
+  is a base of 15 (0 on Unfair, set by the power bar's constructor), plus
+  the overpower bonus (`ModifyPowerGrid` past a full grid: +2 per point while
+  below 10, then +1, at most 25; the save's `GameData.overflow`), plus 3 per
+  squad pilot whose learned level-up skills include Grid
+  (`SquadControl::GetDefBonus`). The bridge exports `grid_overflow` from the
+  save; the loader (`load_grid_defense`) adds the base by difficulty and the
+  Grid pilots into `MissionData::grid_defense` (a state may also give
+  `grid_defense` in percent). Unknown (older states): `Board::grid_defense`,
+  15. It only feeds the odds: the chance nodes still branch whenever
+  `Board::grid_defense` > 0 and predictions follow the default outcome (no
+  resist), as before.
+- Off, GridSurvival is 0 everywhere, its cap 0, and it is left out of printed
+  scores and JSON vectors, so every output is unchanged (byte-identical
+  `--corpus/--moves/--weapons/--replay [--turns]`). It is never counted as a
+  tier: on, the first tier is (odds, grid), so `--min-tiers` means the same.
+
+In the search: the tier bound of the odds is 1, or 0 once the board's grid
+is 0 (grid power never rises). While the incumbent surely keeps the grid
+(odds 1), an outcome that loses it puts a node below the incumbent at once,
+as GridLost did: leaves cut on the first such outcome, the enemy phase may
+stop early, and chance nodes keep the old windows. The beam and child
+ordering always rank by the old key (`LeafMemo::key`, the worst outcome),
+which also finds high odds sooner on lost-cause boards (fewer buildings hit,
+fewer rolls). A search without a seed starts with a survey
+(`search_survival`): the incumbent floored at odds 1, so only lines that
+surely keep the grid are searched, as without the odds. If it finds one,
+that is the whole search with the whole budget (every line that can lose the
+grid ranks below it). If it finds none within 25% of the budget, or proves
+there is none, the search with the odds runs on the rest.
+
+Below odds 1 every outcome's share counts. A leaf's odds are bounded from
+the outcomes run so far (the others counted as surviving; the fold is tried
+after 1, 2, 4, ... outcomes) and its phases run to their end. A chance node
+in the player's actions is searched Star1-style (`chance_odds`): each
+outcome in a window of its own, without the incumbent's raise (`local`), cut
+only where its odds alone would put the node's odds below alpha's with the
+other outcomes at their upper bounds (outcomes not searched yet at their
+tier bound, so an outcome with no grid left counts 0 without a search);
+after one pass either an outcome was cut and the node's odds are below
+alpha's, or every outcome is exact. Alpha-beta over max, min and these
+weighted nodes stays sound (every interval is), and `test_solver.cpp` checks
+the solver, with and without table, bounds, ordering and beam, against a
+naive enumeration of the same definition: 30 tiny boards with the grid at
+1-2 and Grid Defense 0-40% (21 where every line can lose the grid, 16 with
+chance in the player's actions; 1769 Star1 windows), 6 more with the
+lookahead or the mech exchange, plus a hand-built board where the old order
+picks the two-roll line and the odds the one-roll line.
+
+Cost (`itb_inspect --solve --nodes 20000 --threads 1`, 9 recorded Final and
+Cave boards, on and off). Seven where some line keeps the grid: the same
+values, 0-2.4% fewer enemy phases than without the odds (the survey cuts
+lines that lose the grid at once; one board identical in every counter),
+times within noise. Two where every line can lose it (Cave turn 2 at grid 1
+of `20261013_192343` and `20261014_045942`): 45x and 6x the enemy
+phases for the same nodes (each leaf weighs every outcome, no cut by building
+HP and below), so in a time budget those searches see fewer nodes. Their tier
+bound for the odds is 1, so they are never proven (the adaptive budget runs
+to `--max-time`); the search is anytime.
+
+Run 21, Cave (`recordings/live/20261014_045942`, Unfair, Grid Defense 25%:
+overpower bonus 25, no Grid pilot; live flags, 4 threads, 300 s, other jobs
+running). Turn 1 (grid 3): a line keeps the grid, odds 1, and the plan and
+value are the live plan's (the survey found it; the odds change nothing).
+Turn 2 (grid 1): every line can lose the grid. The live plan needs one
+resist, in the player's own action (the Hornet Mech kills the Blob on D3;
+its explosion hits C3's building: odds 0.25, or 0 if chance in the player's
+actions were taken at its worst). With the odds the solver also lands at
+0.25 (no better line found in 300 s; not proven): one Grid Defense roll in
+the enemy phase (the Scarab's 2-damage shot at E2's building), and given
+that roll it keeps every building and leaves one enemy able to reach a
+protected unit, where the live plan's surviving outcome left three (an
+earlier 300 s run found a 0.25 line leaving none).
 
 **Anytime.** With a time or node budget the result is the best plan found,
 `proven_optimal = false`, an `upper_bound` (the root's interval, sound

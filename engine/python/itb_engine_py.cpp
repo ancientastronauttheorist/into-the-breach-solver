@@ -77,16 +77,21 @@ constexpr uint32_t kLuaSeed = 1;
 
 // ScoreKey order (score.hpp). Until the threat tier was added, ObjectivesFailed
 // and MechHpLost were labelled the other way round here.
-const char* kTierNames[kScoreKeys] = {"grid",    "building_hp", "mechs", "objectives_failed", "next_turn", "threat",
-                                      "mech_hp", "objectives",  "kills", "vek_hp",            "position"};
+const char* kTierNames[kScoreKeys] = {"grid_survival", "grid",       "building_hp", "mechs",  "objectives_failed",
+                                      "next_turn",     "threat",     "mech_hp",     "objectives", "kills",
+                                      "vek_hp",        "position"};
 
 // The tiers in use: "threat" only with the threat tier, "next_turn" only
 // with the lookahead.
 json score_json(const Score& s, TierSet threat = 0) {
   json j = json::object();
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (!tier_used(i, threat)) continue;
+    if (!tier_shown(i, threat)) continue;
     const int32_t v = s.v[static_cast<size_t>(i)];
+    if (i == static_cast<int>(ScoreKey::GridSurvival) && v >= 0 && v <= kSurvivalOne) {
+      j[kTierNames[i]] = static_cast<double>(v) / kSurvivalOne;  // a probability
+      continue;
+    }
     j[kTierNames[i]] = v == INT32_MAX ? json(nullptr) : json(v);
   }
   return j;
@@ -95,7 +100,7 @@ json score_json(const Score& s, TierSet threat = 0) {
 json score_vector(const Score& s, TierSet threat = 0) {
   json v = json::array();
   for (int i = 0; i < kScoreKeys; ++i) {
-    if (!tier_used(i, threat)) continue;
+    if (!tier_shown(i, threat)) continue;
     const int32_t x = s.v[static_cast<size_t>(i)];
     v.push_back(x == INT32_MAX ? json(nullptr) : json(x));
   }
@@ -621,6 +626,7 @@ class PyEngine {
     }
     so.lookahead_options.sum = opt.value("lookahead_fold", std::string("worst")) == "sum";
     so.lookahead_options.repair_skills = l.repair_skills;
+    so.grid_survival = opt.value("grid_survival", so.grid_survival);
     so.beam_width = opt.value("beam_width", so.beam_width);
     so.extra_death_seeds = opt.value("extra_death_seeds", so.extra_death_seeds);
     so.max_chance_leaves = opt.value("max_chance_leaves", so.max_chance_leaves);
@@ -665,7 +671,7 @@ PYBIND11_MODULE(itb_engine, m) {
       .def("solve", &PyEngine::solve, py::arg("bridge_json"), py::arg("options_json") = "{}",
            "Perfect-turn search. Options: time_limit, max_time, min_tiers, node_limit, threads, beam_width, "
            "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), mech_grid (default -1: off), mech_grid_turns, mech_grid_pilot, "
-           "lookahead, lookahead_samples, lookahead_reply ('greedy' | 'idle'), "
+           "lookahead, lookahead_samples, lookahead_reply ('greedy' | 'idle'), grid_survival, "
            "simulate (default true).")
       .def("simulate", &PyEngine::simulate_plan, py::arg("bridge_json"), py::arg("plan_json"),
            py::call_guard<py::gil_scoped_release>(),

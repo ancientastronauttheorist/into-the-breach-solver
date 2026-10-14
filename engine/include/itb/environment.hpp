@@ -106,6 +106,12 @@ struct MissionData {
   std::optional<bool> infinite_spawn;
   std::vector<int32_t> launching;  // satellite rockets with a queued launch
   int difficulty = -1;
+  // The game's Grid Defense chance in percent (PowerBar::GetDefense): base
+  // 15 (0 on Unfair) + the overpower bonus (save GameData.overflow) + 3 per
+  // squad pilot with the Grid level-up skill. -1: the state does not carry
+  // it. Only the solver's grid survival odds read it; the chance nodes
+  // themselves depend on Board::grid_defense alone.
+  int grid_defense = -1;
   ObjectiveData objectives;  // stage 8
 
   // Bridge extension (bridge_ext_version >= 1, stage 7 spec section 4).

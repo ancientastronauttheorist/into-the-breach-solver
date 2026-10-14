@@ -615,6 +615,42 @@ class LivePlayTest(unittest.TestCase):
         self.run_cmd(["turn", "--lookahead"], eng)
         self.assertEqual(eng.tiers, [{"lookahead": True}])
 
+    def test_grid_survival_is_passed_with_the_saves_overflow(self):
+        """--grid-survival goes to every solve; a bridge without grid_overflow
+        gets it from the profile's save (GameData.overflow), as a patch."""
+        self.bridge()
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text(
+            'GameData = {["network"] = 1, ["networkMax"] = 7, ["overflow"] = 25, ["difficulty"] = 3, }\n')
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--grid-survival"], eng)
+        self.assertEqual(eng.tiers, [{"grid_survival": True}])
+        self.assertEqual(eng.solves[0]["grid_overflow"], 25)
+
+    def test_no_grid_overflow_patch_without_grid_survival(self):
+        self.bridge()
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text('GameData = {["network"] = 1, ["overflow"] = 25, }\n')
+        eng = FakeEngine()
+        self.run_cmd(["turn"], eng)
+        self.assertEqual(eng.tiers, [{}])
+        self.assertNotIn("grid_overflow", eng.solves[0])
+
+    def test_grid_survival_request_and_summary(self):
+        sent = []
+        eng = lp.Engine.__new__(lp.Engine)
+        eng.threads = 4
+        eng.request = lambda req: sent.append(req) or {"ok": True}
+        eng.solve(Path("s.json"), 10)
+        eng.solve(Path("s.json"), 10, grid_survival=True)
+        self.assertNotIn("grid_survival", sent[0])
+        self.assertTrue(sent[1]["grid_survival"])
+        summary = lp.plan_summary({"worst_case": {"grid_survival": 0.25, "grid": -1}, "stats": {},
+                                   "grid_defense": {"percent": 25, "source": "state"}})
+        self.assertIn("grid_survival=0.2500 grid=-1", summary)
+        self.assertIn("Grid Defense 25%, state", summary)
+        self.assertEqual(lp.save_grid_overflow(Path("/nonexistent/saveData.lua")), None)
+
     def test_pilot_floor_needs_the_exchange(self):
         self.bridge()
         eng = FakeEngine()
