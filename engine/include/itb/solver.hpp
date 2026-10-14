@@ -190,6 +190,7 @@ struct SolveStats {
   double lookahead_s = 0;
   double base_search_s = 0;  // the search without the lookahead that seeded it
   int base_proven_components = 0;  // ... and the leading tiers it proved
+  double base_best_plan_s = 0;     // ... and when it found its plan
   // Profile (summed over threads): end-of-turn evaluations computed (not
   // from the memo), children generated at expanded nodes, thread time in
   // generating children and in ordering them, nodes expanded per depth

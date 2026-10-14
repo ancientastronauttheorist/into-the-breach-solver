@@ -1699,6 +1699,7 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   out.stats.time_s = seconds_since(t0);
   out.stats.base_search_s = used;
   out.stats.base_proven_components = first.proven_components;
+  out.stats.base_best_plan_s = first.stats.best_plan_s;
   // The base search's bound holds for this search too: with the lookahead a
   // plan scores what it scores without it, NextTurn lowered from its cap
   // (0), so the value is at most the base search's value, which is at most
