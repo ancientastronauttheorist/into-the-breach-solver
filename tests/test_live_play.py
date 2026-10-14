@@ -510,6 +510,25 @@ class LivePlayTest(unittest.TestCase):
         # The current run is not switched to the restored one.
         self.assertFalse(lp.CURRENT.exists())
 
+    def test_new_run_stays_current_while_an_older_command_writes(self):
+        # Live 2026-10-14: `status --new-run` at 08:17 while a `mission` begun
+        # at 08:16 still ran on the old run; that process archived states into
+        # its own run for minutes after, and every manifest save pointed
+        # current.json back at it, so later commands used the old run.
+        old = lp.Run.open("20261014_045942", False)
+        self.assertEqual(self.run_dir(), old.path)
+        new = lp.Run.open(None, True).path  # what `status --new-run` does
+        self.assertEqual(self.run_dir(), new)
+        self.assertNotEqual(new, old.path)
+        old.save_state(base_state(), "start")  # the older command goes on
+        old.save_meta()
+        self.assertTrue(any(old.path.glob("m00_turn_01_solve_input.json")))
+        self.assertEqual(self.run_dir(), new)
+        self.assertEqual(lp.Run.open(None, False).path, new)
+        # Naming a run explicitly still makes it the current one.
+        self.assertEqual(lp.Run.open(old.path.name, False).path, old.path)
+        self.assertEqual(self.run_dir(), old.path)
+
     def test_checkpoint_diffs(self):
         a, b = base_state(), base_state()
         self.assertEqual(lp.checkpoint_diffs(a, b), [])

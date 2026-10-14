@@ -414,6 +414,14 @@ class Run:
             path, meta = cls._new_path(), {}
         r = cls(path, meta)
         r.save_meta()
+        # Only choosing a run makes it the current one. Saving the manifest
+        # does not: a command still running on the previous run (live
+        # 2026-10-14: a `mission` begun at 08:16 on 20261014_045942 went on
+        # for minutes after `status --new-run` made 20261014_081714) would
+        # otherwise point current.json back at its run with every state it
+        # archives, and later commands would follow it there.
+        CURRENT.parent.mkdir(parents=True, exist_ok=True)
+        CURRENT.write_text(json.dumps({"run": str(r.path)}))
         return r
 
     @staticmethod
@@ -431,8 +439,6 @@ class Run:
         self.meta.setdefault("tool", "scripts/live_play.py")
         self.meta.setdefault("created", now_iso())
         (self.path / "manifest.json").write_text(json.dumps(self.meta, indent=1))
-        CURRENT.parent.mkdir(parents=True, exist_ok=True)
-        CURRENT.write_text(json.dumps({"run": str(self.path)}))
 
     def mission_index(self, state: dict) -> int:
         """Index of the state's mission; a new mission when the id changes or
