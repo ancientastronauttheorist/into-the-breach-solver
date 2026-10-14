@@ -1064,15 +1064,22 @@ class HackingMission final : public Environment {
 // it is dropped. So the mission never thaws a unit it has already drawn (one
 // the player re-froze stays frozen), nor one it did not place.
 //
+// The engine works from what a player can know, never from the mission's own
+// list: the units frozen when the mission starts, minus the ones it has been
+// seen to thaw (live_play.py keeps that list and hands it over as
+// "reactivation_visible_list"). Which unfrozen or dead entries the draws
+// silently discarded is hidden, so they stay listed (worst case: the mission
+// may still thaw them if they are frozen again).
+//
 // The list lives on the board (Pawn::reactivation_listed) so that it carries
 // across simulated turns. With E the listed units that are alive and frozen:
 // |E| <= 2 thaws all of E; |E| > 2 thaws a uniformly random pair of E (chance
-// node MissionRandom over the pairs). Every listed unit is drawn when |E| < 2.
-// Otherwise the listed units outside E that the draws discarded before the
-// second thaw are random; they stay listed (worst case: the mission may still
-// thaw them if they are frozen again).
+// node MissionRandom over the pairs). Every listed unit is drawn when |E| < 2,
+// so the list empties. Each Thawed event carries |E| (amount) and E's uids
+// (detail, "candidates u1,u2,..."), from which live_play tells which units
+// the game's draw thawed.
 //
-// Without the recorded list (old bridges) every frozen enemy is a candidate.
+// Without a visible list (old recordings) every frozen enemy is a candidate.
 class ReactivationMission final : public Environment {
  public:
   explicit ReactivationMission(const MissionData& m) : known_(m.reactivation_known) {}
@@ -1098,11 +1105,13 @@ class ReactivationMission final : public Environment {
     if (known_ && frozen.size() < 2) {
       for (Pawn& p : b.pawns()) p.reactivation_listed = false;  // the whole list was drawn
     }
+    std::string candidates = "candidates ";
+    for (size_t i = 0; i < frozen.size(); ++i) candidates += (i ? "," : "") + std::to_string(frozen[i]);
     for (int32_t uid : thaw) {
       if (Pawn* p = b.find_pawn(uid)) {
         set_pawn_frozen(b, *p, false);
         p->reactivation_listed = false;
-        host.note(PhaseEventType::Thawed, "", p->pos, uid);
+        host.note(PhaseEventType::Thawed, candidates, p->pos, uid, static_cast<int>(frozen.size()));
       }
     }
   }

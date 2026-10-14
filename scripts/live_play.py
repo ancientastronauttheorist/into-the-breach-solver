@@ -135,6 +135,7 @@ CLICK_WAIT = 8
 # game leaves the mission (the Victory screen after the final Cave turn).
 SILENT_AFTER = 15.0
 FINAL_MISSION = "Mission_Final_Cave"
+REACTIVATION = "Mission_Reactivation"
 ACTION_TIMEOUT = 60.0
 
 # The adaptive solve budget's default tier target: the score tiers through
@@ -520,6 +521,37 @@ class Run:
     def save_engine_underground(self, state: dict, under: dict) -> None:
         self.meta["engine_underground"] = {"mission": self.mission_index(state),
                                            "units": {str(uid): u for uid, u in sorted(under.items())}}
+        self.save_meta()
+
+    def reactivation_list(self, state: dict, turn_start: bool = False) -> list | None:
+        """Mission_Reactivation's visible list for this state (see
+        reactivation_after), kept per mission in the manifest; None when it
+        is not known (another mission, or the driver joined the mission
+        late: the engine then takes every frozen enemy as a candidate). It
+        starts from the frozen enemies at deployment (turn 0) or at the
+        start of turn 1 (`turn_start`: nothing acted yet); a turn-0 list is
+        narrowed at the start of turn 1 to the units still frozen (only the
+        mission thaws anything before the player's first turn)."""
+        if state.get("mission_id") != REACTIVATION:
+            return None
+        idx, turn = self.mission_index(state), int(state.get("turn") or 0)
+        rec = self.meta.get("reactivation") or {}
+        fresh = turn == 0 or (turn == 1 and turn_start)
+        if rec.get("mission") != idx:
+            if not fresh:
+                return None
+            rec = {"mission": idx, "turn": turn, "list": frozen_enemies(state)}
+            self.meta["reactivation"] = rec
+            self.save_meta()
+        elif rec.get("turn") == 0 and turn == 1 and fresh:
+            still = set(frozen_enemies(state))
+            rec.update(turn=1, list=[uid for uid in rec["list"] if uid in still])
+            self.save_meta()
+        return list(rec["list"])
+
+    def save_reactivation(self, state: dict, listed: list) -> None:
+        self.meta["reactivation"] = {"mission": self.mission_index(state), "turn": int(state.get("turn") or 0),
+                                     "list": sorted(listed)}
         self.save_meta()
 
     def unit_actions(self, state: dict) -> dict:
@@ -908,7 +940,7 @@ def ui_limit_errors(steps: list, history: dict, state: dict, names: dict | None 
 
 def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = None,
                 notes: list | None = None, underground: dict | None = None,
-                history: dict | None = None) -> tuple[dict, dict]:
+                history: dict | None = None, reactivation: list | None = None) -> tuple[dict, dict]:
     """The solver's input: the live state, plus --loadout weapons for units
     the bridge gives no exact ids, plus moved flags the bridge does not
     export, plus the engine's queued shots (`queued`, see track_queued) where
@@ -919,8 +951,10 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
     plus the Burrowers underground (`underground`, see track_underground)
     that the bridge omits, as units with "underground": true at the tile they
     dove from, plus the pilot bonus of a unit that acted this turn and is
-    active again (`history`, see ui_limit_errors). Returns (state, patches);
-    queued-shot and underground notes go to `notes`."""
+    active again (`history`, see ui_limit_errors), plus Mission_Reactivation's
+    visible list (`reactivation`, see reactivation_after) as
+    "reactivation_visible_list". Returns (state, patches); queued-shot,
+    underground and reactivation notes go to `notes`."""
     out = json.loads(json.dumps(state))
     patches = {}
     # The bridge's "web" passes through a legacy guess that clears a web when
@@ -985,6 +1019,12 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
             if notes is not None:
                 notes.append(f"{d.get('type')}#{uid} underground (dove at {visual(d['x'], d['y'])}, "
                              f"hp {d.get('hp')}): the bridge omits it; carried over from the engine")
+    if reactivation is not None:
+        out["reactivation_visible_list"] = list(reactivation)
+        patches["reactivation_visible_list"] = list(reactivation)
+        text = reactivation_note(state, reactivation)
+        if text and notes is not None:
+            notes.append(text)
     return out, patches
 
 
@@ -1019,6 +1059,87 @@ def track_underground(under: dict, predicted: dict, live: dict, known: set) -> N
             under[d["uid"]] = dict(d)
     for uid in [uid for uid in under if uid in listed]:
         del under[uid]
+
+
+# ------------------------------------------------------------------ Mission_Reactivation
+#
+# The mission freezes the units it places at the start and keeps them in a
+# list; each enemy NextTurn draws entries at random, removing them, until two
+# were thawed or the list is empty, and a drawn unit thaws only if it is alive
+# and frozen. The list itself (the bridge's mission_state.instance.Enemies)
+# is hidden from the player, and the engine is given only what a player can
+# know: the units frozen at the start minus those the mission was seen to
+# thaw ("reactivation_visible_list" in the solver's input). Entries the draws
+# discarded unseen (unfrozen or dead when drawn) stay on it: worst case, the
+# mission could still thaw them if they are frozen again.
+
+def frozen_enemies(state: dict) -> list:
+    return sorted(u["uid"] for u in units(state)
+                  if u.get("team") == 6 and u.get("frozen") and (u.get("hp") or 0) > 0)
+
+
+def with_reactivation(state: dict, listed: list | None) -> dict:
+    return state if listed is None else dict(state, reactivation_visible_list=list(listed))
+
+
+def reactivation_after(listed: list, pred: dict, live: dict) -> tuple[list, list]:
+    """The visible list after an enemy phase: `listed` the list the
+    prediction started from, `pred` itb_live's prediction (its "thawed"
+    events carry the draw's candidates E: the listed units alive and frozen
+    when the mission drew, which the turn up to then decides), `live` the
+    board after the phase. |E| < 2: every entry was drawn, the list is empty;
+    |E| = 2: both thawed; |E| > 2: the two the game thawed (members of E it
+    shows unfrozen) leave it. Returns (list, notes)."""
+    phase = pred.get("enemy_phase") or {}
+    if phase.get("mission_ended"):
+        return list(listed), []
+    events = phase.get("events") or []
+    thawed = [e for e in events if e.get("type") == "thawed"]
+    if not thawed:
+        return [], []
+    detail = str(thawed[0].get("detail") or "")
+    try:
+        if not detail.startswith("candidates "):
+            raise ValueError(detail)
+        cands = [int(t) for t in detail.removeprefix("candidates ").split(",") if t.strip()]
+    except ValueError:
+        return list(listed), [f"Mission_Reactivation: unreadable thaw candidates {detail!r}; list kept"]
+    if len(cands) < 2:
+        return [], []
+    if len(cands) == 2:
+        return [uid for uid in listed if uid not in cands], []
+    now = {u["uid"]: u for u in live.get("units", [])}
+    seen = [uid for uid in cands if uid in now and not now[uid].get("frozen")]
+    if len(seen) > 2:
+        # A spawn bump after the draw also breaks ice: those are ambiguous.
+        bumped = {e.get("uid") for e in events if e.get("type") == "spawn blocked"}
+        seen = [uid for uid in seen if uid not in bumped]
+    if len(seen) > 2:
+        return list(listed), [f"Mission_Reactivation: {len(seen)} candidates unfrozen, the mission thaws 2; "
+                              "list kept (worst case)"]
+    return [uid for uid in listed if uid not in seen], []
+
+
+def reactivation_note(state: dict, listed: list) -> str | None:
+    """Diagnostics only: the visible list against the mission's own (the
+    bridge's instance.Enemies, which the engine never reads). Units it
+    holds that the visible list lacks would be a tracking error; the other
+    way round are the draws' unseen discards."""
+    hidden = ((state.get("mission_state") or {}).get("instance") or {}).get("Enemies")
+    if not isinstance(hidden, (list, dict)):
+        return None
+    hidden = {int(u) for u in (hidden if isinstance(hidden, list) else []) if isinstance(u, (int, float))}
+    alive = {u["uid"] for u in units(state) if (u.get("hp") or 0) > 0}
+    missing = sorted((hidden - set(listed)) & alive)
+    extra = sorted((set(listed) - hidden) & alive)
+    if not missing and not extra:
+        return None
+    text = "Mission_Reactivation visible list " + str(sorted(listed))
+    if missing:
+        text += f"; MISSING {missing}, which the mission's hidden list still holds"
+    if extra:
+        text += f"; {extra} already drawn per the hidden list (discards the player cannot see)"
+    return text
 
 
 # ------------------------------------------------------------------ queued shots
@@ -1351,6 +1472,7 @@ def play_turn(ctx) -> list:
     # continues from them): the UI limits and the pilot bonuses.
     history = run.unit_actions(state)
     moved: set = {uid for uid, seq in history.items() if "M" in seq}
+    react = run.reactivation_list(state, turn_start=not history)  # Mission_Reactivation only
     anomalies: list = []
     # The engine's queued shots this turn (a re-run of `turn` mid-turn
     # continues from the ones tracked so far).
@@ -1361,7 +1483,7 @@ def play_turn(ctx) -> list:
 
     def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
-        solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history)
+        solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react)
         for n in notes:
             say(f"  note: {n}")
         path = run.save_state(solver_input, label, {"patches": patches} if patches else None)
@@ -1526,8 +1648,9 @@ def end_turn(ctx) -> list:
     under = run.engine_underground(state)
     known = {u["uid"] for u in units(state)} | set(under)
     queued_notes: list = []
+    react = run.reactivation_list(state)
     solver_input, patches = patch_state(state, ctx.loadout, set(), run.engine_queued(state), queued_notes,
-                                        under)
+                                        under, reactivation=react)
     for n in queued_notes:
         say(f"  note: {n}")
     path = run.save_state(solver_input, "end_turn", {"patches": patches} if patches else None)
@@ -1630,7 +1753,12 @@ def end_turn(ctx) -> list:
     # resurfaced (listed again: dropped).
     track_underground(under, pred["after_enemy"], live, known)
     run.save_engine_underground(after, under)
-    spawns = [f"{describe_unit(u)} at {visual(u['x'], u['y'])}" for u in live["units"] if u["uid"] not in known]
+    if react is not None:
+        react, react_notes = reactivation_after(react, pred, live)
+        run.save_reactivation(after, react)
+        notes.extend(react_notes)
+        run.event("reactivation", {"state": path.name, "visible_list": react, "notes": react_notes})
+    spawns =[f"{describe_unit(u)} at {visual(u['x'], u['y'])}" for u in live["units"] if u["uid"] not in known]
     if spawns:
         say("  new units (spawns): " + ", ".join(spawns))
     for n in notes:
@@ -1773,8 +1901,11 @@ def deploy(ctx) -> list:
     if not mechs:
         raise Refused("no mechs found on the board (unplaced mechs aren't in the state); "
                       "pass --uids, e.g. --uids 0,1,2")
-    path = run.save_state(state, "deploy")
-    source = state.get("drop_zone_source") or ("deployment_zone" if not state.get("drop_zone") else "?")
+    # Mission_Reactivation: the units it froze at the start, for the search's
+    # simulated turns.
+    react = run.reactivation_list(state)
+    path = run.save_state(with_reactivation(state, react), "deploy")
+    source =state.get("drop_zone_source") or ("deployment_zone" if not state.get("drop_zone") else "?")
     say(f"== deployment: {len(mechs)} mech(s), drop zone ({source}): " + " ".join(visual(*p) for p in zone))
     if args.tiles:
         try:
@@ -1807,7 +1938,7 @@ def deploy(ctx) -> list:
         return []
     placed = place_mechs(ctx, plan, [p for p in ranked[len(mechs):]] if not args.tiles else [], bool(args.tiles))
     state = bridge.settled_state()
-    path = run.save_state(state, "deployed")
+    path = run.save_state(with_reactivation(state, react), "deployed")
     check_placed(state, placed)
     if search:
         heuristic = [placed[m["uid"]] for m in mechs]

@@ -420,6 +420,21 @@ void load_mission(const json& s, Recording& rec) {
   m.hacking_bot = get_or<int>(s, "mission_hacking_bot_id", -1);
   m.hacking_building = get_or<int>(s, "mission_hacking_hack_id", -1);
   if (auto it = s.find("is_infinite_spawn"); it != s.end() && it->is_boolean()) m.infinite_spawn = it->get<bool>();
+  // Mission_Reactivation: the units the mission may still thaw, as a player
+  // can know them (live_play.py builds the list from the units frozen at the
+  // mission's start and the thaws it has seen; environments.cpp
+  // ReactivationMission). Members are marked on the board's pawns. The
+  // mission's own list (mission_state.instance.Enemies) is hidden state and
+  // never read. Absent (old recordings): every frozen enemy is a candidate.
+  if (auto it = s.find("reactivation_visible_list"); it != s.end() && it->is_array() &&
+      m.mission_id == "Mission_Reactivation") {
+    m.reactivation_known = true;
+    for (Pawn& p : rec.board.pawns()) p.reactivation_listed = false;
+    for (const json& uid : *it) {
+      if (!uid.is_number()) continue;
+      if (Pawn* p = rec.board.find_pawn(static_cast<int32_t>(uid.get<double>()))) p->reactivation_listed = true;
+    }
+  }
   for (const json& u : s["units"]) {
     if (get_or<bool>(u, "queued_launch", false) && !get_or<bool>(u, "is_extra_tile", false)) {
       m.launching.push_back(get_or<int>(u, "uid", -1));
@@ -469,20 +484,6 @@ void load_mission_ext(const json& s, Recording& rec) {
     if (auto c = ms.find("class_chain"); c != ms.end()) m.mission_classes = strings(*c);
     if (auto c = ms.find("env_class_chain"); c != ms.end()) m.env_classes = strings(*c);
     if (auto i = ms.find("instance"); i != ms.end()) m.mission_instance_json = i->dump();
-    // Mission_Reactivation's Enemies: the uids it may still thaw (an empty
-    // Lua table dumps as {}). Members are marked on the board's pawns.
-    if (auto i = ms.find("instance"); i != ms.end() && i->is_object() && m.mission_id == "Mission_Reactivation") {
-      if (auto e = i->find("Enemies"); e != i->end() && (e->is_array() || (e->is_object() && e->empty()))) {
-        m.reactivation_known = true;
-        for (Pawn& p : rec.board.pawns()) p.reactivation_listed = false;
-        if (e->is_array()) {
-          for (const json& uid : *e) {
-            if (!uid.is_number()) continue;
-            if (Pawn* p = rec.board.find_pawn(static_cast<int32_t>(uid.get<double>()))) p->reactivation_listed = true;
-          }
-        }
-      }
-    }
     if (auto e = ms.find("env_instance"); e != ms.end() && e->is_object()) {
       m.env_instance_json = e->dump();
       // Env_Attack's planned Locations, in the order Ordered environments

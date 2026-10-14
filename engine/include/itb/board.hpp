@@ -246,8 +246,8 @@ struct Pawn {
   // a psion of another type, which does not affect it, is the board psion.
   bool health_bonus = false;
   bool fallen = false;   // fell into a chasm: off the board, never a corpse
-  // Mission state carried on the pawn: listed in Mission_Reactivation's
-  // Enemies (the frozen units the mission placed and has not drawn yet), so
+  // Mission state carried on the pawn: on Mission_Reactivation's visible
+  // list (placed frozen by the mission and not seen thawed by it since), so
   // the mission may still thaw it (environments.cpp ReactivationMission).
   // Only meaningful with MissionData::reactivation_known.
   bool reactivation_listed = false;

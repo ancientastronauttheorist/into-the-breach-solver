@@ -357,28 +357,33 @@ TEST_CASE("unpowered weapons cannot fire and unpowered passives do nothing") {
   CHECK(b.has_passive(kPassiveFlameImmune));
 }
 
-TEST_CASE("Mission_Reactivation's Enemies list marks its pawns") {
-  auto board = [](const std::string& enemies) {
+TEST_CASE("Mission_Reactivation's visible list marks its pawns; the mission's own list is ignored") {
+  // `visible`: live_play's reactivation_visible_list; the bridge's
+  // instance.Enemies (the mission's hidden list) is always [7] here.
+  auto board = [](const std::string& visible) {
     return R"({"mission_id": "Mission_Reactivation", "tiles": [], "units": [
         {"uid": 7, "type": "Snowtank1", "x": 5, "y": 4, "hp": 1, "max_hp": 1, "team": 6, "frozen": true},
         {"uid": 8, "type": "Leaper2", "x": 5, "y": 5, "hp": 3, "max_hp": 3, "team": 6, "frozen": true}],
-      "mission_state": {"instance": {)" + enemies + "}}}";
+      "mission_state": {"instance": {"Enemies": [7]}})" + visible + "}";
   };
   std::string error;
-  auto rec = load_text("itb_recording_reactivation.json", board(R"("Enemies": [8, 99])"), &error);
+  auto rec = load_text("itb_recording_reactivation.json", board(R"(, "reactivation_visible_list": [8, 99])"), &error);
   REQUIRE_MESSAGE(rec.has_value(), error);
   CHECK(rec->mission.reactivation_known);
   CHECK_FALSE(rec->board.find_pawn(7)->reactivation_listed);
   CHECK(rec->board.find_pawn(8)->reactivation_listed);
 
-  rec = load_text("itb_recording_reactivation.json", board(R"("Enemies": {})"), &error);  // empty Lua table
+  rec = load_text("itb_recording_reactivation.json", board(R"(, "reactivation_visible_list": [])"), &error);
   REQUIRE_MESSAGE(rec.has_value(), error);
   CHECK(rec->mission.reactivation_known);
+  CHECK_FALSE(rec->board.find_pawn(7)->reactivation_listed);
   CHECK_FALSE(rec->board.find_pawn(8)->reactivation_listed);
 
-  rec = load_text("itb_recording_reactivation.json", board(""), &error);  // not recorded
+  // No visible list (old recordings): the hidden one is not used.
+  rec = load_text("itb_recording_reactivation.json", board(""), &error);
   REQUIRE_MESSAGE(rec.has_value(), error);
   CHECK_FALSE(rec->mission.reactivation_known);
+  CHECK_FALSE(rec->board.find_pawn(7)->reactivation_listed);
 }
 
 TEST_CASE("boards without the extension fields load as before") {
