@@ -1194,6 +1194,69 @@ proven in their first 3-5 tiers. With 8 threads per-operation costs rise
 2-3x (2 super, 4 performance and 6 efficiency cores, shared caches, foreign
 load).
 
+**Final-mission turns** (2026-10-14; Mission_Final m40 and Mission_Final_Cave
+m41 of the live runs, the live flags `--time 30 --max-time 300 --min-tiers 7
+--threat-tier --objectives-first --mech-grid 2 --mech-grid-turns
+--mech-grid-pilot --lookahead`, 6 threads, other jobs running; profile
+counters in `itb_inspect --solve` single-board output and JSON). Live, many
+of these turns ended "optimal in the first 0 tiers" after 300 s.
+- Shape: 3 mechs against 6-8 enemies, a wide and shallow tree: 2-2.7
+  children per expanded node, most nodes at depth 5-6 (whole or nearly whole
+  plans; run 13 m41 turn 3: 0.05 M nodes at depth 3, 0.57 M at 4, 3.4 M at
+  5, 9.1 M at 6 after 2400 s). Each node costs one end-of-turn value (one
+  enemy phase, more under chance) and its children's sub-actions.
+- Where every plan loses grid (the enemy phase alone takes it: run 13 m41
+  turn 3 loses 2 grid; the Unfair runs 15 and 19 lose their last grid
+  points), the grid bound (grid power never rises) cuts only lines whose own
+  actions lose grid, so proving even the first tier visits every distinct
+  end board. Run 13 m41 turn 3: 14.5 M nodes in 2400 s without completing
+  (the 2 M-entry tables overflow; 8 M entries: no gain at 300 s, RSS 3.5 ->
+  4.9 GB). No cheap sound bound is tighter: any queued attack can be changed
+  by a push, kill, block, smoke, ice or shield anywhere on the board.
+- Sub-actions: with line weapons (Pierce, Hydrant, Scarab, Napalm squads)
+  40-75% of the shots gave a sibling's board, now skipped as same-effect
+  shots (up to 21 M per 300 s solve).
+- Enemy phases: inside the tier proof most outcomes are cut (98% of the
+  end-of-turn values here), now mostly before the phase ends. Outside it,
+  Grid Defense rolls and the Cave's bomb re-drop (a MissionRandom choice
+  over up to 16 inner tiles) multiply phases (run 15 m41 turn 4: 8 per
+  end-of-turn value).
+- The lookahead search re-derived what the base search knew, and when the
+  budget cut it, reported its own root bound: tiers the base search had
+  proven were lost from the report.
+
+Live flags, 300 s cap, 6 threads, the base commit and this one back to back
+per board (P = proven optimal; tiers as reported):
+
+| board | base: tiers, nodes | now: tiers (base search), nodes | value |
+|---|---|---|---|
+| run 9 m41 t6 | 0, 14.9 M | 0 (0), 23.2 M | next-turn -128 -> -192 (unproven) |
+| run 9 m41 t7 | 0, 8.5 M | P at 267 s, 11.4 M | same |
+| run 13 m41 t3 | 0, 7.9 M | 0 (0), 17.5 M | same |
+| run 15 m41 t1 | 0, 8.5 M | 0 (0), 19.0 M | same |
+| run 15 m41 t4 | 0, 5.4 M | 0 (0), 7.9 M | threat better |
+| run 17 m40 t1 | 0, 7.8 M | P at 226 s, 10.4 M | same |
+| run 17 m41 t1 | 0, 8.2 M | P at 273 s, 13.2 M | same |
+| run 19 m41 t1 | 0, 1.8 M | 0 (0), 2.3 M | same |
+| run 19 m41 t2 | 0, 2.1 M | 0 (0), 3.4 M | threat better |
+| run 4 m41 t5 | P at 155 s | P at 67 s | same |
+| `20261011_222439` m41 t2 | P at 193 s | P at 124 s | same |
+| `20261012_113135` m41 t3 | P at 192 s | P at 135 s | same |
+| run 17 m41 t3 | P at 125 s | P at 74 s | same |
+
+Proven 4 -> 7 of 13; proven by both: the same value, in 50-65% of the
+time. Nodes per 300 s 1.3-2.2x. The unproven six lose grid in every line
+(the first four lose the last grid points on Unfair); their plans keep the
+same grid, building, mech and star tiers. Thread time per sub-action and
+per enemy phase fell 25-65% (same load, back to back). Peak memory 3.2 ->
+3.9 GB (run 9 m41 t6: the base search's tables stay alive for the
+lookahead search). Checks: the 100-board sample (`--sample 100`, 3 threads
+each, side by side) at `--time 10` without and `--time 5` with the
+lookahead: every tier proven by both builds agrees (88 and 83 boards; 9
+boards proven optimal by both, all with the same value); the new build
+proves more tiers (444 -> 456, 444 -> 448) and finds a better plan on 15
+boards, a worse one on 1 (unproven).
+
 Limitations: limited-use weapons are assumed available unless the bridge
 recorded their uses (`Pawn::uses`, bridge extension); proofs are relative to the engine's model (`PhaseResult::exact`
 false for EnvInexact missions is reported as a warning); 128-bit hash
