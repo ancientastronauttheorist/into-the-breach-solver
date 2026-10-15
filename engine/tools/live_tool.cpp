@@ -483,12 +483,17 @@ json live_board_json(const Board& b) {
   // while the AI planned (a Mosquito smokes the target it queues on), and a
   // burning unit on it was put out then.
   json smoke_tiles = json::array();
+  // Shielded buildings and mountains: the bridge cannot read a structure's
+  // shield on vanilla (no Board:IsShield), so the driver carries the
+  // engine's forward into re-solves and the end-of-turn prediction.
+  json shield_tiles = json::array();
   for (int i = 0; i < kTileCount; ++i) {
     const Point p = Point::from_index(i);
     const Tile& t = b.tile(p);
     if (t.is_building()) buildings.push_back(json{{"x", p.x}, {"y", p.y}, {"hp", static_cast<int>(t.hp)}});
     if (t.acid) acid_tiles.push_back(json::array({p.x, p.y}));
     if (t.smoke) smoke_tiles.push_back(json::array({p.x, p.y}));
+    if (t.shield && (t.is_building() || t.is_mountain())) shield_tiles.push_back(json::array({p.x, p.y}));
   }
   std::vector<const Pawn*> ps;
   for (const Pawn& p : b.pawns()) {
@@ -539,7 +544,8 @@ json live_board_json(const Board& b) {
   std::sort(underground.begin(), underground.end(),
             [](const json& a, const json& c) { return a["uid"].get<int>() < c["uid"].get<int>(); });
   return json{{"grid_power", b.grid_power}, {"buildings", buildings}, {"units", units},
-              {"underground", underground}, {"acid_tiles", acid_tiles}, {"smoke_tiles", smoke_tiles}};
+              {"underground", underground}, {"acid_tiles", acid_tiles}, {"smoke_tiles", smoke_tiles},
+              {"shield_tiles", shield_tiles}};
 }
 
 LiveSession::LiveSession(const fs::path& game, int threads) : game_(game) {

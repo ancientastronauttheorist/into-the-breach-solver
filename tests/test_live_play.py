@@ -89,6 +89,10 @@ def unit(state, uid):
     return next(u for u in state["units"] if u["uid"] == uid)
 
 
+def tile(state, x, y):
+    return next(t for t in state["tiles"] if (t["x"], t["y"]) == (x, y))
+
+
 # A deploy weapon's tank (weapons_deploy.lua): a player unit, not a mech,
 # active at once, its weapon from the type's SkillList (the bridge has no
 # save record of it until the next turn: no weapons_exact / weapon_slots).
@@ -132,8 +136,14 @@ PLAN = [
 
 
 class FakeEngine:
-    def __init__(self, plan=PLAN, after_enemy=None, enemy_phase=None, clears=None):
+    def __init__(self, plan=PLAN, after_enemy=None, enemy_phase=None, clears=None, shields=None,
+                 enemy_shields=()):
         self.plan = plan
+        # (k, tiles): from plan step k on, the boards' "shield_tiles" (the
+        # structures the plan shielded); after the enemy phase, enemy_shields.
+        # None: boards without "shield_tiles" (an itb_live from before it).
+        self.shields = shields
+        self.enemy_shields = [list(t) for t in enemy_shields]
         self.after_enemy = after_enemy
         self.enemy_phase = enemy_phase or {"mission_ended": False}
         # {uid: plan step index}: the engine clears that unit's queued shot
@@ -174,8 +184,13 @@ class FakeEngine:
                 if k == self.plan.index(s) and any(u["uid"] == uid for u in b["units"]):
                     unit(b, uid)["has_queued_attack"] = False
             out.append(dict(s, index=i, status="ok", board=self._board(b)))
+            if self.shields is not None:
+                k, tiles = self.shields
+                out[-1]["board"]["shield_tiles"] = [list(t) for t in tiles] if self.plan.index(s) >= k else []
         after = compact(b)
         enemy = copy.deepcopy(self.after_enemy(b)) if self.after_enemy else compact(b)
+        if self.shields is not None:
+            enemy["shield_tiles"] = copy.deepcopy(self.enemy_shields)
         plan = [{"uid": s["uid"], "description": f"#{s['uid']} {s['sub']}"} for s in steps]
         return {"ok": True, "plan": plan, "steps": out, "refused": -1, "start": compact(st),
                 "after_player": after, "after_enemy": enemy, "enemy_phase": copy.deepcopy(self.enemy_phase),
@@ -942,6 +957,76 @@ class LivePlayTest(unittest.TestCase):
         lp.track_queued(tracked, pred, copy.deepcopy(pred), set())  # not a turn-start unit
         self.assertEqual(tracked[100]["target"], [2, 3])
 
+    # A structure's shield (Science_Shield on a building) is invisible to the
+    # bridge on vanilla; live 20261014 m14 (Mission_Survive turns 1 and 2): the
+    # end-of-turn prediction read the shielded F4 and G4 bare and lost them.
+
+    def test_shields_the_plan_placed_reach_the_end_of_turn_prediction(self):
+        self.bridge()
+        code, text = self.quiet(["turn"], FakeEngine(shields=(1, [[2, 2]])))
+        self.assertEqual(code, 0, text)
+        manifest = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertEqual(manifest["engine_shields"], {"mission": 0, "turn": 1, "tiles": [[2, 2]]})
+        self.assertFalse(tile(self.fb.state, 2, 2).get("shield"))  # the bridge cannot see it
+        eng = FakeEngine(shields=(1, [[2, 2]]), enemy_shields=[[2, 2]])
+        code, text = self.quiet(["end-turn", "--run", str(self.run_dir())], eng)
+        self.assertEqual(code, 0, text)
+        self.assertTrue(tile(eng.predict_states[0], 2, 2)["shield"])
+        self.assertIn("note: shielded (engine; the bridge cannot read a structure's shield): F6", text)
+        saved = json.loads((self.run_dir() / "m00_turn_01_end_turn_01.json").read_text())
+        self.assertEqual(saved["data"]["patches"]["tile_shields"], [[2, 2]])
+        raw = next(self.run_dir().glob("m00_turn_01_end_turn_raw_*.json"))
+        self.assertFalse(tile(json.loads(raw.read_text())["data"]["bridge_state"], 2, 2).get("shield"))
+        # The enemy phase left it standing and the game matched: next turn too.
+        manifest = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertEqual(manifest["engine_shields"], {"mission": 0, "turn": 2, "tiles": [[2, 2]]})
+        eng = FakeEngine()
+        self.assertEqual(self.quiet(["turn", "--dry-run", "--run", str(self.run_dir())], eng)[0], 0)
+        self.assertTrue(tile(eng.solves[0], 2, 2)["shield"])
+
+    def test_a_shield_is_not_carried_past_an_enemy_phase_that_differed(self):
+        self.bridge()
+        self.assertEqual(self.quiet(["turn"], FakeEngine(shields=(1, [[2, 2]])))[0], 0)
+        self.fb.next_turn = lambda st: dict(FakeBridge.default_next(st), grid_power=5)
+        eng = FakeEngine(shields=(1, [[2, 2]]), enemy_shields=[[2, 2]])
+        code, text = self.quiet(["end-turn", "--run", str(self.run_dir())], eng)
+        self.assertEqual(code, 1, text)
+        self.assertIn("grid: engine 7, game 5", text)
+        manifest = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertEqual(manifest["engine_shields"], {"mission": 0, "turn": 2, "tiles": []})
+
+    def test_an_engine_without_shield_boards_patches_no_shield(self):
+        self.bridge()
+        self.assertEqual(self.quiet(["turn"], FakeEngine())[0], 0)
+        eng = FakeEngine()
+        self.assertEqual(self.quiet(["end-turn", "--run", str(self.run_dir())], eng)[0], 0)
+        self.assertNotIn("shield", tile(eng.predict_states[0], 2, 2))
+
+    def test_confirmed_shields(self):
+        pred = {"buildings": [{"x": 2, "y": 2, "hp": 2}, {"x": 4, "y": 1, "hp": 1}],
+                "shield_tiles": [[4, 1], [2, 2], [0, 0]]}  # (0, 0): a mountain
+        live = {"buildings": [{"x": 2, "y": 2, "hp": 2}, {"x": 4, "y": 1, "hp": 2}]}
+        # (4, 1) went differently in the game: its shield may be gone.
+        self.assertEqual(lp.confirmed_shields(pred, live), [[0, 0], [2, 2]])
+        self.assertEqual(lp.confirmed_shields({"buildings": pred["buildings"]}, live), [])
+
+    def test_apply_shields(self):
+        st = base_state()
+        tile(st, 0, 0).update(terrain="mountain", terrain_id=4, building_hp=2)
+        tile(st, 5, 5).update(terrain="building", terrain_id=1, building_hp=0)  # destroyed
+        s = copy.deepcopy(st)
+        self.assertEqual(lp.apply_shields(s, [[2, 2], [0, 0], [5, 5], [3, 3]]), [[0, 0], [2, 2]])
+        self.assertTrue(tile(s, 2, 2)["shield"])
+        self.assertTrue(tile(s, 0, 0)["shield"])
+        self.assertNotIn("shield", tile(s, 5, 5))
+        self.assertNotIn("shield", tile(s, 3, 3))  # ground: a pawn's shield is its own
+        self.assertEqual(lp.apply_shields(s, [[2, 2]]), [])  # already shielded
+        # A bridge that reads structure shields itself is the authority.
+        s = copy.deepcopy(st)
+        s["tile_shields_live"] = True
+        self.assertEqual(lp.apply_shields(s, [[2, 2]]), [])
+        self.assertNotIn("shield", tile(s, 2, 2))
+
     # ---------------------------------------------------------------- end turn
 
     def test_end_turn_clicks_when_the_bridge_cannot_and_compares(self):
@@ -1434,6 +1519,45 @@ class ItbLiveTest(unittest.TestCase):
         self.assertNotIn(938, alive(before))
         self.assertNotIn(943, alive(after))
         self.assertIn(938, alive(after))
+
+    def test_end_of_turn_prediction_keeps_the_plans_building_shields(self):
+        """Live 20261014_175032 m14 turn 1 (Mission_Survive, Unfair), end to
+        end: Science_Shield from D4 at F4 shields F4 and G4; the bridge's End
+        Turn snapshot has them bare. Read so, the engine lost G4 and the grid
+        (0); with the shields the driver carries over, it is the game's (grid
+        2, F4 and G4 at 2 HP: the Scarab's and the Digger's hits popped the
+        shields)."""
+        fixtures = REPO / "engine" / "tests" / "fixtures"
+        tmp = Path(tempfile.mkdtemp(prefix="itb_live_shields_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        plan = [
+            {"uid": 2, "move": [4, 4], "kind": "weapon", "weapon": "Science_Shield", "target": [4, 2]},
+            {"uid": 1, "move": [3, 1], "kind": "weapon", "weapon": "Brute_PierceShot", "target": [3, 2]},
+            {"uid": 0, "move": [3, 6], "kind": "weapon", "weapon": "Prime_Lasermech", "target": [3, 7]},
+        ]
+        pred = self.itb_live("predict", str(fixtures / "live_survive_t1_solve_input.json"),
+                             "--plan", json.dumps(plan))
+        self.assertEqual(pred["after_enemy"]["grid_power"], 2)
+        shields = []
+        for step in pred["steps"]:  # every step matched live
+            shields = lp.confirmed_shields(step["board"], step["board"])
+        self.assertEqual(shields, [[4, 1], [4, 2]])
+
+        bare = json.loads((fixtures / "live_survive_t1_end_turn.json").read_text())["data"]["bridge_state"]
+        notes = []
+        fixed, patches = lp.patch_state(bare, {}, set(), notes=notes, shields=shields)
+        self.assertEqual(patches["tile_shields"], [[4, 1], [4, 2]])
+        self.assertIn("shielded (engine; the bridge cannot read a structure's shield): G4, F4", notes)
+        (tmp / "bare.json").write_text(json.dumps(bare))
+        (tmp / "fixed.json").write_text(json.dumps(fixed))
+        before = self.itb_live("predict", str(tmp / "bare.json"), "--plan", "[]")["after_enemy"]
+        after = self.itb_live("predict", str(tmp / "fixed.json"), "--plan", "[]")["after_enemy"]
+        hp = lambda board, x, y: next((b["hp"] for b in board["buildings"]  # noqa: E731
+                                       if (b["x"], b["y"]) == (x, y)), 0)
+        self.assertEqual(before["grid_power"], 0)  # the bug
+        self.assertEqual(hp(before, 4, 1), 0)
+        self.assertEqual(after["grid_power"], 2)
+        self.assertEqual((hp(after, 4, 1), hp(after, 4, 2)), (2, 2))
 
 
 def tearDownModule():

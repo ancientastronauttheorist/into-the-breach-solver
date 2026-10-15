@@ -202,6 +202,21 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   dove from; `<uid>.underground` in `patches`), and counts it as a known
   unit: one that resurfaces after the enemy phase is matched by uid (type
   and HP; a note, not a spawn).
+- **Shielded buildings** come from the engine too. On vanilla the bridge
+  cannot read a structure's shield (no `Board:IsShield`;
+  `tile_shields_live` false), so a building the plan shielded looked bare
+  in the End Turn snapshot (live 20261014_175032 m14, Mission_Survive turns
+  1 and 2: Science_Shield on F4 and G4; the end-of-turn prediction lost
+  them and the grid, the game and the solve's own forecast kept both).
+  `itb_live` boards list `shield_tiles` (shielded buildings and mountains);
+  after each step the driver keeps those whose building the live board
+  shows at the predicted HP (`engine_shields` in `manifest.json`, that
+  mission and turn) and marks them `"shield": true` on the state's tiles
+  for every re-solve and the end-of-turn prediction (`tile_shields` in
+  `patches`; a tile's `shield` loads on buildings and mountains). Shields
+  the enemy phase leaves standing carry into the next turn only when the
+  game matched the prediction. A bridge with `tile_shields_live` is taken
+  as is.
 - **Mission_Reactivation's thaw list** is kept from what a player sees,
   never from the mission's own `Enemies` list (hidden, like the AI seed).
   The driver starts it from the frozen enemies at deployment or at the
@@ -285,7 +300,9 @@ simulation follows the plan's default chance outcome (no Grid Defense
 resist, first branch), reseeding Lua as the solver does. Boards are compact:
 `grid_power`, `buildings` (x, y, hp) and living on-board `units` sorted by
 uid (uid, type, x, y, hp, team, mech, fire, acid, frozen, shield, web;
-`leader` for a psion: its mutation number).
+`leader` for a psion: its mutation number), plus `underground`,
+`acid_tiles`, `smoke_tiles` and `shield_tiles` (shielded buildings and
+mountains, [x, y]).
 
 ## Python bindings
 

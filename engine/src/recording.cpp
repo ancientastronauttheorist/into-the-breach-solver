@@ -74,6 +74,12 @@ void load_tile(const json& t, Board& board, std::vector<std::string>& warnings) 
     // The bridge reports "frozen" for anything frozen on the tile; only
     // structures carry their own frozen state.
     tile.frozen = get_or<bool>(t, "frozen", false);
+    // A structure's shield (Science_Shield, Passive_AutoShields): the bridge
+    // reports it only where the game exposes it (a Board:IsShield API), and
+    // live_play adds the ones the engine's own predictions placed (vanilla
+    // has no such API; a shielded building read as bare took the hit in the
+    // end-of-turn prediction). A pawn's shield is its own "shield".
+    tile.shield = get_or<bool>(t, "shield", false);
   }
   // The bridge only reports population on mountains, where it is
   // meaningless; recorded buildings are populated unless proven otherwise.

@@ -513,6 +513,20 @@ class Run:
                                       "units": {str(uid): shot for uid, shot in sorted(tracked.items())}}
         self.save_meta()
 
+    def engine_shields(self, state: dict) -> list:
+        """The structures the engine has shielded at this state's turn ([x, y];
+        see confirmed_shields), kept across commands in the manifest; [] for
+        another mission or turn."""
+        rec = self.meta.get("engine_shields") or {}
+        if rec.get("mission") != self.mission_index(state) or rec.get("turn") != int(state.get("turn") or 0):
+            return []
+        return [list(p) for p in rec.get("tiles") or []]
+
+    def save_engine_shields(self, state: dict, tiles: list) -> None:
+        self.meta["engine_shields"] = {"mission": self.mission_index(state), "turn": int(state.get("turn") or 0),
+                                       "tiles": sorted(list(p) for p in tiles)}
+        self.save_meta()
+
     def engine_underground(self, state: dict) -> dict:
         """The Burrowers underground by the engine's predictions (see
         track_underground), kept across commands and turns of this state's
@@ -946,7 +960,8 @@ def ui_limit_errors(steps: list, history: dict, state: dict, names: dict | None 
 
 def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = None,
                 notes: list | None = None, underground: dict | None = None,
-                history: dict | None = None, reactivation: list | None = None) -> tuple[dict, dict]:
+                history: dict | None = None, reactivation: list | None = None,
+                shields: list | None = None) -> tuple[dict, dict]:
     """The solver's input: the live state, plus --loadout weapons for units
     the bridge gives no exact ids, plus moved flags the bridge does not
     export, plus the engine's queued shots (`queued`, see track_queued) where
@@ -959,8 +974,10 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
     dove from, plus the pilot bonus of a unit that acted this turn and is
     active again (`history`, see ui_limit_errors), plus Mission_Reactivation's
     visible list (`reactivation`, see reactivation_after) as
-    "reactivation_visible_list". Returns (state, patches); queued-shot,
-    underground and reactivation notes go to `notes`."""
+    "reactivation_visible_list", plus the structures the engine has shielded
+    (`shields`, see confirmed_shields) as the tiles' "shield". Returns
+    (state, patches); queued-shot, underground, reactivation and shield
+    notes go to `notes`."""
     out = json.loads(json.dumps(state))
     patches = {}
     # The bridge's "web" passes through a legacy guess that clears a web when
@@ -1031,6 +1048,12 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
         text = reactivation_note(state, reactivation)
         if text and notes is not None:
             notes.append(text)
+    shielded = apply_shields(out, shields or [])
+    if shielded:
+        patches["tile_shields"] = shielded
+        if notes is not None:
+            notes.append("shielded (engine; the bridge cannot read a structure's shield): "
+                         + ", ".join(visual(x, y) for x, y in shielded))
     return out, patches
 
 
@@ -1146,6 +1169,52 @@ def reactivation_note(state: dict, listed: list) -> str | None:
     if extra:
         text += f"; {extra} already drawn per the hidden list (discards the player cannot see)"
     return text
+
+
+# ------------------------------------------------------------------ structure shields
+#
+# A shielded building or mountain (Science_Shield, Passive_AutoShields) is
+# invisible to the bridge on vanilla: the game exposes no Board:IsShield, and
+# RegionData only holds the turn-1 map (`tile_shields_live` false). The
+# engine's predictions carry them ("shield_tiles" in itb_live's boards), so
+# the driver keeps the engine's latest and marks those tiles "shield" in the
+# state of every re-solve and of the end-of-turn prediction (live 20261014
+# m14 Mission_Survive turns 1 and 2: F4 and G4 shielded by the plan; read
+# bare, the end-of-turn prediction lost them and the grid, the game kept
+# both). One the enemy phase leaves standing carries into the next turn when
+# the game matched the prediction.
+
+def confirmed_shields(predicted: dict, live: dict) -> list:
+    """The predicted board's shielded structures ([x, y], sorted) that the
+    live board confirms: a building needs the predicted HP there (a hit that
+    went differently may have popped the shield); a mountain is taken as
+    predicted. A board without "shield_tiles" (an older itb_live) gives []."""
+    pb = {(b["x"], b["y"]): b.get("hp") for b in predicted.get("buildings", [])}
+    lb = {(b["x"], b["y"]): b.get("hp") for b in live.get("buildings", [])}
+    out = []
+    for xy in predicted.get("shield_tiles") or []:
+        p = (int(xy[0]), int(xy[1]))
+        if p in pb and lb.get(p) != pb[p]:
+            continue
+        out.append(list(p))
+    return sorted(out)
+
+
+def apply_shields(state: dict, shields: list) -> list:
+    """Marks `shields` ([x, y]) "shield" on the state's building and mountain
+    tiles (in place), unless the bridge reads structure shields itself
+    (`tile_shields_live`). Returns the tiles it changed."""
+    if not shields or state.get("tile_shields_live") is True:
+        return []
+    want = {(int(x), int(y)) for x, y in shields}
+    changed = []
+    for t in state.get("tiles", []):
+        if (t.get("x"), t.get("y")) not in want or t.get("shield"):
+            continue
+        if t.get("terrain") == "mountain" or (t.get("terrain") == "building" and (t.get("building_hp") or 0) > 0):
+            t["shield"] = True
+            changed.append([t["x"], t["y"]])
+    return sorted(changed)
 
 
 # ------------------------------------------------------------------ queued shots
@@ -1503,13 +1572,17 @@ def play_turn(ctx) -> list:
     # The engine's queued shots this turn (a re-run of `turn` mid-turn
     # continues from the ones tracked so far).
     tracked = run.engine_queued(state)
+    # The structures the engine has shielded (by an earlier turn's plan, or
+    # this turn's so far), which the bridge cannot read.
+    shields = run.engine_shields(state)
     budget = f"{args.time:g}s" + (f", up to {args.max_time:g}s until {args.min_tiers} tiers are proven"
                                   if args.min_tiers > 0 and args.max_time > args.time else "")
     say(f"== {state.get('mission_id')} turn {state.get('turn')}: solving ({budget}, {args.threads} threads)")
 
     def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
-        solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react)
+        solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react,
+                                            shields)
         # --grid-survival needs the game's Grid Defense chance: an older
         # bridge does not export it, the save has its overpower bonus.
         if getattr(args, "grid_survival", False) and "grid_overflow" not in solver_input \
@@ -1591,6 +1664,8 @@ def play_turn(ctx) -> list:
         run.save_engine_queued(state, tracked)
         track_underground(under, step["board"], live, known)
         run.save_engine_underground(state, under)
+        shields = confirmed_shields(step["board"], live)
+        run.save_engine_shields(state, shields)
         run.event("step", {"step": text, "state": path.name, "diffs": diffs})
         if not diffs:
             for engine_uid, live_uid in unit_uid_map(step["board"], live, known).items():
@@ -1683,7 +1758,7 @@ def end_turn(ctx) -> list:
     queued_notes: list = []
     react = run.reactivation_list(state)
     solver_input, patches = patch_state(state, ctx.loadout, set(), run.engine_queued(state), queued_notes,
-                                        under, reactivation=react)
+                                        under, reactivation=react, shields=run.engine_shields(state))
     for n in queued_notes:
         say(f"  note: {n}")
     path = run.save_state(solver_input, "end_turn", {"patches": patches} if patches else None)
@@ -1786,6 +1861,10 @@ def end_turn(ctx) -> list:
     # resurfaced (listed again: dropped).
     track_underground(under, pred["after_enemy"], live, known)
     run.save_engine_underground(after, under)
+    # Shields the enemy phase left standing, taken only when the game matched
+    # the prediction (a shield the engine wrongly kept would leave a building
+    # exposed: the solver ranks worst case).
+    run.save_engine_shields(after, [] if diffs else confirmed_shields(pred["after_enemy"], live))
     if react is not None:
         react, react_notes = reactivation_after(react, pred, live)
         run.save_reactivation(after, react)

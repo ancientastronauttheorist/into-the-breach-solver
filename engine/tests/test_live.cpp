@@ -292,6 +292,61 @@ TEST_CASE("live: boards carry each unit's queued shot; smoke clears it (live 202
   fs::remove(fixed);
 }
 
+TEST_CASE("live: a building's shield loads from the state and boards export it (live 20261014_175032 m14 t1)") {
+  NEED_SESSION();
+  // Unfair, Mission_Survive turn 1. The Defense Mech on D4 fires Science_Shield
+  // at F4: F4 and the tile beyond it, G4, are shielded. In the enemy phase the
+  // Scarab's shot on F4 and the Digger's tusks on G4 only pop the shields: the
+  // game kept grid 2, F4 and G4 at 2 HP. The bridge cannot read a structure's
+  // shield on vanilla, so its End Turn snapshot has bare buildings; read as
+  // exported, the engine lost G4 and 1 HP of F4 (grid 0).
+  const std::string start = std::string(ITB_FIXTURE_DIR) + "/live_survive_t1_solve_input.json";
+  const json plan = json::array({
+      {{"uid", 2}, {"move", {4, 4}}, {"kind", "weapon"}, {"weapon", "Science_Shield"}, {"target", {4, 2}}},
+      {{"uid", 1}, {"move", {3, 1}}, {"kind", "weapon"}, {"weapon", "Brute_PierceShot"}, {"target", {3, 2}}},
+      {{"uid", 0}, {"move", {3, 6}}, {"kind", "weapon"}, {"weapon", "Prime_Lasermech"}, {"target", {3, 7}}},
+  });
+  const json r = S.handle({{"cmd", "predict"}, {"state", start}, {"plan", plan}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  REQUIRE(r["refused"] == -1);
+  CHECK(r["start"]["shield_tiles"].empty());
+  const json shields = json::array({json::array({4, 1}), json::array({4, 2})});
+  CHECK(r["steps"][1]["board"]["shield_tiles"] == shields);
+  CHECK(r["after_player"]["shield_tiles"] == shields);
+  CHECK(r["after_enemy"]["shield_tiles"].empty());  // both popped
+  CHECK(r["after_enemy"]["grid_power"] == 2);
+
+  auto building_hp = [](const json& board, int x, int y) {
+    for (const json& b : board["buildings"]) {
+      if (b["x"] == x && b["y"] == y) return b["hp"].get<int>();
+    }
+    return 0;
+  };
+  std::ifstream in(std::string(ITB_FIXTURE_DIR) + "/live_survive_t1_end_turn.json");
+  json wrapped = json::parse(in);
+  const fs::path bare = temp_file("itb_live_test_survive_bare.json", wrapped);
+  const json before = S.handle({{"cmd", "predict"}, {"state", bare.string()}, {"plan", json::array()}});
+  REQUIRE_MESSAGE(before["ok"].get<bool>(), before.dump());
+  CHECK(before["after_enemy"]["grid_power"] == 0);
+  CHECK(building_hp(before["after_enemy"], 4, 1) == 0);
+  CHECK(building_hp(before["after_enemy"], 4, 2) == 1);
+  // With the shields (scripts/live_play.py carries the engine's forward as
+  // the tiles' "shield"), the prediction is the game's.
+  for (json& t : wrapped["data"]["bridge_state"]["tiles"]) {
+    if (t["x"] == 4 && (t["y"] == 1 || t["y"] == 2)) t["shield"] = true;
+  }
+  const fs::path fixed = temp_file("itb_live_test_survive_fixed.json", wrapped);
+  const json after = S.handle({{"cmd", "predict"}, {"state", fixed.string()}, {"plan", json::array()}});
+  REQUIRE_MESSAGE(after["ok"].get<bool>(), after.dump());
+  CHECK(after["start"]["shield_tiles"] == shields);
+  CHECK(after["after_enemy"]["grid_power"] == 2);
+  CHECK(building_hp(after["after_enemy"], 4, 1) == 2);
+  CHECK(building_hp(after["after_enemy"], 4, 2) == 2);
+  CHECK(after["after_enemy"]["shield_tiles"].empty());
+  fs::remove(bare);
+  fs::remove(fixed);
+}
+
 TEST_CASE("live: deploy searches the drop zone of a deployed board (live 20261012_231559 m00)") {
   NEED_SESSION();
   const std::string state = std::string(ITB_FIXTURE_DIR) + "/live_volatile_t0_deployed.json";
