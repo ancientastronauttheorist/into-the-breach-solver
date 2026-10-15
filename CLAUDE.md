@@ -21,6 +21,12 @@ same solver drives the live bot.
 
 ## Hard rules
 
+- **CPU budget: 6 threads in total.** This Mac is shared with a real-time
+  project. Everything Into the Breach runs at the same time (the live
+  `itb_live serve`, solver and benchmark runs, builds, agent worktrees) adds
+  up to at most 6 threads: e.g. `itb_live serve --threads 6` alone, or
+  `--threads 4` while a build runs with `cmake --build engine/build -j 2`.
+  Start long-running engine processes with `nice -n 5`.
 - **Clean room, public repo.** Never commit game files, decompiled code,
   Ghidra output or anything copied from `.local_decompile/`. Engine code is
   written from behavioural specs in our own words; addresses and function names
