@@ -142,6 +142,9 @@ namespace {
 
 constexpr size_t kMaxConsoleLines = 256;
 constexpr int kMaxDepth = 6;
+// The collector's pause (LUA_GCSETPAUSE, percent of the live heap): LuaHost
+// creation.
+constexpr int kLuaGcPause = 1000;
 
 // Points the bindings at a board and a call record for the duration of one
 // native -> Lua call, and restores everything afterwards (calls nest).
@@ -569,6 +572,15 @@ std::unique_ptr<LuaHost> LuaHost::create(const std::filesystem::path& game_root,
   lua_getglobal(L, "SetGame");
   lua::host_push_game(L);
   if (lua_pcall(L, 1, 0, 0) != 0) lua_pop(L, 1);
+  // Garbage collection. The loaded scripts keep about 4 MB alive, and every
+  // engine run makes short-lived garbage (SpaceDamage / Point userdata, effect
+  // tables): with Lua's default pause (a new cycle once the heap doubles)
+  // collection was 8-13% of a search's time, mostly marking the scripts again
+  // and again. A cycle now starts at 10x the live heap (about 40 MB per
+  // engine). No shipped script reads the collector (collectgarbage, weak
+  // tables), and the userdata finalizers only free their C++ values.
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCSETPAUSE, kLuaGcPause);
 
   if (report) {
     report->files_ok = run.files_ok;
