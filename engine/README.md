@@ -1271,7 +1271,10 @@ grid ranks below it). If it finds none within 25% of the budget, or proves
 there is none, the search with the odds runs on the rest.
 
 Below odds 1 every outcome's share counts. A leaf's odds are bounded from
-the outcomes run so far (the others counted as surviving; the fold is tried
+the outcomes run so far (the others counted as surviving, except the
+resisted branch of a roll made with the grid already at 0, which loses it
+too: `ChanceCall::dead`, without a Grid Charger; 4-9% fewer enemy phases on
+three doomed recorded turns at 60000 nodes, same values; the fold is tried
 after 1, 2, 4, ... outcomes) and its phases run to their end. A chance node
 in the player's actions is searched Star1-style (`chance_odds`): each
 outcome in a window of its own, without the incumbent's raise (`local`), cut
