@@ -237,6 +237,8 @@ int run_solve(const SolveToolOptions& opt) {
     so.mech_grid_pilot = opt.mech_grid_pilot;
     so.lookahead = opt.lookahead;
     so.grid_survival = opt.grid_survival;
+    so.survival_cap_share = opt.grid_survival ? opt.survival_cap : 0;
+    so.survival_cap_strict = opt.survival_cap_strict;
     so.lookahead_options.samples = std::max(1, opt.lookahead_samples);
     if (opt.lookahead_idle) so.lookahead_options.reply = LookaheadOptions::Reply::Idle;
     so.lookahead_options.sum = opt.lookahead_sum;
@@ -298,6 +300,16 @@ int run_solve(const SolveToolOptions& opt) {
       if (r.best.actions.empty()) std::printf("  (end turn)\n");
       std::printf("worst case: %s\n", score_text(r.best.worst_case, tier_on).c_str());
       if (plain) std::printf("plain tiers (no mech exchange): %s\n", score_text(*plain, tier_on).c_str());
+      if (const SurvivalCap& c = r.survival_cap; c.ran) {
+        std::printf("survival cap: %s (%s; %.2fs; survey %.2fs%s)%s\n",
+                    c.bound < 1 ? ("every plan's odds <= " + std::to_string(c.bound)).c_str() : "nothing proven", c.log.c_str(),
+                    c.time_s, r.stats.survey_s, c.survey_proof ? ", proved doomed" : "",
+                    c.proven ? ": the plan reaches it, PROVEN OPTIMAL in the odds" : "");
+      } else if (so.survival_cap_share > 0) {
+        std::printf("survival cap: not run (the survey %s, %.2fs)\n",
+                    r.stats.survey_s > 0 ? "found no line keeping the grid in its share" : "found a line keeping the grid",
+                    r.stats.survey_s);
+      }
       if (!r.proven_optimal && r.upper_bound) {
         std::printf("upper bound: %s (optimal in the first %d tiers)\n", score_text(*r.upper_bound, tier_on).c_str(),
                     r.proven_components);
@@ -366,6 +378,13 @@ int run_solve(const SolveToolOptions& opt) {
              {"extended", r.extended},
              {"warnings", r.warnings}};
       if (r.upper_bound) j["upper"] = score_vector(*r.upper_bound, tier_on);
+      if (so.survival_cap_share > 0) {
+        const SurvivalCap& c = r.survival_cap;
+        j["survival_cap"] = json{{"ran", c.ran},       {"survey_proof", c.survey_proof}, {"m", c.m},
+                                 {"k", c.k},           {"bound", c.bound},               {"proven", c.proven},
+                                 {"proofs", c.proofs}, {"time_s", c.time_s},             {"survey_s", r.stats.survey_s},
+                                 {"log", c.log}};
+      }
       if (opt.threat_eval) {
         json plan = json::array();
         for (const PlayerAction& a : r.best.actions) plan.push_back(describe_action(board, a));

@@ -683,6 +683,13 @@ json LiveSession::handle(const json& request) {
         so.lookahead = tiers.lookahead;
         so.lookahead_options = tiers.lookahead_options;
         so.grid_survival = tiers.grid_survival;
+        // The survival cap pre-pass (README "Grid survival"): "survival_cap"
+        // true, its share of the budget "survival_cap_share" (default 0.5),
+        // "survival_cap_strict" (only after the survey's own proof).
+        if (so.grid_survival && request.value("survival_cap", false)) {
+          so.survival_cap_share = std::clamp(request.value("survival_cap_share", 0.5), 0.0, 1.0);
+          so.survival_cap_strict = request.value("survival_cap_strict", false);
+        }
         const int beam = request.value("beam_width", -1);
         if (beam >= 0) so.beam_width = beam;
         so.repair_skills = l.repair_skills;
@@ -702,6 +709,13 @@ json LiveSession::handle(const json& request) {
         out["extended"] = r.extended;
         out["contingent"] = r.best.contingent;
         out["stats"] = stats_json(r.stats);
+        if (so.survival_cap_share > 0) {
+          const SurvivalCap& c = r.survival_cap;
+          out["survival_cap"] = json{{"ran", c.ran},       {"survey_proof", c.survey_proof}, {"m", c.m},
+                                     {"k", c.k},           {"bound", c.bound},               {"proven", c.proven},
+                                     {"proofs", c.proofs}, {"time_s", c.time_s},             {"share", so.survival_cap_share},
+                                     {"log", c.log}};
+        }
         if (so.lookahead) {
           out["stats"]["lookahead_evals"] = r.stats.lookahead_evals;
           out["stats"]["lookahead_hits"] = r.stats.lookahead_hits;
@@ -731,7 +745,7 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
                "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] "
-               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] [--grid-survival] | "
+               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] [--grid-survival [--survival-cap] [--survival-cap-share F] [--survival-cap-strict]] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | "
                "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
                "[--solve-time S] [--solve-nodes N] [--seed N] [--placements JSON|@FILE] [--always JSON|@FILE] "
@@ -841,6 +855,14 @@ int run_live(int argc, char** argv) {
         request["lookahead_fold"] = args[++i];
       } else if (args[i] == "--grid-survival" && ranked) {
         request["grid_survival"] = true;
+      } else if (args[i] == "--survival-cap" && cmd == "solve") {
+        request["survival_cap"] = true;
+      } else if (args[i] == "--survival-cap-share" && more && cmd == "solve") {
+        request["survival_cap"] = true;
+        request["survival_cap_share"] = std::stod(args[++i]);
+      } else if (args[i] == "--survival-cap-strict" && cmd == "solve") {
+        request["survival_cap"] = true;
+        request["survival_cap_strict"] = true;
       } else if (args[i] == "--beam" && more && (cmd == "solve" || cmd == "deploy")) {
         request["beam_width"] = std::stoi(args[++i]);
       } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve" || cmd == "deploy")) {

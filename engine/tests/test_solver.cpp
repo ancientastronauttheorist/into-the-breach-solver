@@ -1382,6 +1382,159 @@ TEST_CASE("grid survival: the certificate proves the one-roll line on the two-ro
   CHECK(k1.best.worst_case[ScoreKey::GridSurvival] > 0);  // the one-roll line survives its resisted roll
 }
 
+// The survival cap pre-pass (SolveOptions::survival_cap_share): the same
+// values and plans as without it, the ceiling never below the naive odds,
+// and nothing run where some line surely keeps the grid.
+TEST_CASE("grid survival: the survival cap pre-pass changes no value or plan") {
+  NEED_ENGINE();
+  std::mt19937 rng(20261017);
+  int doomed = 0, ran = 0, bounded = 0, proven = 0, kept = 0, stopped = 0;
+  constexpr int kTrials = 30;
+  auto same_plan = [](const Plan& a, const Plan& b) {
+    if (a.actions.size() != b.actions.size()) return false;
+    for (size_t i = 0; i < a.actions.size(); ++i) {
+      const PlayerAction &x = a.actions[i], &y = b.actions[i];
+      if (x.uid != y.uid || x.kind != y.kind || x.move != y.move || x.target != y.target || x.target2 != y.target2 ||
+          x.weapon != y.weapon) {
+        return false;
+      }
+    }
+    return true;
+  };
+  for (int trial = 0; trial < kTrials; ++trial) {
+    const Board b = grid_risk_board(rng);
+    TurnContext ctx = context();
+    static constexpr int kDefense[] = {15, 25, 40, 60, 0};
+    ctx.mission.grid_defense = kDefense[trial % 5];
+    Naive naive{E, b, ctx};
+    naive.score_options.grid_survival = true;
+    naive.resist_p = ctx.mission.grid_defense / 100.0;
+    const Score want = naive.value(b);
+    const bool sure = want[ScoreKey::GridSurvival] == kSurvivalOne;
+    if (!sure) ++doomed;
+    SolveOptions o = quick(120);
+    o.grid_survival = true;
+    if (trial % 3 == 2) {  // also through the lookahead's base search (two searches)
+      o.lookahead = true;
+      o.lookahead_options.samples = 1;
+    }
+    const SolveResult off = solve_turn(E, b, ctx, o);
+    o.survival_cap_share = 0.5;
+    const SolveResult on = solve_turn(E, b, ctx, o);
+    const SurvivalCap& c = on.survival_cap;
+    INFO("trial " << trial << " p " << ctx.mission.grid_defense << " naive " << want.describe(kTierSurvival)
+                  << " on " << on.best.worst_case.describe(kTierSurvival) << " bound " << c.bound << " (M=" << c.m
+                  << ", K=" << c.k << ")");
+    CHECK(off.proven_optimal);
+    CHECK(on.proven_optimal);
+    CHECK(on.best.worst_case == off.best.worst_case);
+    CHECK(same_plan(on.best, off.best));
+    if (!o.lookahead) CHECK(on.best.worst_case == want);
+    // The survey proves the doomed boards (nothing else runs the pre-pass).
+    CHECK(c.ran == !sure);
+    if (sure) {
+      ++kept;
+      CHECK(c.proofs == 0);
+      CHECK(on.stats.nodes == off.stats.nodes);
+      continue;
+    }
+    ++ran;
+    CHECK(c.survey_proof);
+    const int32_t odds = want[ScoreKey::GridSurvival];
+    CHECK(odds <= c.cap_units());
+    REQUIRE(on.upper_bound);
+    CHECK(*on.upper_bound >= on.best.worst_case);
+    if (c.bound < 1) ++bounded;
+    if (c.proven) {
+      ++proven;
+      CHECK(odds >= c.goal_units());
+    }
+    // The adaptive budget stops at the goal: never below the best odds.
+    SolveOptions a = o;
+    a.time_limit_s = 0.01;
+    a.max_time_s = 120;
+    a.min_proven_tiers = 7;
+    const SolveResult early = solve_turn(E, b, ctx, a);
+    CHECK(early.best.worst_case[ScoreKey::GridSurvival] == odds);
+    if (early.survival_cap.proven) ++stopped;
+  }
+  CHECK(ran == doomed);
+  CHECK(bounded > 0);
+  MESSAGE("survival cap boards: " << kTrials << ", some line keeps the grid: " << kept << ", pre-pass ran: " << ran
+                                  << ", ceiling proven: " << bounded << ", plan at its ceiling: " << proven
+                                  << " (adaptive: " << stopped << ")");
+}
+
+TEST_CASE("grid survival: the survival cap stops the search at the proven odds") {
+  NEED_ENGINE();
+  // The two-roll board with more mechs to move: the best odds (0.25, one
+  // resisted roll) are the ceiling 1 - (1 - p)^1 the pre-pass proves, so the
+  // search stops once it has that plan. Without it the search must run to
+  // its end (its bound on the odds is 1 until then).
+  int32_t m = -1;
+  Board b = two_roll_board(&m);
+  // Two Combat Mechs too far from every Vek to change anything.
+  place(b, "PunchMech", {7, 7}, true);
+  place(b, "PunchMech", {7, 0}, true);
+  TurnContext ctx = context();
+  ctx.mission.grid_defense = 25;
+  SolveOptions o = quick(0.05);
+  o.grid_survival = true;
+  o.max_time_s = 120;
+  o.min_proven_tiers = 7;
+  const SolveResult off = solve_turn(E, b, ctx, o);
+  o.survival_cap_share = 0.5;
+  const SolveResult on = solve_turn(E, b, ctx, o);
+  const SurvivalCap& c = on.survival_cap;
+  MESSAGE("survival cap stop: " << on.stats.time_s << " s (pre-pass " << c.time_s << " s, " << c.proofs
+                                << " proofs), without " << off.stats.time_s << " s; odds "
+                                << on.best.worst_case.describe(kTierSurvival));
+  CHECK(c.ran);
+  CHECK(c.m == 1);
+  CHECK(c.k == 0);  // the one-roll line survives its resisted roll: K = 1 is false
+  CHECK(c.bound == doctest::Approx(0.25));
+  CHECK(c.proven);
+  CHECK(on.best.worst_case[ScoreKey::GridSurvival] == off.best.worst_case[ScoreKey::GridSurvival]);
+  CHECK(on.best.worst_case[ScoreKey::GridSurvival] == static_cast<int32_t>(std::llround(0.25 * kSurvivalOne)));
+  CHECK(off.proven_optimal);
+  CHECK_FALSE(on.proven_optimal);  // stopped before the search's end
+  CHECK(on.timed_out);
+  CHECK(on.stats.nodes < off.stats.nodes);
+  REQUIRE(on.upper_bound);
+  CHECK(on.upper_bound->v[0] <= c.cap_units());
+  CHECK(on.upper_bound->v[0] >= on.best.worst_case.v[0]);
+  // Strict: only after the survey's own proof (its share, 1/4 of the base
+  // time, is likely too short here); otherwise as without the pre-pass.
+  o.survival_cap_strict = true;
+  const SolveResult strict = solve_turn(E, b, ctx, o);
+  if (strict.survival_cap.ran) {
+    CHECK(strict.survival_cap.survey_proof);
+  } else {
+    CHECK(strict.proven_optimal);
+    CHECK(strict.best.worst_case == off.best.worst_case);
+  }
+}
+
+TEST_CASE("grid survival: the survival cap leaves a turn that keeps the grid alone") {
+  NEED_ENGINE();
+  int32_t m = -1;
+  Board b = two_roll_board(&m);
+  b.grid_power = 4;
+  TurnContext ctx = context();
+  ctx.mission.grid_defense = 25;
+  SolveOptions o = quick();
+  o.grid_survival = true;
+  const SolveResult off = solve_turn(E, b, ctx, o);
+  o.survival_cap_share = 0.5;
+  const SolveResult on = solve_turn(E, b, ctx, o);
+  CHECK_FALSE(on.survival_cap.ran);
+  CHECK(on.survival_cap.proofs == 0);
+  CHECK(on.best.worst_case == off.best.worst_case);
+  CHECK(on.best.worst_case[ScoreKey::GridSurvival] == kSurvivalOne);
+  CHECK(on.stats.nodes == off.stats.nodes);
+  CHECK(on.stats.enemy_phases == off.stats.enemy_phases);
+}
+
 TEST_CASE("solver: grid survival with the lookahead and the mech exchange matches a naive enumeration") {
   NEED_ENGINE();
   // The odds in front of the lookahead's lazy leaves (and its base search)

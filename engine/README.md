@@ -45,6 +45,7 @@ engine/build/itb_inspect --threat-check recordings                       # threa
 engine/build/itb_inspect --solve state.json --lookahead [--lookahead-samples 8] # experimental next-turn tier
 engine/build/itb_inspect --solve state.json --grid-survival                     # Grid Defense odds when every line can lose the grid
 engine/build/itb_inspect --survival-cert state.json --time 900 --threads 4     # an upper bound on those odds (certificate)
+engine/build/itb_inspect --solve state.json --grid-survival --survival-cap 0.5 --time 30 --max-time 120 --min-tiers 7  # certificate pre-pass
 engine/build/itb_inspect --lookahead-study state.json --compare [--samples 8] [--next-time 4]  # plans vs next turn
 engine/build/itb_inspect --two-turn state.json --arm la8 --arm sum8 --plan solve.json [--next-seeds 16]  # plans over two turns
 engine/build/itb_inspect --two-turn deployed.json --deploy --deploy-top 6 [--spawn F1] # placements over two turns
@@ -159,7 +160,12 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   no tier to the counts; the plan line shows the odds and the Grid Defense
   chance used. A bridge without `grid_overflow` (before 2026-10-14) gets it
   from the profile's `saveData.lua` (`grid_overflow` in the state's
-  `patches`).
+  `patches`). `--survival-cap [--survival-cap-share F]
+  [--survival-cap-strict]` (with `--grid-survival`; off by default) runs
+  the certificate as a pre-pass on a turn where the survey finds no line
+  that surely keeps the grid, and stops the solve once the plan reaches the
+  proven ceiling ("Survival cap" under Grid survival); the plan line then
+  says "odds PROVEN OPTIMAL at the ceiling".
 - **end-turn** predicts the enemy phase from the board as left, sends
   `END_TURN` (it deactivates the mechs, so the "units can still act" dialog
   never appears; on this build the bridge cannot end the turn itself and
@@ -295,8 +301,13 @@ then `worst_case` has `next_turn`, `stats` has `lookahead_evals`,
 end board's estimate: worst grid, mechs and building HP lost and each AI
 sample's) and `grid_survival` (then `worst_case` has `grid_survival`, a
 probability, and the reply has `grid_defense`: the `percent` used and its
-`source`, "state" or "default"). CLI: `--mech-grid-pilot`, `--lookahead
-[--lookahead-samples K] [--lookahead-reply greedy|idle]`, `--grid-survival`. The
+`source`, "state" or "default"). Solve only, with `grid_survival`:
+`survival_cap` (true), `survival_cap_share` (default 0.5) and
+`survival_cap_strict`; the reply then has `survival_cap` (`ran`,
+`survey_proof`, `m`, `k`, `bound`, `proven`, `proofs`, `time_s`, `share`).
+CLI: `--mech-grid-pilot`, `--lookahead
+[--lookahead-samples K] [--lookahead-reply greedy|idle]`, `--grid-survival`,
+`--survival-cap`, `--survival-cap-share F`, `--survival-cap-strict`. The
 simulation follows the plan's default chance outcome (no Grid Defense
 resist, first branch), reseeding Lua as the solver does. Boards are compact:
 `grid_power`, `buildings` (x, y, hp) and living on-board `units` sorted by
@@ -1397,6 +1408,93 @@ to find 0.4816 and never bounded it below 1.
   first again instead of passing over the rubble. And no static count caps
   n, since a resisted building rolls again on every hit. For k = 1 the first
   resist argument above is sound and needs no n (m <= G replaces it).
+
+**Survival cap** (`SolveOptions::survival_cap_share`, off by default;
+`itb_inspect --solve --grid-survival --survival-cap [SHARE]`, itb_live
+`"survival_cap": true` / `--survival-cap`, `live_play.py --grid-survival
+--survival-cap [--survival-cap-share F]`). The certificate as a pre-pass of
+the live solve (`survival_cap.cpp`, wired in `search_survival`):
+- When. Only after the survey (above) found no line that surely keeps the
+  grid. A survey that finds one returns as before: the pre-pass never runs
+  and every output is unchanged. The survey's proof that there is none
+  (it completes within its share) is often too slow (4 to over 30 s on the
+  doomed turns below, against a live share of 25% of 7.5 s), so the
+  pre-pass's first proof, M = G, is the proof that the turn is doomed:
+  every plan's no-resist path loses the grid, so every line can. If it
+  fails (a plan's no-resist path keeps the grid) or runs out of time, the
+  pre-pass stops and the search goes on as without it with the time left.
+  A turn with a line that surely keeps the grid which the survey missed in
+  its share therefore pays that first proof (it stops at the first plan
+  whose no-resist path keeps the grid, at most the pre-pass budget).
+  `--survival-cap-strict` (`survival_cap_strict`) runs the pre-pass only
+  after the survey's own proof.
+- Proofs. M = G, G - 1, ... while proven, then with the grid at 1 K = 1,
+  2, ...; each is a search of the certificate's world (`cert_roll_budget`,
+  `cert_resist_first`) ranked by the odds alone (the other ranking options
+  change no plan's odds), with no beam, the adaptive budget proving the
+  first tier from the start and `survival_goal` 1 (a plan with odds above 0
+  disproves the world at once). Together they get `survival_cap_share` of
+  the whole budget (`max_time` with the adaptive budget, else `time`;
+  nodes alike); the search after them gets the rest, so the solve stays
+  within its budget.
+- The ceiling. The ceiling B bounds the odds of every plan from the root,
+  not those of a board deeper in the search: after a chance node in the
+  player's own actions (a resisted roll) the turn may keep the grid for
+  sure. So it is never a tier bound (`tier_caps` would cap every node,
+  chance outcomes included, and cut the best line). It is
+  `SolveOptions::survival_goal` instead: B less a rounding guard, at which
+  the adaptive budget counts the plan proven (`Shared::meets_target`: it
+  stops at the base time, or at once past it), and it caps the reported
+  bound's odds (B plus the guard). The guard (`kSurvivalCapGuard`, 26
+  units of 10^-9): each fold over a chance tree rounds once (half a unit)
+  and a plan nests at most one fold per sub-action (48) plus the enemy
+  phase's, so the search's odds of a plan are within 24.5 units of its
+  exact odds; a plan whose odds reach B - guard is optimal in the odds to
+  within 5.3 * 10^-8.
+- Result: `SolveResult::survival_cap` (`ran`, `survey_proof`, `m`, `k`,
+  `bound`, `proven`: the plan's odds reach the goal, `proofs`, `log`,
+  `time_s`). It proves the odds only: `proven_components` and
+  `proven_optimal` keep their meaning (the tiers below the odds, the grid
+  of the outcomes that keep it and on, are searched until the base time).
+- `test_solver.cpp`: 30 tiny boards (15 doomed, 14 of them at their
+  ceiling; a third through the lookahead's two searches) give the same values and plans with and
+  without it, the naive odds never above the cap and, with an adaptive
+  budget that stops at the goal, the naive odds; a doomed board where the
+  search stops at the proven 0.25 before its end (without it the search runs
+  to its end); a board that keeps the grid untouched (same counters).
+
+Live flags (`--time 30 --max-time 120 --min-tiers 7 --threat-tier
+--objectives-first --mech-grid 2 --mech-grid-turns --mech-grid-pilot
+--lookahead --grid-survival`, 3 threads where live uses 8, with other jobs
+running), with `--survival-cap 0.5` and without:
+
+| Turn | G | p | pre-pass (60 s at most) | with: odds, total | without: odds, total | plan |
+|---|---|---|---|---|---|---|
+| run 27 Factory t3 (`20261014_222734` m14) | 2 | 0.08 | M=2 proven, M=1 disproven: 2.4 s | 0.1536 = ceiling, **proven**, 30.9 s | 0.1536, 120.9 s, unproven | next_turn -1025 vs -64 |
+| run 30 MosquitoBoss t4 (`20261015_072606` m28) | 2 | 0.24 | M=2 proven, M=1 disproven: 0.05 s | 0.24 (ceiling 0.4224), search complete 0.4 s | 0.24, complete 0.3 s | same |
+| run 24 Final t3 (`20261014_151230` m40) | 1 | 0.28 | M=1 proven, K=1 open: 60 s | 0.0784 (ceiling 0.28), 123 s | 0.0784, 125 s | same |
+| run 21 Cave t2 (`20261014_045942` m41) | 1 | 0.15 | M=1 open: 60 s | 0.15, 126 s | 0.15, 125 s | same |
+| run 26 Cave t3 (`20261014_190250` m41) | 3 | 0.28 | M=3 open: 60 s | 0.4816, 124 s | 0.4816, 128 s | same |
+| run 25 Survive t3 (`20261014_175032` m14) | 1 | 0 | M=1 open: 60 s | 0, 123 s | 0, 122 s | same |
+| run 28 Cave t4 (`20261014_233706` m41) | 1 | 0.20 | M=1 open: 60 s | 0.0016 (p^4), 120 s | 0.0016, 120 s | same |
+
+Same odds on all seven, the same plan on six. Run 27 stops at the base
+time once its plan reaches the ceiling, so the tiers below the odds get 30 s
+instead of 120 s: its NextTurn is worse there (the next turn's estimate,
+given the grid survives, which it does with odds 0.15). Where the pre-pass
+proves nothing the search after it has 60 s fewer and still found the same
+plans. (A total a few seconds past 120 s is the lookahead search's last
+evaluations, with or without the pre-pass.)
+
+With more time (`--max-time 900 --survival-cap 0.9`, 3 threads): run 24
+proves M=1 in 19.6 s and K=1 in 16.4 s (K=2 disproven at once), ceiling
+0.0784 = its plan's odds: **proven, 40.3 s in all** (the 60 s run above
+shared the machine with a build); run 28's M=1 is still open after 812 s
+(its plan needs four resists, p^4, so it would also need K=3). The
+certificate tool's own proofs took 19 s (run 27 M=2) and 72 + 101 s (run 24)
+with 4 threads: the pre-pass's proofs (no beam, a plan with odds above 0
+ends a proof at once, the first tier's proof from the start) take 2.4 s and
+36 s.
 
 **Anytime.** With a time or node budget the result is the best plan found,
 `proven_optimal = false`, an `upper_bound` (the root's interval, sound

@@ -129,6 +129,29 @@ struct SolveOptions {
   // certificate's grid-1 extension (survival there needs every roll
   // resisted).
   int cert_resist_first = 0;
+  // Survival cap (README "Grid survival", survival cap; needs grid_survival):
+  // > 0 turns on the certificate pre-pass. When the survey finds no line
+  // that surely keeps the grid, the certificate's proofs (cert_roll_budget
+  // M = G, G - 1, ..., then cert_resist_first K with the grid at 1) run
+  // next, within this share of the whole budget (max_time_s with the
+  // adaptive budget, else time_limit_s; nodes alike), and the proven ceiling
+  // on every plan's odds becomes the search's survival_goal. The first
+  // proof (M = G: every plan's no-resist path loses the grid) is also the
+  // proof that the turn is doomed; when it fails the search goes on as
+  // without the pre-pass. A turn whose survey finds a line never runs it
+  // (the survey's result is returned as before). 0 (the default): off,
+  // results are unchanged.
+  double survival_cap_share = 0;
+  // With survival_cap_share: run the pre-pass only when the survey proved
+  // within its share that no line surely keeps the grid (a survey that ran
+  // out of its share leaves the turn to the search as without the pre-pass).
+  bool survival_cap_strict = false;
+  // With grid_survival and the adaptive budget: the first min_proven_tiers
+  // tiers also count as proven (the search stops at time_limit_s, or at once
+  // past it) when the plan's odds reach this many kSurvivalOne units. Only
+  // sound to set to a value no plan's odds exceed (the pre-pass sets the
+  // proven ceiling less its rounding guard). -1 (the default): off.
+  int32_t survival_goal = -1;
   bool tier_on() const { return threat_tier || threat_kills; }
   // The optional tiers in use (score.hpp TierSet).
   TierSet tiers() const {
@@ -240,6 +263,46 @@ struct SolveStats {
   std::array<uint64_t, 12> depth_nodes{};
 };
 
+// SolveOptions::survival_cap_share: what the certificate pre-pass proved.
+struct SurvivalCap {
+  // The survey found no line that surely keeps the grid, so the pre-pass
+  // ran (false: off, or the survey found one; nothing else is set).
+  bool ran = false;
+  // The survey proved there is none (it completed within its share); else
+  // the first proof (M = G) is the proof.
+  bool survey_proof = false;
+  // The smallest roll budget M proven (every plan loses the grid within its
+  // first M unresisted rolls; -1: none) and, with the grid at 1, the most
+  // first rolls K proven resisted (every all-resist path has more than K).
+  int m = -1;
+  int k = 0;
+  // The proven ceiling on every plan's odds: 1 - (1 - p)^M, or p^(K + 1)
+  // (1: nothing proven).
+  double bound = 1.0;
+  // The plan's odds reach the ceiling (to within kSurvivalCapGuard units):
+  // no plan has better odds. The rest of the score is not proven by this.
+  bool proven = false;
+  int proofs = 0;      // searches run in the certificate's worlds
+  // Each proof and its outcome: "M=2 proven 2.1s, M=1 disproven 0.3s, ..."
+  // (disproven: a plan has odds above 0 there; open: out of budget).
+  std::string log;
+  uint64_t nodes = 0;  // their nodes (not in SolveStats)
+  double time_s = 0;   // the pre-pass's time (included in SolveStats::time_s)
+  // The ceiling in kSurvivalOne units with the rounding guard added: no
+  // plan's odds as the search computes them exceed it (kSurvivalOne: none).
+  int32_t cap_units() const;
+  // The ceiling less the guard: a plan whose odds reach it is optimal in the
+  // odds (SolveOptions::survival_goal; -1: nothing proven).
+  int32_t goal_units() const;
+};
+
+// kSurvivalOne units by which the search's odds of a plan may exceed its
+// exact odds: each fold over a chance tree rounds once (half a unit), and
+// a plan nests at most one fold per sub-action (kMaxDepth = 48 in
+// solver.cpp) plus the enemy phase's. The pre-pass's cap adds it to the
+// ceiling, its goal subtracts it.
+inline constexpr int32_t kSurvivalCapGuard = 26;
+
 struct SolveResult {
   Plan best;
   // The search completed: no plan has a better worst case than `best`.
@@ -262,6 +325,9 @@ struct SolveResult {
   bool extended = false;
   std::vector<std::string> warnings;
   SolveStats stats;
+  // SolveOptions::survival_cap_share. With a ceiling proven, upper_bound's
+  // odds are at most the ceiling plus kSurvivalCapGuard units.
+  SurvivalCap survival_cap;
 };
 
 SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx,

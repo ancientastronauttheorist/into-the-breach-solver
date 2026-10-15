@@ -34,6 +34,8 @@ struct SolveToolOptions {
   bool lookahead_idle = false;     // LookaheadOptions::Reply::Idle instead of Greedy
   bool lookahead_sum = false;      // LookaheadOptions::sum
   bool grid_survival = false;      // SolveOptions::grid_survival (Grid Defense odds when every line loses the grid)
+  double survival_cap = 0;         // SolveOptions::survival_cap_share (the certificate pre-pass; 0: off)
+  bool survival_cap_strict = false;  // SolveOptions::survival_cap_strict
   // JSON: also each plan's actions and its worst case scored with the threat
   // tier on ("plan", "threat_eval"), whatever the search ranked by.
   bool threat_eval = false;
