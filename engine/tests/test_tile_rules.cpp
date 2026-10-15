@@ -1853,6 +1853,62 @@ TEST_CASE("a web breaks when its emitter tile loses its Vek") {
   CHECK_FALSE(w.pawn(10).webbed);
 }
 
+TEST_CASE("webs: a Disable_Immunity pilot (Camila Vera) shakes off a web at once; others stay held") {
+  // Pawn::SetGrappled sets the flag even for her (the game only swaps the
+  // voice line for Mech_WebBlocked); BoardSpace::OnLoop's web check then
+  // breaks the web (IsGrappleImmunity: Disable_Immunity, not busy), so after
+  // the settle she is free and can move. A second web on another mech holds.
+  const Point down{3, 4};
+  World w;
+  w.add(vek(1, 3, kP));
+  w.add(mech(10, 3, kRight));
+  w.add(mech(11, 3, down));
+  w.pawn(10).pilot_abilities = kPilotDisableImmunity;
+  w.pawn(10).move = 3;
+  w.pawn(10).movement.powered = true;
+  SpaceDamage a = World::sd_at(0, kP);
+  a.grapple_source = kRight;
+  w.hit(a);
+  SpaceDamage b = World::sd_at(0, kP);
+  b.grapple_source = down;
+  w.hit(b);
+  CHECK(w.pawn(10).webbed);  // the flag, for the rest of this frame
+  CHECK(w.pawn(11).webbed);
+  w.settle();
+  CHECK_FALSE(w.pawn(10).webbed);
+  CHECK(w.tile(kRight).web_in == 0);
+  CHECK(w.tile(kP).web_out == 1u << static_cast<int>(Dir::Down));
+  CHECK(can_move(w.pawn(10)));
+  CHECK(w.pawn(11).webbed);
+  CHECK(w.tile(down).web_in == 1);
+  CHECK_FALSE(can_move(w.pawn(11)));
+
+  // A web left on a tile does not catch her when she steps onto it either:
+  // the plain mech leaves its held tile and she takes it, all in one frame.
+  set_space(w.board, w.pawn(11), Point{6, 6});
+  set_space(w.board, w.pawn(10), down);
+  w.settle();
+  CHECK_FALSE(w.pawn(10).webbed);
+  CHECK(w.tile(kP).web_out == 0);
+  CHECK(w.tile(down).web_in == 0);
+}
+
+TEST_CASE("smoke still puts out a Disable_Immunity pilot's fire") {
+  // BoardSpace::OnLoop puts out every pawn on a smoked tile (its own check,
+  // not Pawn::IsSmoked), so the pilot's immunity does not keep her burning.
+  World w;
+  Pawn m = mech(10, 3);
+  m.fire = true;
+  m.pilot_abilities = kPilotDisableImmunity;
+  w.add(m);
+  SpaceDamage sd = World::sd_at(0);
+  sd.smoke = StatusChange::Apply;
+  w.hit(sd);
+  w.settle();
+  CHECK(w.tile().smoke);
+  CHECK_FALSE(w.pawn(10).fire);
+}
+
 TEST_CASE("sItem places an item; DAMAGE_ZERO reads as 0") {
   World w;
   SpaceDamage sd = World::sd_at(kDamageZero);

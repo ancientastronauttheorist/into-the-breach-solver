@@ -729,7 +729,9 @@ PositionTerms position_terms(const Board& b) {
       t.mech_fire += p.fire && !fire_immune ? 1 : 0;
       t.mech_acid += p.acid ? 1 : 0;
       t.mech_frozen += p.frozen ? 1 : 0;
-      t.mech_smoke += b.tile(p.pos).smoke && !p.ignore_smoke ? 1 : 0;
+      // Smoke blocks a mech's weapons only when Pawn::IsSmoked holds: not for
+      // IgnoreSmoke or a Disable_Immunity pilot (Camila Vera).
+      t.mech_smoke += b.tile(p.pos).smoke && !p.ignore_smoke && !p.has_pilot(kPilotDisableImmunity) ? 1 : 0;
       t.mech_fragile += p.hp == 1 ? 1 : 0;
       continue;
     }

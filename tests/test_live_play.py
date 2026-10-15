@@ -827,6 +827,23 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual(self.acting(), ["MOVE_NATIVE 0 3 4"])
         self.assertIn("PunchMech#0 Prime_Lasermech_A at E5: the unit is on smoke", out)
 
+    # Pilot_Soldier (Disable_Immunity): Pawn::IsSmoked is false for her, so
+    # the UI arms her weapons on smoke and the guard lets the shot go.
+    def camila_from_smoke(self, pilot: dict):
+        st = base_state()
+        tile(st, 3, 4)["smoke"] = True
+        unit(st, 0).update(pilot)
+        self.bridge(st)
+        self.assertEqual(self.run_cmd(["turn"], FakeEngine()), 0)
+        self.assertEqual(self.acting(), ["MOVE_NATIVE 0 3 4", "ATTACK 0 1 3 3", "ATTACK 1 0 3 3"])
+
+    def test_camila_vera_attacks_from_smoke(self):
+        self.camila_from_smoke({"pilot_id": "Pilot_Soldier"})
+
+    def test_camila_vera_attacks_from_smoke_pilot_record(self):
+        # The bridge extension's pilot record alone (no pilot_id).
+        self.camila_from_smoke({"pilot": {"id": "Pilot_Soldier", "level": 0}})
+
     def test_a_shifty_step_after_attacking_is_played(self):
         st = base_state()
         unit(st, 0)["pilot_id"] = "Pilot_Leader"
@@ -1635,6 +1652,10 @@ class UiLimitTest(unittest.TestCase):
         self.assertEqual(lp.ui_blocked(state({"smoke": True}), 0), "on smoke")
         self.assertIsNone(lp.ui_blocked(state({"smoke": True}, traits={"ignore_smoke": True}), 0))
         self.assertIsNone(lp.ui_blocked(state({"smoke": True}, pilot_id="Pilot_Soldier"), 0))
+        self.assertIsNone(lp.ui_blocked(state({"smoke": True}, pilot={"id": "Pilot_Soldier"}), 0))
+        # Her immunity is to smoke and webs only: water still stops her weapons.
+        self.assertEqual(lp.ui_blocked(state({"terrain": "water", "terrain_id": 3}, pilot_id="Pilot_Soldier"), 0),
+                         "submerged")
         self.assertEqual(lp.ui_blocked(state({"terrain": "water", "terrain_id": 3}), 0), "submerged")
         self.assertIsNone(lp.ui_blocked(state({"terrain": "water", "terrain_id": 3}, flying=True), 0))
         self.assertIsNone(lp.ui_blocked(state({"terrain": "lava", "terrain_id": 5}), 0))  # old name for ice

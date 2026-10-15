@@ -147,6 +147,32 @@ TEST_CASE("AI phase: a lone Scorpion walks up to a building and queues its attac
   CHECK(r.seed != o.seed);
 }
 
+TEST_CASE("AI phase: a Scorpion's web holds a mech but not a Disable_Immunity pilot (Camila Vera)") {
+  NEED_ENGINE();
+  // ScorpionAtk1 webs its target as it queues (AddGrapple in the instant
+  // part). BoardSpace::OnLoop's web check breaks the web on a pawn with the
+  // Disable_Immunity skill (IsGrappleImmunity), so her mech is free to move
+  // in the next player turn; the queued attack itself still lands later.
+  for (const bool immune : {false, true}) {
+    Board b;
+    b.turn = 1;
+    const int32_t m = place(b, "PunchMech", Point{3, 4}, true);
+    const int32_t vek = place(b, "Scorpion1", Point{3, 3});
+    if (immune) b.find_pawn(m)->pilot_abilities = engine()->data().pilot_ability("Pilot_Soldier");
+    AiPhaseOptions o;
+    o.seed = 4242;
+    const AiPhaseResult r = E.ai_phase(b, o);
+    CHECK(r.lua_errors.empty());
+    const Pawn& s = *b.find_pawn(vek);
+    INFO("immune " << immune);
+    REQUIRE(s.queued.active());
+    REQUIRE(s.queued.target == Point{3, 4});
+    const Pawn& mech = *b.find_pawn(m);
+    CHECK(mech.webbed == !immune);
+    CHECK((b.tile(Point{3, 4}).web_in > 0) == !immune);
+  }
+}
+
 TEST_CASE("AI phase: frozen pawns and the player's units do not plan") {
   NEED_ENGINE();
   Board b;

@@ -772,13 +772,14 @@ over chance outcomes, the score judges one concrete outcome.
    count like the player's. A retreat (minor flag set, HP 0) is not a kill.
 5. **Position** (`position_terms`), a tie-break on the end board only:
    -3 per mech on fire (not fire-immune), -2 per mech with ACID, -2 per
-   frozen mech, -1 per mech on smoke, -2 per mech at 1 HP; -1 per (enemy,
-   adjacent building) pair (-2 for an objective building) and per enemy next
-   to a player-team non-mech unit; +1 per enemy on fire or frozen; +2 per
-   living deployed unit and +1 per HP it has (a support tank or an
-   Arachnoid spider, `is_deployed_unit`; see "Deployable units"). One pass
-   over the pawns. Spawn tiles are left out: a blocked spawn stays queued and
-   hurts its blocker again next turn, so occupying one is not a clear gain.
+   frozen mech, -1 per mech on smoke (not IgnoreSmoke or Disable_Immunity),
+   -2 per mech at 1 HP; -1 per (enemy, adjacent building) pair (-2 for an
+   objective building) and per enemy next to a player-team non-mech unit;
+   +1 per enemy on fire or frozen; +2 per living deployed unit and +1 per
+   HP it has (a support tank or an Arachnoid spider, `is_deployed_unit`; see
+   "Deployable units"). One pass over the pawns. Spawn tiles are left out:
+   a blocked spawn stays queued and hurts its blocker again next turn, so
+   occupying one is not a clear gain.
 
 **Next-turn threat (experimental, off by default).** `ScoreKey::Threat`
 sits between objective stars and mech HP and is scored only with
@@ -1059,6 +1060,22 @@ follows for the pilots (FireWeapon's bookkeeping, stage 5 §2.4):
   marked moved and active again: exactly one more action, no move. After a
   move, one action.
 - Every other pawn: one action, which ends its turn.
+
+**Disable_Immunity** (Evasion, Camila Vera, `Pilot_Soldier`; "Mech
+unaffected by Webbing and Smoke") is read in three places, all
+`kPilotDisableImmunity`: `Pawn::IsSmoked` (00870f40) is false for her, so
+she attacks and repairs from smoke (IsActable) and smoke would not drop a
+queued shot; `BoardSpace::IsGrappleImmunity` (009005b0) makes the web check
+in `BoardSpace::OnLoop` break any web held on her tile once she is not busy;
+and `Pawn::SetGrappled` (0086e5f0) only swaps the voice line
+(Mech_WebBlocked). A web attack therefore still sets the flag for the rest
+of its frame, then the settle frees her (`check_webs`), so she can move next
+turn, and a web left on a tile does not catch her when she steps on it. It
+is a property of her pawn alone: other mechs on smoke or webbed beside her
+are unaffected, her attacks are unchanged, and tile-level smoke rules still
+reach her (`BoardSpace::OnLoop` puts out a burning pawn on smoke, and
+Nanofilter Mending spends smoke to heal her, both without IsSmoked). The
+position tier does not count her as a mech on smoke.
 
 Before 2026-10-13 the engine checked only `active` for weapons, so a
 re-activated Shifty pawn could fire and repair again without limit, and a

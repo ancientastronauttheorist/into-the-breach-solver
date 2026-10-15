@@ -786,6 +786,9 @@ TEST_CASE("position: mech hazards, threatened buildings, enemy debuffs") {
   // Fire immunity (Flame Shielding) removes the fire term.
   b.passives |= kPassiveFlameImmune;
   CHECK(position_terms(b).mech_fire == 0);
+  // A Disable_Immunity pilot (Camila Vera) still acts from smoke: no smoke term.
+  b.find_pawn(1)->pilot_abilities = kPilotDisableImmunity;
+  CHECK(position_terms(b).mech_smoke == 0);
 }
 
 // ---- Recording loader ---------------------------------------------------------------------

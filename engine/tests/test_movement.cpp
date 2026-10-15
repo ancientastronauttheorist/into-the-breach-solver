@@ -661,6 +661,24 @@ TEST_CASE("S9d smoke and water: no weapon or Repair, the move stays") {
   CHECK(can_act(b, p));
 }
 
+TEST_CASE("S9e Disable_Immunity (Camila Vera): acts from smoke, not from water") {
+  // Pawn::IsSmoked is false for a Disable_Immunity pilot, so IsActable holds
+  // on smoke; IsSubmerged has no pilot exemption.
+  Board b;
+  const int32_t camila = mech(b, {3, 3}).uid;
+  const int32_t plain = mech(b, {3, 4}).uid;
+  Pawn& p = pawn(b, camila);
+  const Pawn& other = pawn(b, plain);
+  p.pilot_abilities = kPilotDisableImmunity;
+  b.tile({3, 3}).smoke = true;
+  b.tile({3, 4}).smoke = true;
+  CHECK(can_act(b, p));
+  CHECK_FALSE(can_act(b, other));  // the immunity is the pilot's, not the tile's
+  b.tile({3, 3}).smoke = false;
+  b.tile({3, 3}).terrain = Terrain::Water;
+  CHECK_FALSE(can_act(b, p));
+}
+
 TEST_CASE("S10 Kickoff Boosters bonus is assigned, not summed") {
   Board b;
   b.passives = kPassiveKickoff;

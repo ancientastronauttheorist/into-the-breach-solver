@@ -114,7 +114,8 @@ const Pawn* same_pawn(const Pawn& p, const Board& after, const PhaseResult* phas
 //   -3 per mech on fire (not fire-immune): 1 damage next turn unless spent on a repair
 //   -2 per mech with ACID: doubles the next weapon hits
 //   -2 per frozen mech: cannot act next turn
-//   -1 per mech on a smoke tile: cannot attack or repair from there
+//   -1 per mech on a smoke tile: cannot attack or repair from there (not
+//      for IgnoreSmoke or a Disable_Immunity pilot, who can)
 //   -2 per mech at 1 HP: one hit from being destroyed
 //   -1 per (enemy, adjacent building) pair, -2 for an objective building,
 //      -1 per enemy next to a player-team non-mech unit: what the next

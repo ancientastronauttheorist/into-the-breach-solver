@@ -455,6 +455,34 @@ TEST_CASE("Engine: a mech on smoke or in water cannot attack or repair") {
   CHECK(E.fire_weapon(b, mech, 0, {3, 3}).ok());
 }
 
+TEST_CASE("Engine: a Disable_Immunity pilot (Camila Vera) attacks and repairs from smoke") {
+  NEED_ENGINE();
+  // pilots.lua Pilot_Soldier: Skill = "Disable_Immunity" ("Mech unaffected
+  // by Webbing and Smoke"): Pawn::IsSmoked is false for her, so IsActable
+  // holds on smoke. Another mech on smoke still cannot act.
+  CHECK(E.data().pilot_ability("Pilot_Soldier") == kPilotDisableImmunity);
+  Board b;
+  const int32_t mech = place(b, "PunchMech", {3, 4}, true);
+  const int32_t other = place(b, "PunchMech", {5, 4}, true);
+  const int32_t vek = place(b, "Scorpion1", {3, 3});
+  b.find_pawn(mech)->pilot_abilities = E.data().pilot_ability("Pilot_Soldier");
+  b.find_pawn(mech)->active = true;
+  b.find_pawn(other)->active = true;
+  b.tile({3, 4}).smoke = true;
+  b.tile({5, 4}).smoke = true;
+  CHECK(E.fire_weapon(b, other, 0, {5, 3}).status == ActionStatus::CannotAct);
+  CHECK(E.fire_weapon(b, mech, 0, {3, 3}).ok());
+  CHECK(b.find_pawn(vek)->pos != Point{3, 3});  // punched and pushed
+  CHECK(b.tile({3, 4}).smoke);                  // the smoke stays; it just does not stop her
+  Board r;
+  const int32_t m2 = place(r, "PunchMech", {3, 4}, true);
+  r.find_pawn(m2)->pilot_abilities = kPilotDisableImmunity;
+  r.find_pawn(m2)->active = true;
+  r.find_pawn(m2)->hp = 1;
+  r.tile({3, 4}).smoke = true;
+  CHECK(E.repair(r, m2).ok());
+}
+
 TEST_CASE("Engine: a limited weapon fires while it has uses left") {
   NEED_ENGINE();
   Board b;
