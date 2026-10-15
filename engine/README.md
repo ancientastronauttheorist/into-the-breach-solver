@@ -1142,6 +1142,24 @@ root) raises every alpha.
   in every one of those counters); `ITB_VERIFY_EFFECTS=1` runs every skipped
   or known-effect shot the old way and warns on any other board,
   `ITB_SAME_EFFECT=0` turns it off.
+- Spent turns: a weapon or Repair whose one outcome is the board it was
+  fired from, except that its unit is no longer active (and the undo flags),
+  is not a child (`SolveOptions::skip_spent_turns`, `ITB_SKIP_SPENT=0` turns
+  it off; `SolveStats::spent_turns`). A Repair at full HP or a shot at empty
+  ground did that, and its subtree repeated the parent's "that unit never
+  acts" part under other hashes. Sound: if X and Y differ only in unit A's
+  `active` (X true, Y false) and the undo flags, V(Y) <= V(X) by induction:
+  `Engine::end_turn` resets both first, so the end boards are equal; Y's
+  sub-actions are other units' (A can neither move nor act) and run the
+  same from X, since `active` and the undo flags are read only by A's own
+  legality checks, Lua `Pawn:IsActive` / `IsUndoPossible` (no shipped script
+  calls IsActive; IsUndoPossible only in the tutorial) and the undo
+  machinery. So a plan through such a child is matched by the same plan
+  without that sub-action, which never passes through a skipped child.
+  Exact equality only: a spent Boost, a used limited charge or a `moved`
+  flag is a change. Values are unchanged (`test_solver.cpp`: tiny boards
+  with and without it, and against the naive enumeration); plans can differ
+  only among plans of equal value (the skipped no-op was one of them).
 - Early stop of the enemy phase (`TurnContext::stop_early`): once the board
   between two steps of the phase (after the status ticks, each environment
   step, each queued shot) has a tier bound `<= alpha`, the outcome is cut
@@ -1715,6 +1733,74 @@ lookahead: every tier proven by both builds agrees (88 and 83 boards; 9
 boards proven optimal by both, all with the same value); the new build
 proves more tiers (444 -> 456, 444 -> 448) and finds a better plan on 15
 boards, a worse one on 1 (unproven).
+
+**Final-mission profile, round 2** (2026-10-15; the live turns that ended
+"optimal in the first N tiers" at the 300 s cap in runs 21-29: Cave t1 of
+runs 21, 26, 28, 29, Cave t2 of run 26, t3/t4 of run 23, t4 of run 29,
+Final t1 of run 23 and t2 of run 24; live flags plus `--grid-survival`;
+measured with one thread, other jobs on the machine).
+- Two kinds of turn. (A) Every line loses grid (r28 t1, r29 t1, r24 t2,
+  r23 m40 t1; 2-4 grid in the worst case): the root's grid bound stays 0, so
+  even the first tier needs every distinct board of the turn. A sub-problem
+  after the first unit's turn (the recorded step states) is proven optimal
+  in 9 k-400 k nodes (4-60 s on one thread); the root has hundreds of first
+  unit turns, so the whole proof is 10^7+ nodes (run 24 t2: 21.6 M). (B)
+  The beam finds a plan perfect in the first four tiers within seconds
+  (r29 t4, r26 t1/t2, r23 t3/t4, r21 t1), so the base search's four tiers
+  are proven at once and give the lookahead search no cuts; that search
+  then visits every board whose first four bounds are perfect, with few
+  next-turn estimates (r26 t1: 71 in 112 s). Either way the proof
+  enumerates boards: about one enemy phase per expanded node (70-89% of
+  them stopped early by the bound), 2.1-2.5 children and 3.4-4.1 sub-action
+  runs per node.
+- Where the time goes (sampled): enemy phases 35-55%, sub-actions 25-46%,
+  `pure_weapon_effect` 5-12%, Lua garbage collection 8-13%, the executor's
+  frame loop most of the engine time (`Simulation::update_tiles` 16-23%,
+  of which the tile-state cache check 5%; the board copy and comparison
+  per frame 7-10%), hashing 4%, locks and table work small. Of the
+  sub-action runs, about a third reach a board already in the table (moves:
+  57% on r29 t1) and 15-35% a sibling's board; Repair was 95% duplicates or
+  turn-only no-ops.
+- Spent turns (above): 7-35% fewer nodes on the Cave sub-problems below,
+  32% on the corpus sample's proven boards. The per-frame board comparison now compares the pawn list
+  bytewise first (`Board::operator==`: 4-5% fewer instructions), and the Lua
+  collector waits for 10x the live heap (`LuaHost`, about 40 MB per engine;
+  collection was 7.7% of one profile at the default pause and 2.9% at 40x;
+  2-15% fewer cycles at 10x, the same instructions).
+- With one thread the grid survival survey can miss the sure line that 8
+  threads find (r28 t1), and the search with the odds then runs 23-45 enemy
+  phases per leaf (Grid Defense rolls times the Cave's 16 bomb tiles). That
+  solve also ran 240-280 s past its 300 s cap: the plan is re-checked
+  (`evaluate_plan`, every chance leaf times 8 lookahead samples) outside
+  the budget.
+
+Before and after (base = 662e64ca; one thread, `nice`, one process at a
+time, other jobs on the machine). Every check is identical: `--corpus`,
+`--moves`, `--weapons`, `--replay`, `--replay --turns` byte for byte; with
+`ITB_SKIP_SPENT=0`, 40 sample boards at 20 000 nodes identical in every
+counter; 60 sample boards at 150 000 nodes (plain flags): proven 17 -> 21,
+every board proven by both with the same value, on those nodes 694 k -> 469 k
+and sub-actions 1.84 M -> 1.38 M with the same enemy phases, tiers proven
+340 -> 360.
+
+| sub-problem (live flags, proven optimal) | base: time, nodes | now: time, nodes |
+|---|---|---|
+| r28 m41 t1 after step 2 | 4.3 s, 27.8 k | 3.8 s, 24.6 k |
+| r29 m41 t1 after step 1 | 20.4 s, 109 k | 13.7 s, 84.3 k |
+| r24 m40 t2 after step 1 | 56.2 s, 399 k | 54.3 s, 370 k |
+| r23 m40 t1 after step 3 | 6.2 s, 12.5 k | 5.3 s, 8.9 k |
+| r29 m41 t4 after step 2 | 11.3 s, 165 k | 7.9 s, 150 k |
+| r26 m41 t2 after step 2 | 70.6 s, 983 k | 63.2 s, 672 k |
+| r23 m41 t4 after step 2 | 180.0 s, 2.44 M | 154.9 s, 1.83 M |
+| r21 m41 t1 after step 2 | 30.9 s, 80.9 k | 26.4 s, 52.9 k |
+| total | 380 s, 4.21 M | 330 s, 3.19 M |
+
+All eight: the same value and the same plan. The ten whole turns at the
+live budget on one thread (`--time 30 --max-time 300`, an eighth of the
+live compute): the same proven tiers in both builds (0 on the four kind-A
+turns, 4-6 on the others), the same plan and value on nine; on r28 t1 the
+new build found better odds (0.530 against 0.525). Not measured: thread
+scaling (the machine allowed one thread).
 
 Limitations: limited-use weapons are assumed available unless the bridge
 recorded their uses (`Pawn::uses`, bridge extension); proofs are relative to the engine's model (`PhaseResult::exact`

@@ -65,8 +65,21 @@ const Pawn* Board::pawn_at(Point p) const {
 // representations (no padding, no floating point).
 static_assert(std::has_unique_object_representations_v<Tile>, "Tile must stay free of padding");
 
+// Pawns: equal bytes mean equal pawns (Pawn is trivially copyable and has no
+// floating point, so no field compares unequal to identical bytes); other
+// bytes may still be equal pawns (padding), so they are compared field by
+// field. The executor compares the board with its copy every frame
+// (Simulation::run), where the bytes are usually identical.
+static_assert(std::is_trivially_copyable_v<Pawn>, "Pawn: the byte comparison needs a trivially copyable type");
+static_assert(sizeof(Pawn) == 120, "Pawn changed: a floating-point field would break same_pawns' byte test");
+static bool same_pawns(const std::vector<Pawn>& a, const std::vector<Pawn>& b) {
+  if (a.size() != b.size()) return false;
+  if (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(Pawn)) == 0) return true;
+  return a == b;
+}
+
 bool Board::operator==(const Board& o) const {
-  return std::memcmp(tiles_.data(), o.tiles_.data(), sizeof(tiles_)) == 0 && pawns_ == o.pawns_ &&
+  return std::memcmp(tiles_.data(), o.tiles_.data(), sizeof(tiles_)) == 0 && same_pawns(pawns_, o.pawns_) &&
          arrival_clock_ == o.arrival_clock_ && grid_power == o.grid_power && grid_power_max == o.grid_power_max &&
          grid_defense == o.grid_defense && turn == o.turn && total_turns == o.total_turns &&
          player_phase == o.player_phase && passives == o.passives && next_uid == o.next_uid && psion == o.psion &&

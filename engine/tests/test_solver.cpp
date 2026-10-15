@@ -930,6 +930,87 @@ TEST_CASE("solver: tiny boards match a naive exhaustive enumeration") {
   MESSAGE("brute-force boards: " << checked << ", with chance branches: " << with_chance);
 }
 
+TEST_CASE("solver: a sub-action that only spends its unit's turn is not a child") {
+  NEED_ENGINE();
+  // Two mechs far from the Vek: a Repair at full HP, or a punch at empty
+  // ground, changes nothing but the mech's active flag (spent turns). The
+  // search without such children (and with fewer nodes) finds the same
+  // value, which the naive enumeration (which has them) confirms.
+  Board b;
+  const int32_t a = place(b, "PunchMech", {6, 6}, true);
+  const int32_t c = place(b, "PunchMech", {3, 6}, true);
+  P(b, a).move = 2;
+  P(b, c).move = 3;
+  const int32_t h = place(b, "Hornet1", {3, 3});
+  queue(b, h, {3, 2});
+  set_building(b, {3, 2});
+  const TurnContext ctx = context();
+  SolveOptions on = quick();
+  on.beam_width = 0;
+  SolveOptions off = on;
+  off.skip_spent_turns = false;
+  const SolveResult r_on = solve_turn(E, b, ctx, on);
+  const SolveResult r_off = solve_turn(E, b, ctx, off);
+  CHECK(r_on.proven_optimal);
+  CHECK(r_off.proven_optimal);
+  CHECK(r_on.best.worst_case == r_off.best.worst_case);
+  CHECK(r_on.stats.spent_turns > 0);
+  CHECK(r_off.stats.spent_turns == 0);
+  CHECK(r_on.stats.nodes < r_off.stats.nodes);
+  Naive naive{E, b, ctx};
+  CHECK(naive.value(b) == r_on.best.worst_case);
+
+  // A boosted mech's punch at empty ground spends the Boost: a change, so a
+  // child. Repair spends it too.
+  Board boosted = b;
+  P(boosted, a).boosted = true;
+  P(boosted, c).boosted = true;
+  const SolveResult r_b = solve_turn(E, boosted, ctx, on);
+  CHECK(r_b.proven_optimal);
+  CHECK(r_b.stats.spent_turns == 0);
+  const SolveResult r_b_off = solve_turn(E, boosted, ctx, off);
+  CHECK(r_b.best.worst_case == r_b_off.best.worst_case);
+  CHECK(r_b.stats.nodes == r_b_off.stats.nodes);
+}
+
+TEST_CASE("solver: tiny boards, spent turns skipped or not, the same values") {
+  NEED_ENGINE();
+  std::mt19937 rng(20261015);
+  uint64_t skipped = 0, nodes_on = 0, nodes_off = 0;
+  constexpr int kTrials = 30;
+  for (int trial = 0; trial < kTrials; ++trial) {
+    Board b = tiny_board(rng);
+    if (trial % 2 == 1) {
+      for (Pawn& p : b.pawns()) {
+        if (p.mech) p.hp = static_cast<int8_t>(std::max(1, p.hp - 1));  // Repair has something to do
+      }
+    }
+    const TurnContext ctx = context();
+    for (bool tt : {true, false}) {
+      SolveOptions on = quick(120);
+      on.use_tt = tt;
+      on.use_bounds = tt;
+      on.order_children = tt;
+      on.beam_width = tt ? 6 : 0;
+      SolveOptions off = on;
+      off.skip_spent_turns = false;
+      const SolveResult r_on = solve_turn(E, b, ctx, on);
+      const SolveResult r_off = solve_turn(E, b, ctx, off);
+      INFO("trial " << trial << " tt " << tt << " on " << r_on.best.worst_case.describe() << " off "
+                    << r_off.best.worst_case.describe());
+      CHECK(r_on.proven_optimal);
+      CHECK(r_off.proven_optimal);
+      CHECK(r_on.best.worst_case == r_off.best.worst_case);
+      CHECK(r_on.stats.nodes <= r_off.stats.nodes);
+      skipped += r_on.stats.spent_turns;
+      nodes_on += r_on.stats.nodes;
+      nodes_off += r_off.stats.nodes;
+    }
+  }
+  CHECK(skipped > 0);
+  MESSAGE("spent turns: " << skipped << " children skipped, nodes " << nodes_off << " -> " << nodes_on);
+}
+
 void check_mech_grid_naive(Engine& E, const Board& b, const TurnContext& ctx, int rate, const Score& got) {
   Naive naive{E, b, ctx};
   naive.score_options.mech_grid = rate;

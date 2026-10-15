@@ -921,6 +921,7 @@ class Worker {
     };
     verify_effects_ = env_on("ITB_VERIFY_EFFECTS", false);
     same_effect_ = o_.skip_same_effect && env_on("ITB_SAME_EFFECT", true);
+    skip_spent_ = o_.skip_spent_turns && env_on("ITB_SKIP_SPENT", true);
   }
 
   // Beam pre-pass (thread 0), then the full search. Returns the root's
@@ -1532,10 +1533,56 @@ class Worker {
         if (fx) fired.push_back(Fired{act.uid, act.slot, std::move(*fx), SIZE_MAX});
         continue;
       }
+      if (skip_spent_ && c.outcomes.size() == 1 && spent_turn_only(b, c.outcomes[0].board, act.uid)) {
+        ++stats_.spent_turns;
+        if (fx) fired.push_back(Fired{act.uid, act.slot, std::move(*fx), SIZE_MAX});
+        continue;
+      }
       c.act = act;
       if (fx) fired.push_back(Fired{act.uid, act.slot, std::move(*fx), out.size()});
       out.push_back(std::move(c));
     }
+  }
+
+  // Spent turns. A weapon or Repair of unit A whose one outcome `c` is the
+  // board `b` it was fired from, except that A is no longer active (and the
+  // undo flags, which nothing the search runs reads), is not a child: a plan
+  // through it is matched by the same plan with that sub-action left out.
+  //
+  // Soundness. Let X and Y differ only in A.active (X true, Y false) and the
+  // undo flags. Then V(Y) <= V(X), by induction over the sub-actions left:
+  //   - ending the turn: Engine::end_turn first sets every player unit's
+  //     active false and clears every undo flag (enemy_phase.cpp), so both
+  //     end boards are equal, and with them every score tier;
+  //   - Y's sub-actions are other units' (A, inactive, can neither move nor
+  //     act: can_move / can_act); each is legal from X and has the same
+  //     outcomes there, because A.active and the undo flags are read only by
+  //     A's own legality checks (can_move, can_act), by Lua Pawn:IsActive and
+  //     Pawn:IsUndoPossible (no shipped script calls IsActive; IsUndoPossible
+  //     only in the tutorial) and by the undo machinery the search never
+  //     uses. Each outcome pair differs again only in those flags (or is
+  //     equal, if the sub-action set A.active), so the induction applies, and
+  //     the chance folds (minimum, the grid survival odds) are monotone.
+  // A plan from b that takes such a sub-action is therefore worth no more
+  // than the plan without it, whose sub-actions are all children of b's
+  // other children: dropping the child leaves V(b) unchanged. (The plan
+  // without it never passes through a skipped child: removing every such
+  // sub-action from a plan gives a plan with none.) Only exact equality
+  // counts: a spent Boost, a used limited charge or a moved flag is a change.
+  bool spent_turn_only(const Board& b, const Board& c, int32_t uid) {
+    const Pawn* pb = b.find_pawn(uid);
+    const Pawn* pc = c.find_pawn(uid);
+    if (!pb || !pc || !pb->active || pc->active || b.pawns().size() != c.pawns().size()) return false;
+    Board& x = spent_scratch_;
+    x = c;
+    for (size_t i = 0; i < x.pawns().size(); ++i) {
+      Pawn& p = x.pawns()[i];
+      const Pawn& q = b.pawns()[i];
+      if (p.uid != q.uid) return false;
+      p.movement.undo_ready = q.movement.undo_ready;
+      if (p.uid == uid) p.active = true;
+    }
+    return x == b;
   }
 
   // ITB_VERIFY_EFFECTS=1: a same-effect shot is run anyway and must give
@@ -1993,6 +2040,8 @@ class Worker {
   bool aborted_ = false;
   bool verify_effects_ = false;
   bool same_effect_ = true;
+  bool skip_spent_ = true;
+  Board spent_scratch_;  // spent_turn_only
   uint64_t seen_version_ = ~uint64_t{0};
   bool has_incumbent_ = false;
   Score incumbent_ = kLow;
@@ -2080,6 +2129,7 @@ SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& c
     out.stats.phases_stopped += s.phases_stopped;
     out.stats.same_effect_shots += s.same_effect_shots;
     out.stats.same_effect_mismatches += s.same_effect_mismatches;
+    out.stats.spent_turns += s.spent_turns;
     out.stats.prior_hits += s.prior_hits;
     out.stats.children += s.children;
     out.stats.generate_s += s.generate_s;
@@ -2162,6 +2212,7 @@ void add_stats(SolveStats& out, const SolveStats& in) {
   out.phases_stopped += in.phases_stopped;
   out.same_effect_shots += in.same_effect_shots;
   out.same_effect_mismatches += in.same_effect_mismatches;
+  out.spent_turns += in.spent_turns;
   out.children += in.children;
   out.generate_s += in.generate_s;
   out.order_s += in.order_s;

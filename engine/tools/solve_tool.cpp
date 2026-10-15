@@ -324,9 +324,9 @@ int run_solve(const SolveToolOptions& opt) {
                   static_cast<unsigned long long>(r.stats.duplicate_children),
                   static_cast<unsigned long long>(r.stats.bound_prunes), r.stats.first_plan_s, r.stats.best_plan_s);
       {
-        std::printf("profile: %llu same-effect shots skipped (%llu mismatches), %llu leaf evals (%llu phases stopped early), %llu children (%.1f per node), generate %.2fs, order %.2fs, base search %.2fs (%d tiers, plan at %.2fs); nodes by depth:",
+        std::printf("profile: %llu same-effect shots skipped (%llu mismatches), %llu spent turns skipped, %llu leaf evals (%llu phases stopped early), %llu children (%.1f per node), generate %.2fs, order %.2fs, base search %.2fs (%d tiers, plan at %.2fs); nodes by depth:",
                     static_cast<unsigned long long>(r.stats.same_effect_shots), static_cast<unsigned long long>(r.stats.same_effect_mismatches),
-                    static_cast<unsigned long long>(r.stats.leaf_evals), static_cast<unsigned long long>(r.stats.phases_stopped),
+                    static_cast<unsigned long long>(r.stats.spent_turns), static_cast<unsigned long long>(r.stats.leaf_evals), static_cast<unsigned long long>(r.stats.phases_stopped),
                     static_cast<unsigned long long>(r.stats.children),
                     static_cast<double>(r.stats.children) / static_cast<double>(std::max<uint64_t>(1, r.stats.nodes)),
                     r.stats.generate_s, r.stats.order_s, r.stats.base_search_s, r.stats.base_proven_components, r.stats.base_best_plan_s);
@@ -370,6 +370,7 @@ int run_solve(const SolveToolOptions& opt) {
              {"base_proven_components", r.stats.base_proven_components},
              {"base_best_plan_s", r.stats.base_best_plan_s},
              {"same_effect_shots", r.stats.same_effect_shots},
+             {"spent_turns", r.stats.spent_turns},
              {"phases_stopped", r.stats.phases_stopped},
              {"ours", score_vector(r.best.worst_case, tier_on)},
              {"contingent", r.best.contingent},
