@@ -2262,7 +2262,9 @@ void finish_cap(SolveResult& out, const SurvivalCap& cap) {
 // With the lookahead, a search without it first (LookaheadOptions::
 // base_share of the budget): its plan, scored with the lookahead
 // (evaluate_plan: open-loop, a value the plan surely reaches), seeds the
-// incumbent of the lookahead search, which gets the rest of the budget.
+// incumbent of the lookahead search, which gets the rest of the budget
+// (with the survival cap, also what the base search saved by stopping at
+// the proven odds).
 SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options) {
   const double share = options.lookahead_options.base_share;
   const std::optional<std::pair<double, uint64_t>> cap = cap_budget(options);
@@ -2293,7 +2295,11 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   const SolveResult first = search_survival(engine, board, ctx, base, &base_tables, cap ? &*cap : nullptr);
   const double used = seconds_since(t0);
   SolveOptions rest = options;
-  rest.survival_goal = std::max(options.survival_goal, first.survival_cap.goal_units());
+  // The survival cap's goal stops the base search only (search_survival):
+  // the lookahead search refines the tiers below the odds, so it keeps its
+  // own adaptive budget (its first tiers proven by the root's bound, else
+  // max_time_s). Its seed is at the base plan's odds, so they stay at the
+  // ceiling and finish_cap still reports them proven.
   if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
   if (options.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, options.max_time_s - used);
   if (options.node_limit > 0) rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, first.stats.nodes));

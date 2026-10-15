@@ -1515,6 +1515,43 @@ TEST_CASE("grid survival: the survival cap stops the search at the proven odds")
   }
 }
 
+TEST_CASE("grid survival: the survival cap stops the base search, not the lookahead search") {
+  NEED_ENGINE();
+  // The board above with the lookahead: the base search reaches the proven
+  // odds and stops at its base time; the lookahead search after it keeps
+  // its own adaptive budget (the goal proves the odds only), so it runs on
+  // to its end as without the pre-pass: the same value, proven.
+  int32_t m = -1;
+  Board b = two_roll_board(&m);
+  place(b, "PunchMech", {7, 7}, true);
+  place(b, "PunchMech", {7, 0}, true);
+  TurnContext ctx = context();
+  ctx.mission.grid_defense = 25;
+  SolveOptions o = quick(0.05);
+  o.grid_survival = true;
+  o.max_time_s = 120;
+  o.min_proven_tiers = 7;
+  o.lookahead = true;
+  o.lookahead_options.samples = 1;
+  const SolveResult off = solve_turn(E, b, ctx, o);
+  o.survival_cap_share = 0.5;
+  const SolveResult on = solve_turn(E, b, ctx, o);
+  const SurvivalCap& c = on.survival_cap;
+  MESSAGE("survival cap with the lookahead: " << on.stats.time_s << " s (base " << on.stats.base_search_s
+                                              << " s), without " << off.stats.time_s << " s (base "
+                                              << off.stats.base_search_s << " s); "
+                                              << on.best.worst_case.describe(o.tiers()));
+  CHECK(c.ran);
+  CHECK(c.proven);
+  CHECK(c.bound == doctest::Approx(0.25));
+  CHECK(on.best.worst_case[ScoreKey::GridSurvival] == static_cast<int32_t>(std::llround(0.25 * kSurvivalOne)));
+  CHECK(off.proven_optimal);
+  CHECK(on.proven_optimal);  // the lookahead search ran to its end past the goal
+  CHECK(on.best.worst_case == off.best.worst_case);
+  REQUIRE(on.upper_bound);
+  CHECK(*on.upper_bound == on.best.worst_case);
+}
+
 TEST_CASE("grid survival: the survival cap leaves a turn that keeps the grid alone") {
   NEED_ENGINE();
   int32_t m = -1;

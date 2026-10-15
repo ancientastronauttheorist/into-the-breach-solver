@@ -1456,12 +1456,23 @@ the live solve (`survival_cap.cpp`, wired in `search_survival`):
   `time_s`). It proves the odds only: `proven_components` and
   `proven_optimal` keep their meaning (the tiers below the odds, the grid
   of the outcomes that keep it and on, are searched until the base time).
+- With the lookahead the goal stops the base search only (it is the search
+  that proves the tiers above NextTurn, and the odds are proven). The
+  lookahead search after it, seeded with the base plan (odds at the goal),
+  refines the tiers below the odds and keeps its own adaptive budget: it
+  stops at its base time only if its first tiers meet the root's bound,
+  else it runs on to `max_time` (`solve_turn`; the whole solve stays
+  within it). The odds stay proven: the lookahead search only returns a
+  plan better in the full order, and the ceiling bounds every plan.
 - `test_solver.cpp`: 30 tiny boards (15 doomed, 14 of them at their
   ceiling; a third through the lookahead's two searches) give the same values and plans with and
   without it, the naive odds never above the cap and, with an adaptive
   budget that stops at the goal, the naive odds; a doomed board where the
   search stops at the proven 0.25 before its end (without it the search runs
-  to its end); a board that keeps the grid untouched (same counters).
+  to its end), and with the lookahead (base time 0.05 s, `max_time` 120 s,
+  7 tiers) whose lookahead search still runs to its end past the goal (the
+  same value as without the pre-pass, proven optimal); a board that keeps
+  the grid untouched (same counters).
 
 Live flags (`--time 30 --max-time 120 --min-tiers 7 --threat-tier
 --objectives-first --mech-grid 2 --mech-grid-turns --mech-grid-pilot
@@ -1478,13 +1489,31 @@ running), with `--survival-cap 0.5` and without:
 | run 25 Survive t3 (`20261014_175032` m14) | 1 | 0 | M=1 open: 60 s | 0, 123 s | 0, 122 s | same |
 | run 28 Cave t4 (`20261014_233706` m41) | 1 | 0.20 | M=1 open: 60 s | 0.0016 (p^4), 120 s | 0.0016, 120 s | same |
 
-Same odds on all seven, the same plan on six. Run 27 stops at the base
-time once its plan reaches the ceiling, so the tiers below the odds get 30 s
-instead of 120 s: its NextTurn is worse there (the next turn's estimate,
+Same odds on all seven, the same plan on six. Run 27 stopped at the base
+time once its plan reached the ceiling, so the tiers below the odds got 30 s
+instead of 120 s: its NextTurn was worse there (the next turn's estimate,
 given the grid survives, which it does with odds 0.15). Where the pre-pass
 proves nothing the search after it has 60 s fewer and still found the same
 plans. (A total a few seconds past 120 s is the lookahead search's last
 evaluations, with or without the pre-pass.)
+
+Since then the goal stops only the base search (above). The same live
+flags at 1 thread, `--survival-cap 0.3`, against the cap off and the
+previous rule (goal in both searches):
+
+| Turn | cap 0.3 now | cap off | previous rule |
+|---|---|---|---|
+| run 27 Factory t3 | 0.1536 **proven**, next_turn -1025, mech_hp 0, 120.6 s | 0.1536 (first 4 tiers proven), same plan, 120.8 s | 0.1536 proven, next_turn -1025, mech_hp -1, 30.7 s |
+| run 30 MosquitoBoss t4 | 0.24, complete, 0.6 s | same | same |
+| run 24 Final t3 | 0.0784 (M=1 open at 36 s), 122.9 s | 0.0784, same plan, 122.8 s | 0.0784 (M=1 proven 34.8 s), 123.1 s |
+
+Run 27 now gets the plan of the search without the cap (the previous rule's
+plan lost a mech HP). At 1 thread its next_turn is -1025 with the cap off
+too (the -64 above was at 3 threads). The cap off proves its first 4 tiers
+there (the base search completes in 9.3 s); with the cap the survey and the
+pre-pass take 7.5 s of the 7.5 s base time, the base search stops at the
+goal and only the odds are proven. Run 24's M = 1 proof sits at the edge of
+the 36 s share (proven in one run, open in the other).
 
 With more time (`--max-time 900 --survival-cap 0.9`, 3 threads): run 24
 proves M=1 in 19.6 s and K=1 in 16.4 s (K=2 disproven at once), ceiling
