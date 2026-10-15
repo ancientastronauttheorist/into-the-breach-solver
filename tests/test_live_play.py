@@ -735,6 +735,48 @@ class LivePlayTest(unittest.TestCase):
         self.assertIn("Grid Defense 25%, state", summary)
         self.assertEqual(lp.save_grid_overflow(Path("/nonexistent/saveData.lua")), None)
 
+    def test_survival_cap_is_passed_with_grid_survival_only(self):
+        """--survival-cap (the certificate pre-pass) goes to every solve with
+        its share, only with --grid-survival, and never to deploy."""
+        self.bridge()
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--grid-survival", "--survival-cap", "--survival-cap-share", "0.4",
+                      "--survival-cap-strict"], eng)
+        self.assertEqual(eng.tiers, [{"grid_survival": True, "survival_cap": 0.4, "survival_cap_strict": True}])
+        self.assertNotIn("survival_cap", lp.ranking_options(
+            lp.build_parser().parse_args(["deploy", "--grid-survival", "--survival-cap"])))
+
+    def test_survival_cap_needs_grid_survival(self):
+        self.bridge()
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--survival-cap"], eng)
+        self.assertEqual(eng.tiers, [{}])
+
+    def test_survival_cap_request_and_summary(self):
+        sent = []
+        eng = lp.Engine.__new__(lp.Engine)
+        eng.threads = 4
+        eng.request = lambda req: sent.append(req) or {"ok": True}
+        eng.solve(Path("s.json"), 10, grid_survival=True)
+        eng.solve(Path("s.json"), 10, grid_survival=True, survival_cap=0.5)
+        eng.solve(Path("s.json"), 10, survival_cap=0.5)
+        eng.solve(Path("s.json"), 10, grid_survival=True, survival_cap=0.3, survival_cap_strict=True)
+        self.assertNotIn("survival_cap", sent[0])
+        self.assertEqual((sent[1]["survival_cap"], sent[1]["survival_cap_share"]), (True, 0.5))
+        self.assertNotIn("survival_cap_strict", sent[1])
+        self.assertNotIn("survival_cap", sent[2])
+        self.assertEqual((sent[3]["survival_cap_share"], sent[3]["survival_cap_strict"]), (0.3, True))
+        base = {"worst_case": {"grid_survival": 0.25, "grid": -1}, "stats": {}}
+        proven = lp.plan_summary({**base, "survival_cap": {"ran": True, "bound": 0.25, "m": 1, "k": 0,
+                                                           "proven": True, "time_s": 3.0}})
+        self.assertIn("odds PROVEN OPTIMAL at the ceiling 0.2500 (M=1, 3.0s)", proven)
+        below = lp.plan_summary({**base, "survival_cap": {"ran": True, "bound": 0.0625, "m": 1, "k": 1,
+                                                          "proven": False, "time_s": 2.0}})
+        self.assertIn("odds below the ceiling 0.0625 (M=1, K=1, 2.0s)", below)
+        none = lp.plan_summary({**base, "survival_cap": {"ran": True, "bound": 1.0, "m": -1, "time_s": 9.0}})
+        self.assertIn("no odds ceiling proven (9.0s)", none)
+        self.assertNotIn("ceiling", lp.plan_summary({**base, "survival_cap": {"ran": False}}))
+
     def test_pilot_floor_needs_the_exchange(self):
         self.bridge()
         eng = FakeEngine()

@@ -327,7 +327,7 @@ class Engine:
               mech_grid: int = -1, mech_grid_turns: bool = False, mech_grid_pilot: bool = False,
               lookahead: bool = False, lookahead_samples: int | None = None,
               lookahead_reply: str | None = None, lookahead_fold: str | None = None,
-              grid_survival: bool = False) -> dict:
+              grid_survival: bool = False, survival_cap: float = 0, survival_cap_strict: bool = False) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
         min_tiers score tiers are proven, up to max_time. threat_tier: rank by
@@ -339,7 +339,11 @@ class Engine:
         plans, a greedy reply; lookahead_samples AI seeds, lookahead_reply
         'greedy' or 'idle', lookahead_fold 'worst' or 'sum'). grid_survival:
         when every line can lose the grid, rank by the odds that Grid Defense
-        keeps it (SolveOptions::grid_survival)."""
+        keeps it (SolveOptions::grid_survival). survival_cap > 0 (with
+        grid_survival): on such a turn first prove a ceiling on those odds
+        within that share of the budget, and stop once the plan reaches it
+        (SolveOptions::survival_cap_share; survival_cap_strict: only once the
+        survey proved within its share that no line surely keeps the grid)."""
         req = {"cmd": "solve", "state": str(path), "time_limit": time_limit, "threads": self.threads}
         if min_tiers > 0 and max_time > time_limit:
             req.update(max_time=max_time, min_tiers=min_tiers)
@@ -365,6 +369,10 @@ class Engine:
                 req["lookahead_fold"] = lookahead_fold
         if grid_survival:
             req["grid_survival"] = True
+            if survival_cap and survival_cap > 0:
+                req.update(survival_cap=True, survival_cap_share=float(survival_cap))
+                if survival_cap_strict:
+                    req["survival_cap_strict"] = True
         return self.request(req)
 
     def predict(self, path: Path, plan: list) -> dict:
@@ -1484,6 +1492,14 @@ def plan_summary(pred: dict) -> str:
         f"best found, optimal in the first {pred.get('proven_components', 0)} tiers"
     if pred.get("extended"):
         proof += ", extended past the base time"
+    cap = pred.get("survival_cap") or {}
+    if cap.get("ran"):
+        if cap.get("bound", 1) < 1:
+            how = f"M={cap.get('m')}" + (f", K={cap.get('k')}" if cap.get("k") else "")
+            proof += (f"; odds {'PROVEN OPTIMAL at' if cap.get('proven') else 'below'} the ceiling "
+                      f"{cap['bound']:.4f} ({how}, {cap.get('time_s', 0):.1f}s)")
+        else:
+            proof += f"; no odds ceiling proven ({cap.get('time_s', 0):.1f}s)"
     secs = (pred.get("stats") or {}).get("time_s", 0)
     rate = pred.get("mech_grid_rate")
     if rate is not None and rate >= 0:
@@ -1621,14 +1637,21 @@ def play_turn(ctx) -> list:
         if patches:
             run.save_state(st, label + "_raw")
         extra = ranking_options(args)
+        if getattr(args, "survival_cap", False) and getattr(args, "grid_survival", False):
+            extra["survival_cap"] = args.survival_cap_share
+            if getattr(args, "survival_cap_strict", False):
+                extra["survival_cap_strict"] = True
         if plan is not None:
             pred = engine.predict(path, plan)
         else:
             pred = engine.solve(path, args.time, max_time=args.max_time, min_tiers=args.min_tiers, **extra)
         run.save_json(prediction_path(path).name, pred)
-        run.event("solve", {"state": path.name, "plan": pred.get("plan"), "proven": pred.get("proven_optimal"),
-                            "proven_components": pred.get("proven_components"),
-                            "time_s": (pred.get("stats") or {}).get("time_s")})
+        event = {"state": path.name, "plan": pred.get("plan"), "proven": pred.get("proven_optimal"),
+                 "proven_components": pred.get("proven_components"),
+                 "time_s": (pred.get("stats") or {}).get("time_s")}
+        if pred.get("survival_cap"):
+            event["survival_cap"] = pred["survival_cap"]
+        run.event("solve", event)
         return path, pred
 
     def check_limits(pred: dict, st: dict) -> None:
@@ -2381,6 +2404,16 @@ def build_parser() -> argparse.ArgumentParser:
                          help="when every line can lose the grid, rank lines by the odds that Grid Defense keeps "
                               "it through the turn (the game's Grid Defense chance from the bridge or the save); "
                               "any line that surely keeps the grid ranks as before and beats them all")
+    ranking.add_argument("--survival-cap", action="store_true",
+                         help="with --grid-survival: on a turn where no line surely keeps the grid, first prove a "
+                              "ceiling on the odds (the certificate) within --survival-cap-share of the budget, then "
+                              "stop once the plan reaches it (odds proven optimal)")
+    ranking.add_argument("--survival-cap-share", type=float, default=0.5, metavar="F",
+                         help="with --survival-cap: the share of the solve's budget (--max-time with --min-tiers, "
+                              "else --time) the ceiling's proofs may use (default 0.5)")
+    ranking.add_argument("--survival-cap-strict", action="store_true",
+                         help="with --survival-cap: only on turns where the survey proved within its share that no "
+                              "line surely keeps the grid (else the first proof is that proof)")
     engine = argparse.ArgumentParser(add_help=False, parents=[ranking])
     engine.add_argument("--time", type=float, default=10.0,
                         help="base solver time per solve (s): the search stops here once --min-tiers are proven")
@@ -2425,6 +2458,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
     args = build_parser().parse_args(argv)
+    if getattr(args, "survival_cap", False) and not getattr(args, "grid_survival", False):
+        say("note: --survival-cap needs --grid-survival: ignored")
     # status only reads, except that `status --new-run` starts the new run
     # directory (recordings/live/<time>) that later commands then use.
     # restore reads a run's checkpoints and leaves the current run as it is.

@@ -54,6 +54,7 @@
 #include "itb/lookahead.hpp"
 #include "itb/objectives.hpp"
 #include "itb/pilot_xp.hpp"
+#include "survival_cap.hpp"
 
 namespace itb {
 namespace {
@@ -826,6 +827,13 @@ struct Shared {
     score_options = opt.score_options();
     root_ub = bounds.of(r);
     resist_p = resist_chance(r, ctx);
+    odds_goal = opt.grid_survival ? opt.survival_goal : -1;
+  }
+  // The incumbent `v` is proven in the first `tiers` (adaptive budget): it
+  // meets the root's tier bound there, or its odds reach the proven goal
+  // (SolveOptions::survival_goal).
+  bool meets_target(const Score& v) const {
+    return same_prefix(v, root_ub, tiers) || (odds_goal >= 0 && v.v[static_cast<size_t>(ScoreKey::GridSurvival)] >= odds_goal);
   }
   const Board& root;
   const SolveOptions& o;
@@ -856,6 +864,7 @@ struct Shared {
   ScoreOptions score_options;
   Score root_ub;                          // bounds.of(root)
   double resist_p = 0;                    // grid_survival: the Grid Defense chance
+  int32_t odds_goal = -1;                 // SolveOptions::survival_goal (grid_survival only)
   // Grid survival's survey (search_survival): every alpha is at least
   // `floor` (odds 1), so only lines that surely keep the grid are searched;
   // with no such line found by `survey_s` seconds or `survey_nodes` nodes
@@ -981,7 +990,7 @@ class Worker {
     sh_.best_line = path_;
     sh_.best_line.insert(sh_.best_line.end(), tail.begin(), tail.end());
     sh_.best_plan_s = seconds_since(sh_.start);
-    if (sh_.adaptive && same_prefix(v, sh_.root_ub, sh_.tiers)) sh_.tiers_proven = true;
+    if (sh_.adaptive && sh_.meets_target(v)) sh_.tiers_proven = true;
     sh_.version.fetch_add(1, std::memory_order_release);
   }
 
@@ -2032,7 +2041,7 @@ SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& c
     sh.seeded = true;
     sh.seeded_actions = seed->actions;
     sh.seeded_contingent = seed->contingent;
-    if (sh.adaptive && same_prefix(seed->value, sh.root_ub, sh.tiers)) sh.tiers_proven = true;
+    if (sh.adaptive && sh.meets_target(seed->value)) sh.tiers_proven = true;
   }
   std::vector<Engine*> engines{&engine};
   for (Engine* e : options.helper_engines) {
@@ -2174,8 +2183,16 @@ constexpr double kSurveyShare = 0.25;
 // odds runs on what is left. Lines that can lose the grid are only searched
 // where no line keeps it for sure (searching them under an incumbent below
 // odds 1 costs more: no cut by building HP and below, outcomes weighed).
+//
+// Survival cap (SolveOptions::survival_cap_share, survival_cap.hpp): when
+// the survey found no line (none surely keeps the grid, or none found in its
+// share), the certificate's proofs run next, within `cap_budget` (seconds,
+// nodes; 0: no limit), and the search with the odds gets the proven ceiling
+// as its goal. A survey that found a line leaves it out (so does one that
+// ran out of its share, with survival_cap_strict).
 SolveResult search_survival(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options,
-                            std::unique_ptr<Shared>* keep = nullptr) {
+                            std::unique_ptr<Shared>* keep = nullptr,
+                            const std::pair<double, uint64_t>* cap_budget = nullptr) {
   if (!options.grid_survival) return search_turn(engine, board, ctx, options, nullptr, nullptr, keep);
   const Clock::time_point t0 = Clock::now();
   const std::pair<double, uint64_t> survey{
@@ -2184,20 +2201,60 @@ SolveResult search_survival(Engine& engine, const Board& board, const TurnContex
   bool found = false;
   SolveResult first = search_turn(engine, board, ctx, options, nullptr, nullptr, keep, &survey, &found);
   if (found) return first;
+  SurvivalCap cap;
+  if (cap_budget && (!first.timed_out || !options.survival_cap_strict)) {
+    cap = detail::prove_survival_cap(engine, board, ctx, options, cap_budget->first, cap_budget->second);
+    cap.survey_proof = !first.timed_out;
+  }
   const double used = seconds_since(t0);
   SolveOptions rest = options;
   if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
   if (options.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, options.max_time_s - used);
   if (options.node_limit > 0) {
-    rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, first.stats.nodes));
+    const uint64_t spent = first.stats.nodes + cap.nodes;
+    rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, spent));
   }
+  rest.survival_goal = std::max(options.survival_goal, cap.goal_units());
   SolveResult out = search_turn(engine, board, ctx, rest, nullptr, nullptr, keep);
   add_stats(out.stats, first.stats);
-  out.stats.survey_s = used;
+  out.stats.survey_s = used - cap.time_s;
   out.stats.time_s = seconds_since(t0);
   out.stats.first_plan_s += used;
   out.stats.best_plan_s += used;
+  out.survival_cap = cap;
   return out;
+}
+
+// The pre-pass's share of the budget (SolveOptions::survival_cap_share): of
+// the whole budget (max_time_s with the adaptive budget, else time_limit_s;
+// node_limit alike). Empty when off.
+std::optional<std::pair<double, uint64_t>> cap_budget(const SolveOptions& o) {
+  if (!o.grid_survival || o.survival_cap_share <= 0 || o.cert_roll_budget >= 0) return std::nullopt;
+  const double share = std::min(1.0, o.survival_cap_share);
+  const bool adaptive = o.min_proven_tiers > 0 && o.time_limit_s > 0 && o.max_time_s > o.time_limit_s;
+  const double whole = adaptive ? o.max_time_s : std::max(0.0, o.time_limit_s);
+  const uint64_t nodes = o.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(o.node_limit * share)) : 0;
+  return std::pair<double, uint64_t>{whole * share, nodes};
+}
+
+// The final result with a ceiling proven: is the plan at it (to within the
+// guard), and the root's bound capped by it. Odds above the cap would mean
+// the ceiling is wrong: a warning, and the bound left as it is.
+void finish_cap(SolveResult& out, const SurvivalCap& cap) {
+  out.survival_cap = cap;
+  const int32_t goal = cap.goal_units();
+  if (goal < 0) return;
+  const int32_t odds = out.best.worst_case.v[kSurvival];
+  const int32_t units = cap.cap_units();
+  if (odds > units) {
+    out.warnings.push_back("a plan's odds above the proven survival ceiling: " + std::to_string(odds) + " > " +
+                           std::to_string(units));
+    return;
+  }
+  out.survival_cap.proven = odds >= goal;
+  if (out.upper_bound && out.upper_bound->v[kSurvival] > units) {
+    out.upper_bound = std::min(*out.upper_bound, with_odds(kHigh, units));
+  }
 }
 
 }  // namespace
@@ -2208,7 +2265,12 @@ SolveResult search_survival(Engine& engine, const Board& board, const TurnContex
 // incumbent of the lookahead search, which gets the rest of the budget.
 SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options) {
   const double share = options.lookahead_options.base_share;
-  if (!options.lookahead || share <= 0) return search_survival(engine, board, ctx, options);
+  const std::optional<std::pair<double, uint64_t>> cap = cap_budget(options);
+  if (!options.lookahead || share <= 0) {
+    SolveResult out = search_survival(engine, board, ctx, options, nullptr, cap ? &*cap : nullptr);
+    if (out.survival_cap.ran) finish_cap(out, out.survival_cap);
+    return out;
+  }
   const Clock::time_point t0 = Clock::now();
   SolveOptions base = options;
   base.lookahead = false;
@@ -2228,9 +2290,10 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   }
   base.node_limit = options.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(options.node_limit * share)) : 0;
   std::unique_ptr<Shared> base_tables;
-  const SolveResult first = search_survival(engine, board, ctx, base, &base_tables);
+  const SolveResult first = search_survival(engine, board, ctx, base, &base_tables, cap ? &*cap : nullptr);
   const double used = seconds_since(t0);
   SolveOptions rest = options;
+  rest.survival_goal = std::max(options.survival_goal, first.survival_cap.goal_units());
   if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
   if (options.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, options.max_time_s - used);
   if (options.node_limit > 0) rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, first.stats.nodes));
@@ -2250,6 +2313,7 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
   out.stats.base_search_s = used;
   out.stats.base_proven_components = first.proven_components;
   out.stats.base_best_plan_s = first.stats.best_plan_s;
+  out.stats.survey_s = first.stats.survey_s;
   // The base search's bound holds for this search too: with the lookahead a
   // plan scores what it scores without it, NextTurn lowered from its cap
   // (0), so the value is at most the base search's value, which is at most
@@ -2270,6 +2334,7 @@ SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ct
       if (*out.upper_bound == out.best.worst_case && out.chance_exact && first.chance_exact) out.proven_optimal = true;
     }
   }
+  if (first.survival_cap.ran) finish_cap(out, first.survival_cap);
   return out;
 }
 

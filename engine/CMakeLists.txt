@@ -51,6 +51,7 @@ add_library(itb_engine
   src/objectives.cpp
   src/board_hash.cpp
   src/solver.cpp
+  src/survival_cap.cpp
 )
 target_include_directories(itb_engine PUBLIC include PRIVATE src)
 target_link_libraries(itb_engine PRIVATE itb_lua nlohmann_json::nlohmann_json)
