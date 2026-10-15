@@ -167,6 +167,10 @@ struct SolveOptions {
   // Skip a weapon target whose effect equals a sibling target's (solver.cpp
   // generate; the environment variable ITB_SAME_EFFECT=0 turns it off too).
   bool skip_same_effect = true;
+  // Skip a weapon or Repair whose only change to the board is that its unit
+  // has spent its turn (solver.cpp "Spent turns"; the environment variable
+  // ITB_SKIP_SPENT=0 turns it off too).
+  bool skip_spent_turns = true;
   // Entries per table (transposition table, end-of-turn memo).
   size_t tt_max_entries = size_t{1} << 21;
   // Beam pre-pass for a quick first plan: this many states kept per set of
@@ -231,6 +235,7 @@ struct SolveStats {
   uint64_t phases_stopped = 0;  // enemy phases ended early by the bound
   uint64_t same_effect_shots = 0;  // shots not run: a sibling had the same effect
   uint64_t same_effect_mismatches = 0;  // ITB_VERIFY_EFFECTS: such a shot differed
+  uint64_t spent_turns = 0;  // children skipped: the action only spent its unit's turn
   // SolveOptions::lookahead: nodes and end-of-turn values the base search's
   // tables cut (their upper bounds hold for the lookahead search).
   uint64_t prior_hits = 0;

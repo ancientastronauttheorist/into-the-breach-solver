@@ -1131,6 +1131,24 @@ root) raises every alpha.
   in every one of those counters); `ITB_VERIFY_EFFECTS=1` runs every skipped
   or known-effect shot the old way and warns on any other board,
   `ITB_SAME_EFFECT=0` turns it off.
+- Spent turns: a weapon or Repair whose one outcome is the board it was
+  fired from, except that its unit is no longer active (and the undo flags),
+  is not a child (`SolveOptions::skip_spent_turns`, `ITB_SKIP_SPENT=0` turns
+  it off; `SolveStats::spent_turns`). A Repair at full HP or a shot at empty
+  ground did that, and its subtree repeated the parent's "that unit never
+  acts" part under other hashes. Sound: if X and Y differ only in unit A's
+  `active` (X true, Y false) and the undo flags, V(Y) <= V(X) by induction:
+  `Engine::end_turn` resets both first, so the end boards are equal; Y's
+  sub-actions are other units' (A can neither move nor act) and run the
+  same from X, since `active` and the undo flags are read only by A's own
+  legality checks, Lua `Pawn:IsActive` / `IsUndoPossible` (no shipped script
+  calls IsActive; IsUndoPossible only in the tutorial) and the undo
+  machinery. So a plan through such a child is matched by the same plan
+  without that sub-action, which never passes through a skipped child.
+  Exact equality only: a spent Boost, a used limited charge or a `moved`
+  flag is a change. Values are unchanged (`test_solver.cpp`: tiny boards
+  with and without it, and against the naive enumeration); plans can differ
+  only among plans of equal value (the skipped no-op was one of them).
 - Early stop of the enemy phase (`TurnContext::stop_early`): once the board
   between two steps of the phase (after the status ticks, each environment
   step, each queued shot) has a tier bound `<= alpha`, the outcome is cut
