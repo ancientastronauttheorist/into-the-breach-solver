@@ -47,10 +47,10 @@ same solver drives the live bot.
 
 ```bash
 cmake -S engine -B engine/build -G Ninja -DITB_BUILD_PYTHON=ON -DPython_EXECUTABLE="$(command -v python3)"
-cmake --build engine/build
+cmake --build engine/build -j 6                       # CPU budget: 6 threads total (Hard rules)
 engine/build/itb_tests                                # needs the game's scripts: ITB_GAME_DIR or the local copy
 engine/build/itb_inspect --replay recordings --turns  # engine vs real game outcomes
-engine/build/itb_inspect --solve <state.json> --time 30 --threads 8
+nice -n 5 engine/build/itb_inspect --solve <state.json> --time 30 --threads 6
 python3 -m unittest tests.test_cpp_solver             # bot adapter + module only
 ```
 
