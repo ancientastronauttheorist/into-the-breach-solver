@@ -1486,6 +1486,16 @@ proves nothing the search after it has 60 s fewer and still found the same
 plans. (A total a few seconds past 120 s is the lookahead search's last
 evaluations, with or without the pre-pass.)
 
+With more time (`--max-time 900 --survival-cap 0.9`, 3 threads): run 24
+proves M=1 in 19.6 s and K=1 in 16.4 s (K=2 disproven at once), ceiling
+0.0784 = its plan's odds: **proven, 40.3 s in all** (the 60 s run above
+shared the machine with a build); run 28's M=1 is still open after 812 s
+(its plan needs four resists, p^4, so it would also need K=3). The
+certificate tool's own proofs took 19 s (run 27 M=2) and 72 + 101 s (run 24)
+with 4 threads: the pre-pass's proofs (no beam, a plan with odds above 0
+ends a proof at once, the first tier's proof from the start) take 2.4 s and
+36 s.
+
 **Anytime.** With a time or node budget the result is the best plan found,
 `proven_optimal = false`, an `upper_bound` (the root's interval, sound
 because every interval is) and `proven_components`: the number of leading
