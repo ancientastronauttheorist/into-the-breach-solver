@@ -41,6 +41,20 @@ struct SolveToolOptions {
 
 int run_solve(const SolveToolOptions& options);
 
+// itb_inspect --survival-cert: an upper bound on the grid-survival odds of
+// every plan (README "Grid survival", certificate), next to the recorded
+// plan's odds. Changes no search.
+struct SurvivalCertOptions {
+  std::filesystem::path target;  // a recording
+  std::filesystem::path game;
+  double time_limit = 600;  // per proof (each budget M)
+  int threads = 1;
+  bool plain = false;  // also prove D*: building HP lost with no resist (plain tiers)
+  std::filesystem::path json_out;
+};
+
+int run_survival_cert(const SurvivalCertOptions& options);
+
 // itb_inspect --threat-check DIR (threat_tool.cpp): the next-turn threat
 // proxy against the engine's enemy phase on recorded boards, and its cost.
 int run_threat_check(const std::filesystem::path& dir, const std::filesystem::path& game);

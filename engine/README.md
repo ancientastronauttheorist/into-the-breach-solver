@@ -44,6 +44,7 @@ engine/build/itb_inspect --solve recordings --threat-tier --threat-eval --json o
 engine/build/itb_inspect --threat-check recordings                       # threat proxy vs engine and games, cost
 engine/build/itb_inspect --solve state.json --lookahead [--lookahead-samples 8] # experimental next-turn tier
 engine/build/itb_inspect --solve state.json --grid-survival                     # Grid Defense odds when every line can lose the grid
+engine/build/itb_inspect --survival-cert state.json --time 900 --threads 4     # an upper bound on those odds (certificate)
 engine/build/itb_inspect --lookahead-study state.json --compare [--samples 8] [--next-time 4]  # plans vs next turn
 engine/build/itb_inspect --two-turn state.json --arm la8 --arm sum8 --plan solve.json [--next-seeds 16]  # plans over two turns
 engine/build/itb_inspect --two-turn deployed.json --deploy --deploy-top 6 [--spawn F1] # placements over two turns
@@ -1311,6 +1312,71 @@ the enemy phase (the Scarab's 2-damage shot at E2's building), and given
 that roll it keeps every building and leaves one enemy able to reach a
 protected unit, where the live plan's surviving outcome left three (an
 earlier 300 s run found a 0.25 line leaving none).
+
+**Certificate** (`itb_inspect --survival-cert state.json [--time S]
+[--threads N] [--plain] [--json FILE]`; a diagnostic, no search changes).
+An upper bound on every plan's odds, to set next to the best odds found.
+- The roll rule (`tile_rules.cpp` damage_building): one Grid Defense roll
+  per damaging hit (a weapon's or death effect's SpaceDamage, a bump) that
+  reaches a populated building after shields and ice have taken theirs: a
+  plain building with `populated`, or a unique building at full HP. The
+  roll's amount is min(damage, building HP) >= 1; unresisted, the building
+  loses that HP and grid power that much (floored at 0); resisted, nothing
+  happens (no HP, grid or Auto-Shield change), so a resisted building can be
+  hit and roll again. Grid power falls through nothing else (no shipped
+  script calls `ModifyPowerGrid` with a loss), and only rises with a Grid
+  Charger on the board (`TierBounds`: monotone otherwise).
+- First resist. Up to its first resisted roll, an outcome of a plan follows
+  the plan's no-resist path (the same choices, the same picks of the other
+  chance nodes). If that path loses the grid at its m-th roll, an outcome
+  keeps the grid only if one of its first m rolls is resisted, so the odds
+  are at most 1 - (1 - p)^m: the rolls are independent, every worst-case
+  chance node only lowers the fold (any fixed pick of the adversary bounds
+  it), and the game's random picks average over branches that each obey the
+  bound. Each unresisted roll costs at least 1 grid, so m <= G.
+- The proof. `SolveOptions::cert_roll_budget` M runs the search in a world
+  where the turn's first M rolls are not resisted and the rest are (no
+  branch; a run starting at grid g gets M - (G - g), never more than the
+  turn has left). With grid survival on, odds 0 for every plan there (the
+  search proven in its first tier: `--min-tiers 1`, the adaptive budget)
+  means every plan's no-resist path loses the grid within M rolls, for every
+  random pick and some worst-case pick. The tool proves M = G, G - 1, ...
+  while the bound stays at or above the recorded plan's odds, and prints
+  1 - (1 - p)^M for the smallest M proven and whether the recorded plan
+  (`_solve.json`, open-loop) reaches it. `--plain` also proves D, the
+  building HP the best no-resist line loses (plain tiers, M unbounded).
+- Grid 1. An outcome then keeps the grid only if every roll is resisted:
+  it is the plan's all-resist path, of probability p^(its rolls).
+  `SolveOptions::cert_resist_first` K resists the first K rolls of each
+  sub-action and enemy phase before the budget (M = 1); that world follows
+  the all-resist path while it has at most K rolls, so odds 0 there for
+  every plan bounds every plan's odds by p^(K + 1). The tool tries K = 1,
+  2, ... after M = 1.
+- `test_solver.cpp` checks the bound against the naive odds on 24 tiny
+  boards (16 certified, 15 of them at the naive odds exactly).
+
+Recorded doomed turns (4 threads, up to 1500 s per proof, a live run on the
+same machine; p from the state; "recorded" is the live plan, open-loop):
+
+| Turn | G | p | proofs | bound | recorded | |
+|---|---|---|---|---|---|---|
+| run 21 Cave t2 (`20261014_045942` m41) | 1 | 0.15 | M=1 763 s | 0.15 | (no plan file; one resist) | optimal |
+| run 24 Final t3 (`20261014_151230` m40) | 1 | 0.28 | M=1 72 s, K=1 101 s | 0.0784 | 0.0784 | optimal |
+| run 25 Survive t3 (`20261014_175032` m14) | 1 | 0 | M=1 open at 1500 s | 1 | 0 | open |
+| run 27 Factory t3 (`20261014_222734` m14) | 2 | 0.08 | M=2 19 s | 0.1536 | 0.1536 | optimal |
+| run 26 Cave t3 (`20261014_190250` m41) | 3 | 0.28 | M=3 361 s; M=2 fails (158 s) | 0.6268 | 0.4816 | open |
+
+Run 26: some line's no-resist path takes three 1-grid rolls to empty the
+grid, so M = 2 is false and the first-resist bound stops at 0.6268; closing
+it needs a bound on the outcomes after a first resist (not done). The old run took 1508 s
+to find 0.4816 and never bounded it below 1.
+- Why not D and a roll count. A bound from "survival needs k = ceil((D -
+  G + 1) / h) resists among n rolls" needs every outcome to lose at least
+  D without its resists, which is not true in general: a resist can keep a
+  1 HP building standing in front of a 2 HP one, so a second shot hits the
+  first again instead of passing over the rubble. And no static count caps
+  n, since a resisted building rolls again on every hit. For k = 1 the first
+  resist argument above is sound and needs no n (m <= G replaces it).
 
 **Anytime.** With a time or node budget the result is the best plan found,
 `proven_optimal = false`, an `upper_bound` (the root's interval, sound

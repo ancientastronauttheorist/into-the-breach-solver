@@ -17,6 +17,8 @@
 //               [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns]]
 //               [--threat-eval]
 //                                               the perfect-turn search vs the recorded plan
+//   itb_inspect [--game DIR] --survival-cert <recording.json> [--time S] [--threads N] [--plain] [--json FILE]
+//                                               an upper bound on every plan's grid-survival odds
 //   itb_inspect [--game DIR] --ai DIR [--samples N] [--show N]
 //                                               the enemy AI's planning vs the live recordings
 //   itb_inspect [--game DIR] --threat-check DIR
@@ -64,6 +66,7 @@ int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
                "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] [--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle]] [--grid-survival] [--threat-eval] | "
+               "--survival-cert <recording.json> [--time S] [--threads N] [--plain] [--json FILE] | "
                "--two-turn <state.json> [--arm base|laN|sumN|idleN]... [--plan FILE]... [--time S] [--next-time S] [--next-seeds N] [--seed N] [--threads N] [--deploy [--placement C5,D6,E5]... [--deploy-top N [--search-time S --search-samples N --search-finalists N]] [--deploy-seeds N] [--spawn F1,...] [--no-state-placement]] [--json FILE] [--verbose] | "
                "--lookahead-study (<recording.json> | DIR) [--time S] [--next-time S] [--threads N] [--samples N] [--seed N] [--compare [--skip-base] [--la-samples N] [--la-reply greedy|idle] [--la-sum]] [--no-spawns] [--json FILE] [--verbose] | "
                "--threat-check DIR | --ai DIR [--samples N] [--show N] | "
@@ -465,6 +468,26 @@ int main(int argc, char** argv) {
       }
     }
     return tools::run_solve(o);
+  }
+  if (args[0] == "--survival-cert") {
+    if (args.size() < 2) return usage();
+    tools::SurvivalCertOptions o;
+    o.target = args[1];
+    o.game = game;
+    for (size_t i = 2; i < args.size(); ++i) {
+      if (args[i] == "--time" && i + 1 < args.size()) {
+        o.time_limit = std::stod(args[++i]);
+      } else if (args[i] == "--threads" && i + 1 < args.size()) {
+        o.threads = std::max(1, std::stoi(args[++i]));
+      } else if (args[i] == "--plain") {
+        o.plain = true;
+      } else if (args[i] == "--json" && i + 1 < args.size()) {
+        o.json_out = args[++i];
+      } else {
+        return usage();
+      }
+    }
+    return tools::run_survival_cert(o);
   }
   if (args[0] == "--lookahead-study") {
     if (args.size() < 2) return usage();
