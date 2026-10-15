@@ -127,6 +127,9 @@ struct ChanceCall {
   uint32_t seed = 0;     // Seed: the seed handed out
   bool matched = false;  // Seed: its death effect drew random numbers
   Weigh weigh = Weigh::Worst;
+  // Resist: rolled with the grid already at 0 (ChanceDriver::set_grid), so
+  // the resisted branch loses the grid too (grid power never rises).
+  bool dead = false;
 };
 
 class ChanceDriver {
@@ -137,6 +140,22 @@ class ChanceDriver {
   void begin(const std::vector<int>& forced) {
     forced_ = &forced;
     calls_.clear();
+    rolls_ = 0;
+    grid_ = grid_start_;
+  }
+  // The grid power at the start of the runs that follow, to mark the rolls
+  // made once it is 0 (ChanceCall::dead); -1: unknown (none is marked). Only
+  // sound where grid power never rises (TierBounds::grid_monotone): every
+  // grid loss is then an unresisted roll's amount.
+  void set_grid(int grid) { grid_start_ = grid; }
+  // SolveOptions::cert_roll_budget / cert_resist_first: from here on (and in
+  // every run that follows) the first `first` Grid Defense rolls are
+  // resisted, the next `budget` are not and every later one is, with no
+  // branch (budget < 0: off, the rolls branch as usual).
+  void set_roll_budget(int budget, int first) {
+    budget_ = budget;
+    first_ = first;
+    rolls_ = 0;
   }
   const std::vector<ChanceCall>& calls() const { return calls_; }
   bool sampled() const { return sampled_; }
@@ -158,7 +177,7 @@ class ChanceDriver {
   }
 
   void bind(ActionOptions& o) {
-    o.grid_resist = [this](Point, int) { return next(Hook::Resist, resist_ ? 2 : 1, Weigh::Resist) == 1; };
+    o.grid_resist = [this](Point, int amount) { return resist(amount); };
     o.choose = [this](const ChanceRecord& node) {
       return next(Hook::Choose, std::max(1, node.options), weigh_of(node.kind));
     };
@@ -168,7 +187,7 @@ class ChanceDriver {
     };
   }
   void bind(TurnContext& tc) {
-    tc.grid_resist = [this](Point, int) { return next(Hook::Resist, resist_ ? 2 : 1, Weigh::Resist) == 1; };
+    tc.grid_resist = [this](Point, int amount) { return resist(amount); };
     tc.choose = [this](const ChanceRecord& node) {
       return next(Hook::Choose, std::max(1, node.options), weigh_of(node.kind));
     };
@@ -184,6 +203,19 @@ class ChanceDriver {
   // Environment orders and choices are also hidden state the recording
   // lacks, and an XP split only decides level-ups: worst case.
   static Weigh weigh_of(ChanceKind k) { return k == ChanceKind::MissionRandom ? Weigh::Even : Weigh::Worst; }
+  bool resist(int amount) {
+    if (budget_ >= 0) {
+      next(Hook::Resist, 1, Weigh::Resist);
+      const int i = rolls_++;
+      return i < first_ || i - first_ >= budget_;
+    }
+    const bool resisted = next(Hook::Resist, resist_ ? 2 : 1, Weigh::Resist) == 1;
+    if (grid_start_ >= 0) {
+      calls_.back().dead = grid_ <= 0;
+      if (!resisted) grid_ = std::max(0, grid_ - amount);
+    }
+    return resisted;
+  }
   int next(Hook h, int options, Weigh w) {
     const size_t i = calls_.size();
     int c = forced_ && i < forced_->size() ? (*forced_)[i] : 0;
@@ -206,6 +238,11 @@ class ChanceDriver {
   const std::vector<int>* forced_ = nullptr;
   std::vector<ChanceCall> calls_;
   bool sampled_ = false;
+  int budget_ = -1;  // set_roll_budget
+  int first_ = 0;    // set_roll_budget
+  int rolls_ = 0;    // Grid Defense rolls of this run
+  int grid_start_ = -1;  // set_grid
+  int grid_ = -1;        // the grid power now (set_grid)
 };
 
 enum class EnumEnd { Complete, Stopped, Truncated };
@@ -324,7 +361,9 @@ class ChanceTree {
     for (int j = 0; j < n; ++j) {
       size_t e = i;
       while (e < hi && order_[e]->path[d].chosen == j) ++e;
-      const double x = e > i ? fold(i, e, d + 1, p, unexplored, vals) : unexplored;
+      // A roll made with the grid at 0: resisting it keeps nothing.
+      const double none = c.dead && j == 1 ? 0.0 : unexplored;
+      const double x = e > i ? fold(i, e, d + 1, p, unexplored, vals) : none;
       i = e;
       if (j == 0) first = x;
       if (j == 1) second = x;
@@ -354,6 +393,16 @@ int32_t clamp_odds(int32_t s) { return std::clamp(s, 0, kSurvivalOne); }
 double resist_chance(const Board& root, const TurnContext& ctx) {
   const int pct = ctx.mission.grid_defense >= 0 ? ctx.mission.grid_defense : root.grid_defense;
   return std::clamp(pct, 0, 100) / 100.0;
+}
+
+// SolveOptions::cert_roll_budget: the unresisted rolls left to a run that
+// starts on `b` (-1: off). Every unresisted roll so far cost at least 1 grid
+// power, so at most root - b.grid_power rolls were made before it: this
+// budget never lets the turn's unresisted rolls exceed cert_roll_budget,
+// and once a run used it up the next run's budget is 0.
+int cert_roll_budget(const SolveOptions& o, const Board& root, const Board& b) {
+  if (o.cert_roll_budget < 0) return -1;
+  return std::max(0, o.cert_roll_budget - (root.grid_power - b.grid_power));
 }
 
 constexpr size_t kSurvival = static_cast<size_t>(ScoreKey::GridSurvival);
@@ -597,6 +646,8 @@ class TierBounds {
   }
 
   Score global() const { return caps_; }
+  // Grid power never rises on this board (no Grid Charger).
+  bool grid_monotone() const { return grid_monotone_; }
   // objective_progress_cap at the root (objectives_first only, else -1).
   int progress_cap() const { return progress_cap_; }
 
@@ -1073,6 +1124,8 @@ class Worker {
       if (odds <= 0) return with_odds(worst, 0);
       return with_odds(alive.v[kSurvival] >= kSurvivalOne ? alive : kHigh, odds);
     };
+    driver_.set_roll_budget(cert_roll_budget(o_, sh_.root, b), o_.cert_resist_first);
+    driver_.set_grid(sh_.bounds.grid_monotone() ? b.grid_power : -1);
     const EnumEnd end = enumerate_chance(driver_, o_.max_chance_leaves, stats_.chance_branches, [&] {
       Board after = b;
       const Clock::time_point t0 = Clock::now();
@@ -1250,6 +1303,8 @@ class Worker {
     bool refused = false;
     aopts_.known_area = area;
     aopts_.known_effect = effect;
+    driver_.set_roll_budget(cert_roll_budget(o_, sh_.root, b), o_.cert_resist_first);
+    driver_.set_grid(sh_.bounds.grid_monotone() ? b.grid_power : -1);
     const EnumEnd end = enumerate_chance(driver_, o_.max_chance_leaves, stats_.chance_branches, [&] {
       Board next = b;
       const Clock::time_point t0 = Clock::now();
@@ -2311,6 +2366,7 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
       const PlayerAction& a = plan[i];
       const Pawn* p = b.find_pawn(a.uid);
       if (a.move.valid() && p && a.move != p->pos) {
+        d.set_roll_budget(cert_roll_budget(options, board, b), options.cert_resist_first);
         engine.lua().seed(kLuaSeed);
         const ActionResult r = engine.move(b, a.uid, a.move, ao);
         if (!ok(r)) {
@@ -2322,6 +2378,7 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
         tag(static_cast<int>(2 * i));
       }
       if (a.kind == PlayerAction::Kind::None) continue;
+      d.set_roll_budget(cert_roll_budget(options, board, b), options.cert_resist_first);
       engine.lua().seed(kLuaSeed);
       const ActionResult r =
           a.kind == PlayerAction::Kind::Weapon
@@ -2336,6 +2393,7 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
       tag(static_cast<int>(2 * i + 1));
     }
     const size_t player_calls = d.calls().size();
+    d.set_roll_budget(cert_roll_budget(options, board, b), options.cert_resist_first);
     engine.lua().seed(kLuaSeed);
     const PhaseResult pr = engine.end_turn(b, tc);
     d.mark_random(pr.chances);

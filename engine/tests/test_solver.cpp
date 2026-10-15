@@ -1317,6 +1317,71 @@ TEST_CASE("solver: tiny boards with grid survival match a naive exhaustive enume
                                               << "), with chance in the player's actions: " << player_chance);
 }
 
+// The certificate of itb_inspect --survival-cert (README "Grid survival"):
+// odds 0 for every plan in the budget-M world bounds every plan's odds by
+// 1 - (1 - p)^M; with the grid at 1, odds 0 with the first K rolls of each
+// run resisted bounds them by p^(K + 1). Checked against the naive odds.
+TEST_CASE("grid survival: the certificate bounds the naive odds") {
+  NEED_ENGINE();
+  std::mt19937 rng(20261016);
+  int certified = 0, tight = 0, by_k = 0;
+  constexpr int kTrials = 24;
+  auto world_odds_zero = [&](const Board& b, const TurnContext& ctx, int m, int k) {
+    SolveOptions o = quick(120);
+    o.grid_survival = true;
+    o.cert_roll_budget = m;
+    o.cert_resist_first = k;
+    const SolveResult r = solve_turn(E, b, ctx, o);
+    REQUIRE(r.proven_optimal);
+    return r.best.worst_case[ScoreKey::GridSurvival] == 0;
+  };
+  for (int trial = 0; trial < kTrials; ++trial) {
+    const Board b = grid_risk_board(rng);
+    TurnContext ctx = context();
+    static constexpr int kDefense[] = {15, 25, 40, 60};
+    ctx.mission.grid_defense = kDefense[trial % 4];
+    const double p = ctx.mission.grid_defense / 100.0;
+    Naive naive{E, b, ctx};
+    naive.score_options.grid_survival = true;
+    naive.resist_p = p;
+    const double want = static_cast<double>(naive.value(b)[ScoreKey::GridSurvival]) / kSurvivalOne;
+    double bound = 1.0;
+    int best_m = -1;
+    for (int m = b.grid_power; m >= 1 && world_odds_zero(b, ctx, m, 0); --m) best_m = m;
+    if (best_m > 0) bound = 1.0 - std::pow(1.0 - p, best_m);
+    if (b.grid_power == 1 && best_m == 1) {
+      for (int k = 1; k <= 3 && world_odds_zero(b, ctx, 1, k); ++k) {
+        bound = std::pow(p, k + 1);
+        ++by_k;
+      }
+    }
+    INFO("trial " << trial << " grid " << b.grid_power << " p " << p << " naive odds " << want << " bound " << bound);
+    CHECK(want <= bound + 1e-6);
+    if (best_m > 0) ++certified;
+    if (best_m > 0 && want >= bound - 1e-6) ++tight;
+  }
+  CHECK(certified > 0);
+  MESSAGE("survival certificate boards: " << kTrials << ", certified: " << certified << ", bound = naive odds: "
+                                          << tight << ", tightened by resist-first steps: " << by_k);
+}
+
+TEST_CASE("grid survival: the certificate proves the one-roll line on the two-roll board") {
+  NEED_ENGINE();
+  Board b = two_roll_board(nullptr);
+  TurnContext ctx = context();
+  ctx.mission.grid_defense = 25;
+  SolveOptions o = quick();
+  o.grid_survival = true;
+  o.cert_roll_budget = 1;
+  const SolveResult m1 = solve_turn(E, b, ctx, o);
+  CHECK(m1.proven_optimal);
+  CHECK(m1.best.worst_case[ScoreKey::GridSurvival] == 0);  // bound 1 - 0.75 = the one-roll line's 0.25
+  o.cert_resist_first = 1;
+  const SolveResult k1 = solve_turn(E, b, ctx, o);
+  CHECK(k1.proven_optimal);
+  CHECK(k1.best.worst_case[ScoreKey::GridSurvival] > 0);  // the one-roll line survives its resisted roll
+}
+
 TEST_CASE("solver: grid survival with the lookahead and the mech exchange matches a naive enumeration") {
   NEED_ENGINE();
   // The odds in front of the lookahead's lazy leaves (and its base search)

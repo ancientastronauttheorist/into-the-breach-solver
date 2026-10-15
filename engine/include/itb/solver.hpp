@@ -116,6 +116,19 @@ struct SolveOptions {
   // the odds only decide between lines that can all lose it. Off (the
   // default): the component is 0 everywhere, so results are unchanged.
   bool grid_survival = false;
+  // Diagnostic for the grid-survival certificate (itb_inspect
+  // --survival-cert; README "Grid survival"): with a budget M >= 0, Grid
+  // Defense rolls never branch; the turn's first rolls are not resisted and
+  // the rest are, where a sub-action or enemy phase starting at grid power g
+  // gets M - (root grid - g) unresisted rolls (each unresisted roll costs at
+  // least 1 grid, so the turn never gets more than M). -1 (the default):
+  // off, results are unchanged.
+  int cert_roll_budget = -1;
+  // With cert_roll_budget: each sub-action and enemy phase first resists
+  // this many rolls (then the budget, then resisted again). The
+  // certificate's grid-1 extension (survival there needs every roll
+  // resisted).
+  int cert_resist_first = 0;
   bool tier_on() const { return threat_tier || threat_kills; }
   // The optional tiers in use (score.hpp TierSet).
   TierSet tiers() const {

@@ -9,6 +9,7 @@
 // completes our worst case can never be below it.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <map>
@@ -23,6 +24,7 @@
 #include "itb/game_data.hpp"
 #include "itb/recording.hpp"
 #include "itb/solver.hpp"
+#include "itb/tile_rules.hpp"
 #include "solve_tool.hpp"
 
 namespace fs = std::filesystem;
@@ -450,6 +452,208 @@ int run_solve(const SolveToolOptions& opt) {
   for (const auto& [t, k] : worse_tier) std::printf("  worse in  %-18s %d\n", t.c_str(), k);
   print_lua_counts();
   return worse_proven == 0 ? 0 : 1;
+}
+
+// ---- The grid-survival certificate ----------------------------------------------
+//
+// README "Grid survival", certificate. With the grid at G > 0 and grid power
+// never rising (no Grid Charger), an outcome of a plan S keeps the grid only
+// if a Grid Defense roll is resisted before the grid falls to 0 on S's
+// no-resist path: up to its first resisted roll an outcome follows that path
+// (the same choices of S, the same picks of the other chance nodes). Each
+// unresisted roll costs at least 1 grid, so that path's grid is 0 after at
+// most G rolls. The budget-M world (SolveOptions::cert_roll_budget) checks a
+// smaller count: odds 0 there for every plan means that every plan's
+// no-resist path loses the grid within its first M rolls, for some pick of
+// each worst-case chance node (the odds take those at their worst) and every
+// pick of the game's random ones. Rolls are independent with chance p, so
+// every plan's odds are at most 1 - (1 - p)^M.
+int run_survival_cert(const SurvivalCertOptions& opt) {
+  std::unique_ptr<Engine> engine;
+  try {
+    engine = Engine::create(opt.game);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "error: %s\n", e.what());
+    return 1;
+  }
+  std::vector<std::unique_ptr<Engine>> helpers;
+  for (int i = 1; i < opt.threads; ++i) helpers.push_back(Engine::create(opt.game));
+  std::vector<Engine*> helper_ptrs;
+  for (auto& h : helpers) helper_ptrs.push_back(h.get());
+  std::string error;
+  std::optional<Recording> rec = load_recording(opt.target, &engine->data(), &error);
+  if (!rec) {
+    std::fprintf(stderr, "error: %s\n", error.c_str());
+    return 1;
+  }
+  Board board = rec->board;
+  SolveOptions so;
+  so.helper_engines = helper_ptrs;
+  for (const auto& [uid, pilot] : rec->pilots) {
+    if (Pawn* p = board.find_pawn(uid)) {
+      p->pilot_abilities |= engine->pilot_ability(pilot);
+      so.repair_skills.emplace_back(uid, engine->repair_skill(pilot));
+    }
+  }
+  const TurnContext ctx = turn_context(*rec);
+  const int grid = board.grid_power;
+  const int pct = std::clamp(ctx.mission.grid_defense >= 0 ? ctx.mission.grid_defense : board.grid_defense, 0, 100);
+  const double p = pct / 100.0;
+  int pop_tiles = 0, pop_hp = 0, h = 0, other_tiles = 0, other_hp = 0;
+  for (int i = 0; i < kTileCount; ++i) {
+    const Tile& t = board.tile(Point::from_index(i));
+    if (!t.is_building() || t.hp <= 0) continue;
+    if (is_populated(t)) {
+      ++pop_tiles;
+      pop_hp += t.hp;
+      h = std::max<int>(h, t.hp);
+    } else {
+      ++other_tiles;
+      other_hp += t.hp;
+    }
+  }
+  bool charger = false;
+  for (const Pawn& q : board.pawns()) {
+    for (Symbol w : q.weapons) {
+      if (w != kNoSymbol && symbol_name(w).starts_with("Support_KO_GridCharger")) charger = true;
+    }
+  }
+  const TierSet tiers = kTierSurvival;
+  const size_t surv = static_cast<size_t>(ScoreKey::GridSurvival);
+  auto odds_of = [&](const Score& s) { return static_cast<double>(s.v[surv]) / kSurvivalOne; };
+  auto bound_of = [&](int m) { return 1.0 - std::pow(1.0 - p, m); };
+  std::printf("%s m%02d turn %d %s\n", rec->run_id.c_str(), rec->mission_index, rec->turn, rec->mission_id.c_str());
+  std::fputs(render_board(board).c_str(), stdout);
+  std::printf("grid G=%d, Grid Defense p=%.2f (%d%%%s)\n", grid, p, pct,
+              ctx.mission.grid_defense >= 0 ? "" : ", the board's: the state carries no grid_defense");
+  std::printf("buildings: %d populated (%d HP, at most %d on one tile), %d others (%d HP, no grid)\n", pop_tiles,
+              pop_hp, h, other_tiles, other_hp);
+  json j{{"file", opt.target.parent_path().filename().string() + "/" + opt.target.filename().string()},
+         {"grid", grid},
+         {"p", p},
+         {"h", h},
+         {"populated_tiles", pop_tiles},
+         {"populated_hp", pop_hp}};
+
+  // The recorded plan's odds (open-loop, with the real Grid Defense chance).
+  std::optional<double> recorded;
+  if (std::optional<std::vector<PlayerAction>> plan = recorded_plan(opt.target, *rec, *engine)) {
+    SolveOptions eo = so;
+    eo.grid_survival = true;
+    eo.helper_engines.clear();
+    if (const auto v = evaluate_plan(*engine, board, ctx, *plan, eo)) {
+      recorded = odds_of(*v);
+      std::printf("recorded plan: %s\n", score_text(*v, tiers).c_str());
+      j["recorded"] = *recorded;
+    }
+  }
+
+  int best_m = -1;  // the smallest budget proven
+  if (charger) {
+    std::printf("no certificate: a Grid Charger can raise grid power\n");
+  } else if (grid <= 0) {
+    best_m = 0;
+  } else {
+    json proofs = json::array();
+    for (int m = grid; m >= 1; --m) {
+      // A budget whose bound is below a plan's odds cannot be proven.
+      if (recorded && bound_of(m) < *recorded - 1e-9) break;
+      SolveOptions c = so;
+      c.grid_survival = true;
+      c.cert_roll_budget = m;
+      c.min_proven_tiers = 1;
+      c.time_limit_s = std::min(1.0, opt.time_limit / 2);
+      c.max_time_s = opt.time_limit;
+      const SolveResult r = solve_turn(*engine, board, ctx, c);
+      const bool proven = r.chance_exact && r.upper_bound && r.upper_bound->v[surv] <= 0;
+      std::printf("budget M=%d: %s in %.1fs (%llu nodes, %llu enemy phases; best odds %.4f, upper bound %.4f)%s\n", m,
+                  proven ? "every plan loses the grid within M unresisted rolls"
+                         : (r.best.worst_case.v[surv] > 0 ? "a plan keeps the grid" : "not proven"),
+                  r.stats.time_s, static_cast<unsigned long long>(r.stats.nodes),
+                  static_cast<unsigned long long>(r.stats.enemy_phases), odds_of(r.best.worst_case),
+                  r.upper_bound ? odds_of(*r.upper_bound) : 1.0, r.chance_exact ? "" : " [chance not exact]");
+      for (const std::string& w : r.warnings) std::printf("  warning: %s\n", w.c_str());
+      proofs.push_back(json{{"m", m},
+                            {"proven", proven},
+                            {"time", r.stats.time_s},
+                            {"nodes", r.stats.nodes},
+                            {"enemy_phases", r.stats.enemy_phases},
+                            {"best", odds_of(r.best.worst_case)}});
+      std::fflush(stdout);
+      if (!proven) break;
+      best_m = m;
+    }
+    j["proofs"] = proofs;
+  }
+  double bound = best_m < 0 ? 1.0 : bound_of(best_m);
+  j["m"] = best_m;
+  // Grid 1: an outcome keeps the grid only if every roll is resisted, i.e.
+  // it is the plan's all-resist path. The world that resists the first K
+  // rolls of each sub-action and enemy phase, then lets one through, follows
+  // that path while it has at most K rolls; odds 0 there for every plan
+  // means every all-resist path has more than K rolls: odds <= p^(K + 1).
+  int best_k = 0;
+  if (grid == 1 && best_m == 1 && p > 0) {
+    json proofs = json::array();
+    for (int k = 1; k <= 8; ++k) {
+      if (recorded && std::pow(p, k + 1) < *recorded - 1e-9) break;
+      SolveOptions c = so;
+      c.grid_survival = true;
+      c.cert_roll_budget = 1;
+      c.cert_resist_first = k;
+      c.min_proven_tiers = 1;
+      c.time_limit_s = std::min(1.0, opt.time_limit / 2);
+      c.max_time_s = opt.time_limit;
+      const SolveResult r = solve_turn(*engine, board, ctx, c);
+      const bool proven = r.chance_exact && r.upper_bound && r.upper_bound->v[surv] <= 0;
+      std::printf("resist first K=%d: %s in %.1fs (%llu nodes, %llu enemy phases; best odds %.4f)\n", k,
+                  proven ? "every plan's all-resist path has more than K rolls" : "not proven", r.stats.time_s,
+                  static_cast<unsigned long long>(r.stats.nodes), static_cast<unsigned long long>(r.stats.enemy_phases),
+                  odds_of(r.best.worst_case));
+      proofs.push_back(json{{"k", k}, {"proven", proven}, {"time", r.stats.time_s}, {"nodes", r.stats.nodes}});
+      std::fflush(stdout);
+      if (!proven) break;
+      best_k = k;
+    }
+    j["resist_first_proofs"] = proofs;
+    j["k"] = best_k;
+    if (best_k > 0) bound = std::pow(p, best_k + 1);
+  }
+  j["bound"] = bound;
+  if (best_m < 0) {
+    std::printf("bound: none (odds <= 1)\n");
+  } else if (best_k > 0) {
+    std::printf("bound: every plan's odds <= p^%d = %.4f\n", best_k + 1, bound);
+  } else {
+    std::printf("bound: every plan's odds <= 1 - (1 - p)^%d = %.4f\n", best_m, bound);
+  }
+  if (recorded) {
+    const bool optimal = *recorded >= bound - 1e-6;
+    std::printf("recorded plan's odds %.4f: %s\n", *recorded, optimal ? "PROVEN OPTIMAL in the odds" : "not proven");
+    j["recorded_optimal"] = optimal;
+  }
+
+  // D*: building HP lost on the no-resist path by the best plan (plain tiers).
+  if (opt.plain && !charger) {
+    SolveOptions c = so;
+    c.cert_roll_budget = 1 << 20;
+    c.min_proven_tiers = 2;
+    c.time_limit_s = std::min(1.0, opt.time_limit / 2);
+    c.max_time_s = opt.time_limit;
+    const SolveResult r = solve_turn(*engine, board, ctx, c);
+    const bool proven = r.chance_exact && r.proven_components >= 2;
+    std::printf("no resist, plain tiers: grid %d, building_hp %d (%s, %.1fs)\n", r.best.worst_case[ScoreKey::GridLost],
+                r.best.worst_case[ScoreKey::BuildingHpLost], proven ? "proven" : "not proven", r.stats.time_s);
+    j["plain"] = json{{"grid", r.best.worst_case[ScoreKey::GridLost]},
+                      {"building_hp", r.best.worst_case[ScoreKey::BuildingHpLost]},
+                      {"proven", proven},
+                      {"time", r.stats.time_s}};
+  }
+  if (!opt.json_out.empty()) {
+    std::ofstream out(opt.json_out, std::ios::app);
+    out << j.dump() << "\n";
+  }
+  return 0;
 }
 
 }  // namespace itb::tools
