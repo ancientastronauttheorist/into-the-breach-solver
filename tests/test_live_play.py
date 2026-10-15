@@ -1799,6 +1799,23 @@ class DiffBoardsTest(unittest.TestCase):
         diffs, _ = lp.diff_boards(want, got, {97}, enemy_phase=True)
         self.assertEqual(len(diffs), 1)
 
+    def test_vek_frozen_on_a_freeze_mine_a_snowmine_laid_during_planning(self):
+        # Live 20261014_222734 m12 (Mission_BotDefense) turn 3 -> 4: the
+        # player-team Snowmine1 left C3 for B2 during AI planning, laying a
+        # freeze mine on C3; the Firefly2 then moved B3 -> C3 and froze. The
+        # mine shows on neither captured board.
+        bot = {"uid": 3588, "type": "Snowmine1", "x": 5, "y": 5, "hp": 1, "team": 1}
+        fly = {"uid": 3591, "type": "Firefly2", "x": 6, "y": 5, "hp": 5, "team": 6, "frozen": False}
+        want = self.board([bot, fly])
+        got = self.board([dict(bot, x=6, y=6), dict(fly, x=5, y=5, frozen=True)])
+        laid = lp.freeze_mines_laid(want, got)
+        self.assertEqual(laid, {(5, 5)})
+        diffs, notes = lp.diff_boards(want, got, {3588, 3591}, enemy_phase=True, freeze_mines_gone=frozenset(laid))
+        self.assertEqual(diffs, [])
+        self.assertTrue(any("freeze mine" in n for n in notes))
+        # A Snowmine that stayed put laid nothing.
+        self.assertEqual(lp.freeze_mines_laid(want, self.board([bot, fly])), set())
+
     def test_vek_healed_on_a_tripped_repair_mine_is_a_note(self):
         # Live 2026-10-11 (Mission_Repair): a Burnbug walked onto the C3
         # repair mine while the Vek planned their next turn: healed to full,

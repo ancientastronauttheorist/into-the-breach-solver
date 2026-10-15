@@ -640,7 +640,8 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
     - `freeze_mines_gone`: like `mines_gone` for Freeze_Mine items: a Vek
       that steps on one while planning is frozen; a non-mech the engine has
       unfrozen and the game frozen is a note while tripped freeze mines
-      account for it.
+      account for it. The caller includes mines a Snowmine laid during AI
+      planning (`freeze_mines_laid`) that are gone again.
     - `repair_mines_gone`: like `mines_gone` for Item_Repair_Mine items
       (Mission_Repair): a Vek that walks onto one while planning is healed
       and loses ACID and fire. A non-mech that moved onto one of these tiles
@@ -1183,6 +1184,30 @@ def reactivation_note(state: dict, listed: list) -> str | None:
 # bare, the end-of-turn prediction lost them and the grid, the game kept
 # both). One the enemy phase leaves standing carries into the next turn when
 # the game matched the prediction.
+
+# Freeze mines laid during AI planning. A Snowmine (Mission_BotDefense's two
+# player-team bots, or an enemy one) is neutral, so the AI moves it in its
+# planning phase: SnowmineAtk1 lays a Freeze_Mine on the tile it leaves and
+# moves it up to 3 tiles. A Vek planning after it can step on that mine and
+# freeze in the same phase, so the mine never shows on a captured board (live
+# 20261014_222734 m12 Mission_BotDefense turn 3 -> 4: Snowmine1 C3 -> B2 laid
+# one on C3, a Firefly2 moved onto it and froze). The engine's ai_phase
+# models this; the enemy-phase prediction stops before AI planning.
+
+def freeze_mines_laid(predicted: dict, live: dict) -> set:
+    """Tiles (x, y) a Snowmine stood on in the predicted board (the end of
+    the enemy phase, before AI planning) whose live position differs: it
+    laid a Freeze_Mine there moving during AI planning."""
+    now = {u["uid"]: u for u in live.get("units", [])}
+    out = set()
+    for u in predicted.get("units", []):
+        if not str(u.get("type", "")).startswith("Snowmine") or (u.get("hp") or 0) <= 0:
+            continue
+        b = now.get(u["uid"])
+        if b is not None and (b["x"], b["y"]) != (u["x"], u["y"]):
+            out.add((u["x"], u["y"]))
+    return out
+
 
 def confirmed_shields(predicted: dict, live: dict) -> list:
     """The predicted board's shielded structures ([x, y], sorted) that the
@@ -1849,7 +1874,9 @@ def end_turn(ctx) -> list:
     diffs, notes = diff_boards(pred["after_enemy"], live, known, enemy_phase=True, acid_pools=pools,
                                smoke_new=frozenset(smoked(after) - engine_smoke),
                                mines_gone=frozenset(mines(state) - mines(after)),
-                               freeze_mines_gone=frozenset(mines(state, "Freeze_Mine") - mines(after, "Freeze_Mine")),
+                               freeze_mines_gone=frozenset((mines(state, "Freeze_Mine")
+                                                            | freeze_mines_laid(pred["after_enemy"], live))
+                                                           - mines(after, "Freeze_Mine")),
                                repair_mines_gone=frozenset(mines(state, "Item_Repair_Mine")
                                                            - mines(after, "Item_Repair_Mine")),
                                random_thaw=any(e.get("type") == "thawed"
