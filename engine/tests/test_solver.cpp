@@ -7,6 +7,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -1551,7 +1552,10 @@ TEST_CASE("grid survival: the survival cap stops the search at the proven odds")
   // The two-roll board with more mechs to move: the best odds (0.25, one
   // resisted roll) are the ceiling 1 - (1 - p)^1 the pre-pass proves, so the
   // search stops once it has that plan. Without it the search must run to
-  // its end (its bound on the odds is 1 until then).
+  // its end (its bound on the odds is 1 until then). The base time is short
+  // of what the whole search takes (about 0.035 s after the survey here): the
+  // search after the pre-pass gets it all (the pre-pass is charged to
+  // max_time_s), and stops there once its plan has the proven odds.
   int32_t m = -1;
   Board b = two_roll_board(&m);
   // Two Combat Mechs too far from every Vek to change anything.
@@ -1559,7 +1563,7 @@ TEST_CASE("grid survival: the survival cap stops the search at the proven odds")
   place(b, "PunchMech", {7, 0}, true);
   TurnContext ctx = context();
   ctx.mission.grid_defense = 25;
-  SolveOptions o = quick(0.05);
+  SolveOptions o = quick(0.01);
   o.grid_survival = true;
   o.max_time_s = 120;
   o.min_proven_tiers = 7;
@@ -1912,7 +1916,7 @@ TEST_CASE("solver: adaptive budget runs to the cap while the tiers are unproven"
   CHECK(r.extended);
   if (!r.proven_optimal) {
     CHECK(r.timed_out);
-    CHECK(r.stats.time_s >= 0.8);
+    CHECK(r.stats.time_s >= 0.79);  // the cap less the closing reserve (1%)
   }
   REQUIRE(r.upper_bound);
   CHECK(*r.upper_bound >= r.best.worst_case);
@@ -1921,4 +1925,124 @@ TEST_CASE("solver: adaptive budget runs to the cap while the tiers are unproven"
   const SolveResult base = solve_turn(E, board, ctx, o);
   CHECK_FALSE(base.extended);
   if (!base.proven_optimal) CHECK(base.stats.time_s < 0.8);
+}
+
+// ---- Time budget (solver.cpp "Time budget") -----------------------------------------
+
+namespace {
+
+double wall_since(std::chrono::steady_clock::time_point t) {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+}
+
+// What a solve may run past its whole budget: one enemy phase or one
+// lookahead sample, and building the result (generous for a loaded machine).
+constexpr double kBudgetSlack = 0.3;
+
+}  // namespace
+
+TEST_CASE("time budget: a lookahead solve ends by its max_time") {
+  NEED_ENGINE();
+  // A recorded board with the lookahead (32 samples per chance leaf) and
+  // grid survival at a tiny budget: the base plan's seed evaluation and the
+  // closing re-check of the returned plan used to run outside the budget
+  // (each about 0.4 s here).
+  std::string error;
+  auto rec = load_recording(std::string(ITB_FIXTURE_DIR) + "/board_m07_turn01.json", &E.data(), &error);
+  REQUIRE_MESSAGE(rec, error);
+  Board board = rec->board;
+  SolveOptions o = recorded_options(*rec, board);
+  TurnContext ctx;
+  ctx.mission = rec->mission;
+  o.lookahead = true;
+  o.lookahead_options.repair_skills = o.repair_skills;
+  o.lookahead_options.samples = 32;
+  o.grid_survival = true;
+  o.threat_tier = true;
+  o.objectives_first = true;
+  o.time_limit_s = 0.1;
+  o.max_time_s = 0.4;
+  o.min_proven_tiers = 7;
+  for (const bool adaptive : {true, false}) {
+    CAPTURE(adaptive);
+    if (!adaptive) o.min_proven_tiers = 0;  // one budget: time_limit_s
+    const double whole = adaptive ? o.max_time_s : o.time_limit_s;
+    const auto t0 = std::chrono::steady_clock::now();
+    const SolveResult r = solve_turn(E, board, ctx, o);
+    const double wall = wall_since(t0);
+    MESSAGE("lookahead solve, budget " << whole << " s: " << wall << " s (base " << r.stats.base_search_s
+                                       << " s, seed " << r.stats.seed_eval_s << " s, re-check " << r.stats.recheck_s
+                                       << " s" << std::string(r.stats.recheck_cut ? ", cut" : "") << "), "
+                                       << r.best.worst_case.describe(o.tiers()));
+    CHECK(wall <= whole + kBudgetSlack);
+    CHECK(r.stats.time_s <= wall);
+    REQUIRE(r.upper_bound);
+    CHECK(*r.upper_bound >= r.best.worst_case);
+    // The reported value is one the plan surely reaches (exact, or a lower
+    // bound where the seed evaluation ran out of time).
+    // (Unbounded, as the closing re-check used to run: its time alone.)
+    if (!r.best.contingent) {
+      const auto t1 = std::chrono::steady_clock::now();
+      const auto again = evaluate_plan(E, board, ctx, r.best.actions, o);
+      MESSAGE("an unbounded re-check: " << wall_since(t1) << " s");
+      REQUIRE(again);
+      CHECK(*again >= r.best.worst_case);
+    }
+    for (const std::string& w : r.warnings) CHECK_MESSAGE(w.rfind("re-running", 0) != 0, w);
+  }
+}
+
+TEST_CASE("time budget: with time to spare the deadlines change nothing") {
+  NEED_ENGINE();
+  // Tiny lookahead boards complete well within a time budget: the same
+  // values, plans and nodes as without one (no deadline at all), and the
+  // re-check runs to its end.
+  std::mt19937 rng(20261015);
+  for (int i = 0; i < 6; ++i) {
+    CAPTURE(i);
+    const Board b = tiny_board(rng);
+    SolveOptions o;
+    o.time_limit_s = 0;
+    o.lookahead = true;
+    o.lookahead_options.samples = 2;
+    const SolveResult ref = solve_turn(E, b, context(), o);
+    o.time_limit_s = 60;
+    o.max_time_s = 120;
+    o.min_proven_tiers = 7;
+    const SolveResult timed = solve_turn(E, b, context(), o);
+    REQUIRE(ref.proven_optimal);
+    CHECK(timed.proven_optimal);
+    CHECK(timed.best.worst_case == ref.best.worst_case);
+    CHECK(timed.best.actions.size() == ref.best.actions.size());
+    CHECK(timed.stats.nodes == ref.stats.nodes);
+    CHECK_FALSE(timed.stats.recheck_cut);
+    for (const std::string& w : timed.warnings) CHECK_MESSAGE(w.rfind("re-running", 0) != 0, w);
+  }
+}
+
+TEST_CASE("time budget: the survival cap pre-pass leaves the base time to the search") {
+  NEED_ENGINE();
+  // The two-roll board of the survival cap tests. The pre-pass is charged to
+  // max_time_s: the search after it still gets its base time (less the
+  // survey's), and stops there at the proven odds (or completes earlier).
+  int32_t m = -1;
+  Board b = two_roll_board(&m);
+  place(b, "PunchMech", {7, 7}, true);
+  place(b, "PunchMech", {7, 0}, true);
+  TurnContext ctx = context();
+  ctx.mission.grid_defense = 25;
+  SolveOptions o = quick(0.05);
+  o.grid_survival = true;
+  o.max_time_s = 120;
+  o.min_proven_tiers = 7;
+  o.survival_cap_share = 0.5;
+  const SolveResult on = solve_turn(E, b, ctx, o);
+  const SurvivalCap& c = on.survival_cap;
+  const double search_s = on.stats.time_s - c.time_s - on.stats.survey_s;
+  MESSAGE("pre-pass " << c.time_s << " s, survey " << on.stats.survey_s << " s, search after them " << search_s
+                      << " s (base time " << o.time_limit_s << " s), proven " << on.proven_optimal);
+  REQUIRE(c.ran);
+  CHECK(c.proven);
+  if (!on.proven_optimal) CHECK(search_s >= o.time_limit_s - on.stats.survey_s - 0.005);
+  CHECK(on.stats.time_s < 30);  // stopped near the base time, not at max_time_s
 }

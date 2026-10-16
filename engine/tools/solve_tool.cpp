@@ -339,6 +339,8 @@ int run_solve(const SolveToolOptions& opt) {
                     static_cast<unsigned long long>(r.stats.lookahead_hits),
                     static_cast<unsigned long long>(r.stats.prior_hits));
       }
+      std::printf("outside the searches: seed evaluation %.2fs, plan re-check %.2fs%s\n", r.stats.seed_eval_s,
+                  r.stats.recheck_s, r.stats.recheck_cut ? " (cut by the budget, skipped)" : "");
       for (const std::string& w : r.warnings) std::printf("warning: %s\n", w.c_str());
       if (row.recorded) {
         std::printf("recorded plan: %s -> %s%s\n", score_text(*row.recorded, tier_on).c_str(),
@@ -369,6 +371,9 @@ int run_solve(const SolveToolOptions& opt) {
              {"base_search_s", r.stats.base_search_s},
              {"base_proven_components", r.stats.base_proven_components},
              {"base_best_plan_s", r.stats.base_best_plan_s},
+             {"seed_eval_s", r.stats.seed_eval_s},
+             {"recheck_s", r.stats.recheck_s},
+             {"recheck_cut", r.stats.recheck_cut},
              {"same_effect_shots", r.stats.same_effect_shots},
              {"spent_turns", r.stats.spent_turns},
              {"phases_stopped", r.stats.phases_stopped},

@@ -103,6 +103,101 @@ double seconds_since(Clock::time_point t) {
   return std::chrono::duration<double>(Clock::now() - t).count();
 }
 
+// ---- Time budget ------------------------------------------------------------------
+//
+// A solve with a time budget ends by its whole budget: max_time_s with the
+// adaptive budget, else time_limit_s (whole_budget). solve_turn keeps
+// closing_reserve of it back from the searches (they stop that much early)
+// for the work after them that is not a search: the closing re-check of the
+// returned plan (search_turn) and building the result. Everything in
+// between is charged to the budget as it runs: the survey, the survival cap
+// pre-pass, the base search, the seed evaluation and the lookahead search.
+// Evaluations outside a search are bounded by a deadline: the seed
+// evaluation by the searches' end (sample values it could not run count at
+// the NextTurn floor, a lower bound), the re-check by the whole budget (it
+// is a diagnostic: cut there, it is skipped). Both run the lookahead's
+// samples only for the chance leaves whose NextTurn can still change the
+// plan's value (evaluate_plan_with), and share sample values with the
+// lookahead search (a sample is a function of its end board). Past the
+// deadline the solve only finishes what it is running: one enemy phase or
+// one lookahead sample per thread (tens of milliseconds) and the result.
+// The reserve is 1% of the whole budget, at most 2 s. The solver's caller
+// (itb_live's prediction of the plan, loading the game data) comes on top.
+constexpr double kReserveShare = 0.01;
+constexpr double kReserveMax = 2.0;
+
+bool adaptive_budget(const SolveOptions& o) {
+  return o.min_proven_tiers > 0 && o.time_limit_s > 0 && o.max_time_s > o.time_limit_s;
+}
+// 0: no time budget.
+double whole_budget(const SolveOptions& o) {
+  return adaptive_budget(o) ? o.max_time_s : std::max(0.0, o.time_limit_s);
+}
+double closing_reserve(double whole) { return std::min(kReserveMax, kReserveShare * std::max(0.0, whole)); }
+Clock::time_point deadline_after(Clock::time_point t0, double seconds) {
+  if (seconds <= 0) return Clock::time_point::max();
+  return t0 + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(seconds));
+}
+
+// ---- Next-turn sample values --------------------------------------------------------
+//
+// SolveOptions::lookahead: the values of the samples of one end board, under
+// a key of the board after the enemy phase and what the phase result adds
+// (unknown spawns, mission end). A sample is a function of these (the
+// search's shared table relies on it), so the values can be reused by
+// anything that runs that board's samples: the search, the seed evaluation
+// before it, the closing re-check.
+BoardHash next_turn_key(const Board& after, const PhaseResult& pr) {
+  BoardHash key = hash_board(after, HashMode::Search);
+  uint64_t extra = pr.mission_ended ? 0x9E3779B97F4A7C15ull : 0;
+  for (Point p : pr.emerged_unknown) extra = extra * 1099511628211ull + static_cast<uint64_t>(p.index() + 1);
+  key.lo ^= extra;
+  return key;
+}
+using SampleMap = std::unordered_map<BoardHash, std::vector<int32_t>, BoardHashOf>;
+
+// lookahead_value from the sample values in `vals` (those known, in order),
+// running the missing ones until `deadline` and appending them. Past it,
+// `exact` is cleared and the result is the tier's floor (a lower bound of
+// the value).
+int32_t sampled_next_turn(Engine& e, const Board& root, const Board& after, const PhaseResult& pr,
+                          const TurnContext& tc, const LookaheadOptions& lo, Clock::time_point deadline,
+                          std::vector<int32_t>& vals, bool& exact) {
+  const int samples = std::max(1, lo.samples);
+  int32_t acc = 0;
+  exact = true;
+  for (int k = 0; k < samples; ++k) {
+    if (static_cast<size_t>(k) >= vals.size()) {
+      if (Clock::now() >= deadline) {
+        exact = false;
+        return lookahead_floor(lo);
+      }
+      const NextTurnLoss l = lookahead_sample(e, root, after, &pr, tc, lo, k);
+      vals.push_back(next_turn_value(l));
+      if (l.mission_over) vals.resize(static_cast<size_t>(samples), 0);  // no next turn: every sample is 0
+    }
+    acc = lookahead_fold(acc, vals[static_cast<size_t>(k)], lo.sum);
+  }
+  return acc;
+}
+
+// evaluate_plan's hooks (evaluate_plan_with): the NextTurn tier of a chance
+// leaf's end board (instead of lookahead_value; `exact` cleared when only a
+// lower bound), run after the enumeration and only for the leaves the value
+// needs, and a check before each chance leaf that abandons the evaluation
+// (`gave_up`: no value).
+struct PlanEval {
+  std::function<int32_t(Engine&, const Board& root, const Board& after, const PhaseResult&, const TurnContext&,
+                        bool& exact)>
+      next_turn;
+  std::function<bool()> give_up;
+  bool gave_up = false;
+  bool exact = true;  // every NextTurn value exact
+};
+std::optional<Score> evaluate_plan_with(Engine& engine, const Board& board, const TurnContext& ctx,
+                                        const std::vector<PlayerAction>& plan, const SolveOptions& options,
+                                        std::string* refused, PlanEval* ev);
+
 // ---- Chance nodes ---------------------------------------------------------------
 //
 // Every chance hook the engine calls (TurnContext / ActionOptions) goes through
@@ -1024,10 +1119,7 @@ class Worker {
   int32_t next_turn_value_of(const Score& s, const Board& after, const PhaseResult& pr, const Score& alpha,
                              bool& cut) {
     cut = false;
-    BoardHash key = hash_board(after, HashMode::Search);
-    uint64_t extra = pr.mission_ended ? 0x9E3779B97F4A7C15ull : 0;
-    for (Point p : pr.emerged_unknown) extra = extra * 1099511628211ull + static_cast<uint64_t>(p.index() + 1);
-    key.lo ^= extra;
+    const BoardHash key = next_turn_key(after, pr);
     std::vector<int32_t> vals;
     const bool had = sh_.next_turn.get(key, vals);
     const size_t known = vals.size();
@@ -2057,19 +2149,37 @@ struct Seed {
   Score value;
   std::vector<PlayerAction> actions;
   bool contingent = false;
+  // The value is the plan's own (false: a lower bound, NextTurn at its floor
+  // where the seed evaluation ran out of time).
+  bool exact = true;
 };
+
+// Keeps the longer of two sample lists of one end board (both are prefixes
+// of the same list).
+std::vector<int32_t> longer_samples(const std::vector<int32_t>& a, const std::vector<int32_t>& b) {
+  return b.size() >= a.size() ? b : a;
+}
 
 // `prior`: tables of an earlier search whose upper bounds hold for this one
 // (Shared::prior). `keep`: receives this search's tables.
 // `survey` (grid survival): search only lines that surely keep the grid
 // (Shared::survey), and give up after `survey->first` seconds or
 // `survey->second` nodes without one. `found`: whether a plan was found.
+// `deadline`: the end of the whole budget, which bounds the closing re-check
+// of the plan (solver.cpp "Time budget"). `warm` (lookahead): sample values
+// already run (the seed evaluation), loaded into the search's table.
 SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options,
                         const Seed* seed, const Shared* prior = nullptr, std::unique_ptr<Shared>* keep = nullptr,
-                        const std::pair<double, uint64_t>* survey = nullptr, bool* found = nullptr) {
+                        const std::pair<double, uint64_t>* survey = nullptr, bool* found = nullptr,
+                        Clock::time_point deadline = Clock::time_point::max(), const SampleMap* warm = nullptr) {
   auto owned = std::make_unique<Shared>(board, ctx, options);
   Shared& sh = *owned;
   sh.prior = prior;
+  if (warm && options.lookahead) {
+    for (const auto& [key, vals] : *warm) {
+      if (!vals.empty()) sh.next_turn.put(key, vals, longer_samples);
+    }
+  }
   if (survey) {
     sh.survey = true;
     sh.floor = with_odds(kLow, kSurvivalOne);
@@ -2188,13 +2298,40 @@ SolveResult search_turn(Engine& engine, const Board& board, const TurnContext& c
   }
   // The returned plan, re-run open-loop: the same value unless it branches
   // on a chance node (then the plan is a policy, see Plan::contingent).
+  // Bounded by the deadline (a diagnostic: cut there, it is skipped); with
+  // the lookahead it takes the sample values the search ran (a sample is a
+  // function of its end board) and runs the others.
   if (!out.best.contingent && !out.best.actions.empty()) {
-    const std::optional<Score> again = evaluate_plan(engine, board, ctx, out.best.actions, options);
-    if (!again || *again != out.best.worst_case) {
-      out.warnings.push_back("re-running the plan gives " +
-                             (again ? again->describe(options.tiers()) : std::string("a refusal")));
+    const Clock::time_point t1 = Clock::now();
+    PlanEval ev;
+    ev.give_up = [deadline] { return Clock::now() >= deadline; };
+    if (options.lookahead) {
+      ev.next_turn = [&](Engine& e, const Board& root, const Board& after, const PhaseResult& pr,
+                         const TurnContext& tc, bool& exact) {
+        const BoardHash key = next_turn_key(after, pr);
+        std::vector<int32_t> vals;
+        sh.next_turn.get(key, vals);
+        const size_t known = vals.size();
+        const int32_t v = sampled_next_turn(e, root, after, pr, tc, options.lookahead_options, deadline, vals, exact);
+        if (vals.size() > known) sh.next_turn.put(key, vals, longer_samples);
+        return v;
+      };
+    }
+    const std::optional<Score> again = evaluate_plan_with(engine, board, ctx, out.best.actions, options, nullptr, &ev);
+    out.stats.recheck_s = seconds_since(t1);
+    if (ev.gave_up || !ev.exact) {
+      out.stats.recheck_cut = true;
+    } else if (!again || *again != out.best.worst_case) {
+      // A seed valued below its plan (out of time in the seed evaluation) is
+      // a lower bound: the plan's own value may be higher.
+      const bool low_seed = sh.seeded && seed && !seed->exact && again && *again >= out.best.worst_case;
+      if (!low_seed) {
+        out.warnings.push_back("re-running the plan gives " +
+                               (again ? again->describe(options.tiers()) : std::string("a refusal")));
+      }
     }
   }
+  out.stats.time_s = seconds_since(sh.start);
   return out;
 }
 
@@ -2219,6 +2356,8 @@ void add_stats(SolveStats& out, const SolveStats& in) {
   for (size_t d = 0; d < out.depth_nodes.size(); ++d) out.depth_nodes[d] += in.depth_nodes[d];
   out.sub_action_s += in.sub_action_s;
   out.enemy_phase_s += in.enemy_phase_s;
+  out.recheck_s += in.recheck_s;
+  out.recheck_cut = out.recheck_cut || in.recheck_cut;
 }
 
 // The survey's share of the budget (search_survival).
@@ -2240,33 +2379,51 @@ constexpr double kSurveyShare = 0.25;
 // share), the certificate's proofs run next, within `cap_budget` (seconds,
 // nodes; 0: no limit), and the search with the odds gets the proven ceiling
 // as its goal. A survey that found a line leaves it out (so does one that
-// ran out of its share, with survival_cap_strict).
+// ran out of its share, with survival_cap_strict). The pre-pass is charged
+// to the whole budget only: with the adaptive budget the search after it
+// keeps its base time (time_limit_s less the survey's time), and its
+// extension still ends by max_time_s; without it (one budget) both come out
+// of time_limit_s. `deadline`: search_turn's (the closing re-checks).
 SolveResult search_survival(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options,
                             std::unique_ptr<Shared>* keep = nullptr,
-                            const std::pair<double, uint64_t>* cap_budget = nullptr) {
-  if (!options.grid_survival) return search_turn(engine, board, ctx, options, nullptr, nullptr, keep);
+                            const std::pair<double, uint64_t>* cap_budget = nullptr,
+                            Clock::time_point deadline = Clock::time_point::max()) {
+  if (!options.grid_survival) {
+    return search_turn(engine, board, ctx, options, nullptr, nullptr, keep, nullptr, nullptr, deadline);
+  }
   const Clock::time_point t0 = Clock::now();
   const std::pair<double, uint64_t> survey{
       options.time_limit_s > 0 ? options.time_limit_s * kSurveyShare : 0,
       options.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(options.node_limit * kSurveyShare)) : 0};
   bool found = false;
-  SolveResult first = search_turn(engine, board, ctx, options, nullptr, nullptr, keep, &survey, &found);
+  SolveResult first = search_turn(engine, board, ctx, options, nullptr, nullptr, keep, &survey, &found, deadline);
   if (found) return first;
   SurvivalCap cap;
   if (cap_budget && (!first.timed_out || !options.survival_cap_strict)) {
-    cap = detail::prove_survival_cap(engine, board, ctx, options, cap_budget->first, cap_budget->second);
+    // Its share, and never past the whole budget.
+    double seconds = cap_budget->first;
+    if (const double whole = whole_budget(options); whole > 0) {
+      const double left = std::max(1e-3, whole - seconds_since(t0));  // > 0: a limit
+      seconds = seconds > 0 ? std::min(seconds, left) : left;
+    }
+    cap = detail::prove_survival_cap(engine, board, ctx, options, seconds, cap_budget->second);
     cap.survey_proof = !first.timed_out;
   }
   const double used = seconds_since(t0);
+  const double surveyed = std::max(0.0, used - cap.time_s);
   SolveOptions rest = options;
-  if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
+  if (options.time_limit_s > 0) {
+    rest.time_limit_s = adaptive_budget(options)
+                            ? std::max(0.01, std::min(options.time_limit_s - surveyed, options.max_time_s - used))
+                            : std::max(0.01, options.time_limit_s - used);
+  }
   if (options.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, options.max_time_s - used);
   if (options.node_limit > 0) {
     const uint64_t spent = first.stats.nodes + cap.nodes;
     rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, spent));
   }
   rest.survival_goal = std::max(options.survival_goal, cap.goal_units());
-  SolveResult out = search_turn(engine, board, ctx, rest, nullptr, nullptr, keep);
+  SolveResult out = search_turn(engine, board, ctx, rest, nullptr, nullptr, keep, nullptr, nullptr, deadline);
   add_stats(out.stats, first.stats);
   out.stats.survey_s = used - cap.time_s;
   out.stats.time_s = seconds_since(t0);
@@ -2316,58 +2473,98 @@ void finish_cap(SolveResult& out, const SurvivalCap& cap) {
 // incumbent of the lookahead search, which gets the rest of the budget
 // (with the survival cap, also what the base search saved by stopping at
 // the proven odds).
+//
+// Time budget (solver.cpp "Time budget"): the searches get the whole budget
+// less closing_reserve, the closing re-checks run until the whole budget's
+// end, and the seed evaluation between the two searches is charged to the
+// budget (the lookahead search gets what is left after it).
 SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx, const SolveOptions& options) {
-  const double share = options.lookahead_options.base_share;
-  const std::optional<std::pair<double, uint64_t>> cap = cap_budget(options);
-  if (!options.lookahead || share <= 0) {
-    SolveResult out = search_survival(engine, board, ctx, options, nullptr, cap ? &*cap : nullptr);
+  const Clock::time_point t0 = Clock::now();
+  const double whole = whole_budget(options);
+  const Clock::time_point deadline = deadline_after(t0, whole);
+  // `o`: the searches' budget, the reserve kept back.
+  SolveOptions o = options;
+  if (whole > 0) {
+    if (adaptive_budget(options)) {
+      o.max_time_s -= std::min(closing_reserve(whole), 0.5 * (options.max_time_s - options.time_limit_s));
+    } else {
+      o.time_limit_s -= closing_reserve(whole);
+    }
+  }
+  const Clock::time_point searches_end = deadline_after(t0, whole_budget(o));
+  const double share = o.lookahead_options.base_share;
+  const std::optional<std::pair<double, uint64_t>> cap = cap_budget(o);
+  if (!o.lookahead || share <= 0) {
+    SolveResult out = search_survival(engine, board, ctx, o, nullptr, cap ? &*cap : nullptr, deadline);
     if (out.survival_cap.ran) finish_cap(out, out.survival_cap);
     return out;
   }
-  const Clock::time_point t0 = Clock::now();
-  SolveOptions base = options;
+  SolveOptions base = o;
   base.lookahead = false;
   base.max_time_s = 0;
   base.min_proven_tiers = 0;
-  base.time_limit_s = options.time_limit_s > 0 ? options.time_limit_s * share : 0;
+  base.time_limit_s = o.time_limit_s > 0 ? o.time_limit_s * share : 0;
   // The tiers above NextTurn come first: while they are unproven the base
   // search may go on (adaptive budget) up to LookaheadOptions::base_max_share
   // of the whole budget (max_time_s, else time_limit_s).
   if (base.time_limit_s > 0) {
-    const double whole = options.max_time_s > options.time_limit_s ? options.max_time_s : options.time_limit_s;
-    const double cap = whole * std::max(share, options.lookahead_options.base_max_share);
+    const double all = o.max_time_s > o.time_limit_s ? o.max_time_s : o.time_limit_s;
+    const double cap = all * std::max(share, o.lookahead_options.base_max_share);
     if (cap > base.time_limit_s) {
       base.max_time_s = cap;
       base.min_proven_tiers = 4;  // grid, buildings, mechs, stars: the tiers above NextTurn
     }
   }
-  base.node_limit = options.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(options.node_limit * share)) : 0;
+  base.node_limit = o.node_limit > 0 ? std::max<uint64_t>(1, static_cast<uint64_t>(o.node_limit * share)) : 0;
   std::unique_ptr<Shared> base_tables;
-  const SolveResult first = search_survival(engine, board, ctx, base, &base_tables, cap ? &*cap : nullptr);
+  const SolveResult first = search_survival(engine, board, ctx, base, &base_tables, cap ? &*cap : nullptr, deadline);
+  const double base_s = seconds_since(t0);
+  // The seed: the base plan scored with the lookahead (open-loop, a value it
+  // surely reaches). It is charged to the budget, and bounded: sample values
+  // it has no time for by the searches' end count at the NextTurn floor, and
+  // if its enemy phases alone run past the whole budget, the base search's
+  // value with NextTurn at the floor seeds instead. Both are lower bounds of
+  // the plan's value (NextTurn only ever falls from 0, the base search's
+  // value of it, to the floor), so the seed stays sound (Seed::exact false).
+  // Its sample values go to the lookahead search's table. (An empty plan, the
+  // base search having found nothing, is ending the turn at once: a plan too.)
+  SampleMap samples;
+  PlanEval ev;
+  ev.give_up = [deadline] { return Clock::now() >= deadline; };
+  ev.next_turn = [&](Engine& e, const Board& root, const Board& after, const PhaseResult& pr, const TurnContext& tc,
+                     bool& exact) {
+    return sampled_next_turn(e, root, after, pr, tc, o.lookahead_options, searches_end, samples[next_turn_key(after, pr)],
+                             exact);
+  };
+  std::optional<Seed> seed;
+  if (std::optional<Score> v = evaluate_plan_with(engine, board, ctx, first.best.actions, o, nullptr, &ev)) {
+    seed = Seed{*v, first.best.actions, first.best.contingent, ev.exact};
+  } else if (ev.gave_up && first.upper_bound) {
+    Score v = first.best.worst_case;
+    v[ScoreKey::NextTurn] = lookahead_floor(o.lookahead_options);
+    seed = Seed{v, first.best.actions, first.best.contingent, false};
+  }
+  const double seed_s = seconds_since(t0) - base_s;
   const double used = seconds_since(t0);
-  SolveOptions rest = options;
+  SolveOptions rest = o;
   // The survival cap's goal stops the base search only (search_survival):
   // the lookahead search refines the tiers below the odds, so it keeps its
   // own adaptive budget (its first tiers proven by the root's bound, else
   // max_time_s). Its seed is at the base plan's odds, so they stay at the
   // ceiling and finish_cap still reports them proven.
-  if (options.time_limit_s > 0) rest.time_limit_s = std::max(0.01, options.time_limit_s - used);
-  if (options.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, options.max_time_s - used);
-  if (options.node_limit > 0) rest.node_limit = std::max<uint64_t>(1, options.node_limit - std::min(options.node_limit - 1, first.stats.nodes));
-  std::optional<Seed> seed;
-  // (An empty plan, the base search having found nothing, is ending the
-  // turn at once: a plan too.)
-  if (std::optional<Score> v = evaluate_plan(engine, board, ctx, first.best.actions, options)) {
-    seed = Seed{*v, first.best.actions, first.best.contingent};
-  }
-  SolveResult out = search_turn(engine, board, ctx, rest, seed ? &*seed : nullptr, base_tables.get());
+  if (o.time_limit_s > 0) rest.time_limit_s = std::max(0.01, o.time_limit_s - used);
+  if (o.max_time_s > 0) rest.max_time_s = std::max(rest.time_limit_s + 0.01, o.max_time_s - used);
+  if (o.node_limit > 0) rest.node_limit = std::max<uint64_t>(1, o.node_limit - std::min(o.node_limit - 1, first.stats.nodes));
+  SolveResult out =
+      search_turn(engine, board, ctx, rest, seed ? &*seed : nullptr, base_tables.get(), nullptr, nullptr, nullptr, deadline, &samples);
   base_tables.reset();
   // Both searches' work and time.
   add_stats(out.stats, first.stats);
   out.stats.first_plan_s = first.stats.first_plan_s;
   out.stats.best_plan_s += used;
   out.stats.time_s = seconds_since(t0);
-  out.stats.base_search_s = used;
+  out.stats.base_search_s = base_s;
+  out.stats.seed_eval_s = seed_s;
   out.stats.base_proven_components = first.proven_components;
   out.stats.base_best_plan_s = first.stats.best_plan_s;
   out.stats.survey_s = first.stats.survey_s;
@@ -2459,11 +2656,9 @@ Score plan_value(const std::vector<PlanRun>& runs, const std::vector<size_t>& id
   return with_odds(cls, odds);
 }
 
-}  // namespace
-
-std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const TurnContext& ctx,
-                                   const std::vector<PlayerAction>& plan, const SolveOptions& options,
-                                   std::string* refused) {
+std::optional<Score> evaluate_plan_with(Engine& engine, const Board& board, const TurnContext& ctx,
+                                        const std::vector<PlayerAction>& plan, const SolveOptions& options,
+                                        std::string* refused, PlanEval* ev) {
   ChanceDriver d(board.grid_defense, options.extra_death_seeds);
   TurnContext tc = ctx;
   tc.events = nullptr;
@@ -2476,12 +2671,28 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
   uint64_t extra = 0;
   // Grid survival: every run, its chance calls tagged by sub-action.
   std::vector<PlanRun> runs;
+  // Every run's score, and with the hooks' NextTurn (`lazy`) the end boards
+  // whose NextTurn is still to run (after the enumeration, only as far as
+  // the value needs them).
+  std::vector<Score> scores;
+  struct Later {
+    size_t run;
+    Board after;
+    PhaseResult pr;
+    bool done = false;
+  };
+  std::vector<Later> later;
+  const bool lazy = options.lookahead && ev && ev->next_turn;
   std::vector<int> tags;  // the sub-action of each player call of this run
   auto tag = [&](int sub) {
     while (tags.size() < d.calls().size()) tags.push_back(sub);
   };
   auto ok = [](const ActionResult& r) { return r.ok() || r.status == ActionStatus::NoEffect; };
   enumerate_chance(d, options.max_chance_leaves, extra, [&] {
+    if (ev && ev->give_up && ev->give_up()) {
+      ev->gave_up = true;
+      return false;
+    }
     tags.clear();
     Board b = board;
     for (size_t i = 0; i < plan.size(); ++i) {
@@ -2520,9 +2731,12 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
     const PhaseResult pr = engine.end_turn(b, tc);
     d.mark_random(pr.chances);
     Score s = score_turn(board, b, &tc, &pr, options.score_options());
-    if (options.lookahead) {
+    if (lazy) {
+      later.push_back(Later{scores.size(), b, pr});  // NextTurn below, at its cap (0) until then
+    } else if (options.lookahead) {
       s[ScoreKey::NextTurn] = lookahead_value(engine, board, b, &pr, tc, options.lookahead_options);
     }
+    scores.push_back(s);
     worst = std::min(worst, s);
     if (options.grid_survival) {
       const std::vector<ChanceCall>& calls = d.calls();
@@ -2534,13 +2748,61 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
     }
     return true;
   });
-  if (bad) return std::nullopt;
+  if (bad || (ev && ev->gave_up)) return std::nullopt;
+  if (!later.empty()) {
+    // The plan's value from its runs' scores (min, or with grid survival the
+    // fold over the chance tree): monotone in every run's score, and which
+    // runs count depends on the odds alone, never on NextTurn. So with the
+    // NextTurn of the runs not run yet at its floor and at its cap (0) the
+    // value lies between the two; once they meet it is exact, and the other
+    // runs' samples are not needed. Runs are taken in increasing order of
+    // their score (NextTurn at the cap), the likeliest minimum first.
+    const double p = resist_chance(board, ctx);
+    std::vector<size_t> ids(scores.size());
+    for (size_t i = 0; i < ids.size(); ++i) ids[i] = i;
+    const int32_t floor = lookahead_floor(options.lookahead_options);
+    auto value_at = [&](int32_t fill) {
+      std::vector<Score> sc = scores;
+      for (const Later& l : later) {
+        if (!l.done) sc[l.run][ScoreKey::NextTurn] = fill;
+      }
+      if (options.grid_survival) {
+        for (size_t i = 0; i < runs.size(); ++i) runs[i].s = sc[i];
+        return plan_value(runs, ids, 0, p);
+      }
+      Score w = kHigh;
+      for (const Score& v : sc) w = std::min(w, v);
+      return w;
+    };
+    std::stable_sort(later.begin(), later.end(),
+                     [&](const Later& x, const Later& y) { return scores[x.run] < scores[y.run]; });
+    for (Later& l : later) {
+      if (value_at(floor) == value_at(0)) break;
+      bool exact = true;
+      scores[l.run][ScoreKey::NextTurn] = ev->next_turn(engine, board, l.after, l.pr, tc, exact);
+      l.done = true;
+      if (!exact) {
+        // Out of time: this run and the rest at the floor (a lower bound).
+        ev->exact = false;
+        break;
+      }
+    }
+    return value_at(floor);
+  }
   if (options.grid_survival && !runs.empty()) {
     std::vector<size_t> ids(runs.size());
     for (size_t i = 0; i < ids.size(); ++i) ids[i] = i;
     worst = plan_value(runs, ids, 0, resist_chance(board, ctx));
   }
   return worst;
+}
+
+}  // namespace
+
+std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const TurnContext& ctx,
+                                   const std::vector<PlayerAction>& plan, const SolveOptions& options,
+                                   std::string* refused) {
+  return evaluate_plan_with(engine, board, ctx, plan, options, refused, nullptr);
 }
 
 std::string describe_action(const Board& board, const PlayerAction& a) {

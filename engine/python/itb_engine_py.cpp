@@ -473,7 +473,10 @@ json stats_json(const SolveStats& s) {
               {"first_plan_s", s.first_plan_s},
               {"best_plan_s", s.best_plan_s},
               {"base_search_s", s.base_search_s},
-              {"base_proven_components", s.base_proven_components}};
+              {"base_proven_components", s.base_proven_components},
+              {"seed_eval_s", s.seed_eval_s},
+              {"recheck_s", s.recheck_s},
+              {"recheck_cut", s.recheck_cut}};
 }
 
 class PyEngine {

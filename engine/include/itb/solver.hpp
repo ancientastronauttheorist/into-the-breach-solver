@@ -77,6 +77,9 @@ struct SolveOptions {
   // proving only those tiers (a plan that merely ties the best plan on them
   // is cut), until they are proven or max_time_s. See solver.cpp "Adaptive
   // budget".
+  // The whole solve, its phases outside the searches included, ends by
+  // max_time_s with the adaptive budget, else by time_limit_s (solver.cpp
+  // "Time budget": the searches keep 1%, at most 2 s, for the closing work).
   int min_proven_tiers = 0;
   double max_time_s = 0;
   // Score the next-turn threat tier (ScoreOptions::threat_tier, threat.hpp),
@@ -250,6 +253,14 @@ struct SolveStats {
   // SolveOptions::grid_survival: the time of a survey that found no line
   // surely keeping the grid (solver.cpp search_survival), 0 if it found one.
   double survey_s = 0;
+  // Work outside the searches (solver.cpp "Time budget"), included in
+  // time_s: the seed evaluation of the lookahead search (the base plan
+  // scored with the lookahead), and the closing re-checks of the returned
+  // plans (evaluate_plan, a diagnostic); `recheck_cut`: one ran out of the
+  // whole budget and was skipped.
+  double seed_eval_s = 0;
+  double recheck_s = 0;
+  bool recheck_cut = false;
   // Profile (summed over threads): end-of-turn evaluations computed (not
   // from the memo), children generated at expanded nodes, thread time in
   // generating children and in ordering them, nodes expanded per depth
