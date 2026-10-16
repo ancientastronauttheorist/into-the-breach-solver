@@ -315,7 +315,8 @@ class FakeBridge:
             u = unit(self.state, uid)
             listed = u.get("weapons_exact") or u.get("weapons") or []
             weapon = listed[slot] if slot < len(listed) else ""
-            self.next_spawn_uid += 1
+            if weapon.startswith("DeploySkill_"):
+                self.next_spawn_uid += 1
             apply(self.state, {"sub": "weapon", "uid": uid, "weapon": weapon, "target": [x, y]}, self.damage,
                   spawn_uid=self.next_spawn_uid)
             return f"OK ATTACK {uid} slot={slot} at {x},{y} [FireWeapon]"
@@ -613,6 +614,60 @@ class LivePlayTest(unittest.TestCase):
         # the live uid.
         manifest = json.loads((self.run_dir() / "manifest.json").read_text())
         self.assertIn('"7511": "MA"', json.dumps(manifest.get("unit_actions")))
+
+    def test_two_deployed_tanks_whose_uids_collide_are_each_commanded_by_their_own(self):
+        # Live 2026-10-16 (Mission_Civilians): two tanks dropped in one turn,
+        # the game's counter one ahead of the engine's. The engine numbers
+        # them 101 and 102, the game 102 and 103: the engine's second tank
+        # has the game's uid of the first. Each goes out under its own live
+        # uid, never the engine's raw 102.
+        st = base_state()
+        for uid, first in ((0, "Prime_Punchmech_B"), (1, "Brute_Tankmech")):
+            mech = unit(st, uid)
+            mech["weapons_exact"] = [first, "DeploySkill_Tank"]
+            mech["weapon_slots"] = [{"slot": 0, "id": first},
+                                    {"slot": 1, "id": "DeploySkill_Tank", "limited": 1, "uses": 1,
+                                     "uses_saved": 1}]
+        self.bridge(st)
+        self.fb.next_spawn_uid = 101
+        shot = {"sub": "weapon", "weapon": "Deploy_TankShot", "target2": None}
+        plan = [
+            {"sub": "weapon", "uid": 1, "weapon": "DeploySkill_Tank", "target": [6, 3], "target2": None, "action": 0},
+            dict(shot, uid=101, target=[3, 3], action=1),
+            {"sub": "weapon", "uid": 0, "weapon": "DeploySkill_Tank", "target": [6, 4], "target2": None, "action": 2},
+            {"sub": "move", "uid": 102, "to": [4, 4], "action": 3},
+            dict(shot, uid=102, target=[3, 3], action=3),
+        ]
+        eng = FakeEngine(plan=plan)
+        self.assertEqual(self.run_cmd(["turn"], eng), 0)
+        self.assertEqual(self.acting(), ["ATTACK 1 1 6 3", "ATTACK 102 0 3 3", "ATTACK 0 1 6 4",
+                                         "MOVE_NATIVE 103 4 4", "ATTACK 103 0 3 3"])
+        self.assertEqual(len(eng.solves), 1)  # every step matched: no re-solve
+        first, second = unit(self.fb.state, 102), unit(self.fb.state, 103)
+        self.assertEqual((first["x"], first["y"], first["active"]), (6, 3, False))
+        self.assertEqual((second["x"], second["y"], second["active"]), (4, 4, False))
+        self.assertEqual(unit(self.fb.state, 100)["hp"], 1)
+        manifest = json.dumps(json.loads((self.run_dir() / "manifest.json").read_text()).get("unit_actions"))
+        self.assertIn('"102": "A"', manifest)
+        self.assertIn('"103": "MA"', manifest)
+
+    def test_a_created_units_step_without_a_live_match_is_never_sent_raw(self):
+        # The plan commands a uid that is neither on the turn-start board
+        # nor matched to a unit the game created this turn: it is never
+        # sent raw; the driver re-solves instead.
+        class GhostEngine(FakeEngine):
+            def _simulate(self, st, steps):
+                out = super()._simulate(st, [s for s in steps if s["uid"] != 555])
+                ghost = [dict(s, board=out["start"]) for s in steps if s["uid"] == 555]
+                out["steps"] = ghost + out["steps"]
+                return out
+
+        self.bridge()
+        plan = [{"sub": "move", "uid": 555, "to": [4, 4], "action": 0}] + PLAN
+        eng = GhostEngine(plan=plan)
+        self.assertNotEqual(self.run_cmd(["turn", "--max-resolves", "1"], eng), 0)
+        self.assertFalse(any(" 555 " in f" {c} " for c in self.acting()))
+        self.assertEqual(len(eng.solves), 2)
 
     def test_a_deployed_tank_is_a_known_unit_next_turn(self):
         # The next turn the tank is on the board under the game's uid like
@@ -2068,8 +2123,25 @@ class DiffBoardsTest(unittest.TestCase):
         got = self.board([self.unit(1, "BomblingMech", 0, 5, 3, team=1, mech=True),
                           self.unit(2320, "DeployUnit_Bomby", 5, 5, 1, team=1)])
         self.assertEqual(lp.unit_uid_map(want, got, {1}), {2317: 2320})
-        # Same uid on both sides, or no unique match: nothing to map.
-        self.assertEqual(lp.unit_uid_map(got, got, {1}), {})
+        # Same uid on both sides: mapped to itself (explicitly).
+        self.assertEqual(lp.unit_uid_map(got, got, {1}), {2320: 2320})
+        # Earlier matches stay and their live uids are taken: the engine's
+        # next unit numbered like the game's first is matched to the game's
+        # second (two tanks, the game's counter one ahead).
+        tank = lambda uid, x: self.unit(uid, "Deploy_Tank", 1, x, 2, team=1)  # noqa: E731
+        want2 = self.board([self.unit(1, "BomblingMech", 0, 5, 3, team=1, mech=True), tank(11, 3), tank(12, 6)])
+        got2 = self.board([self.unit(1, "BomblingMech", 0, 5, 3, team=1, mech=True), tank(12, 3), tank(13, 6)])
+        self.assertEqual(lp.unit_uid_map(want2, got2, {1}, {11: 12}), {11: 12, 12: 13})
+        # The same for Arachnoid Injector spiders (live 2026-10-16, turn 2:
+        # engine 15301 C2 / 15302 F6, game 15302 / 15303), whichever the
+        # engine's plan commands first.
+        spider = lambda uid, x, y: self.unit(uid, "DeployUnit_Aracnoid", 1, x, y, team=1)  # noqa: E731
+        mech = self.unit(2, "ScorpioMech", 3, 6, 6, team=1, mech=True)
+        want3 = self.board([mech, spider(15301, 6, 3), spider(15302, 3, 6)])
+        got3 = self.board([mech, spider(15302, 6, 3), spider(15303, 3, 6)])
+        m = lp.unit_uid_map(self.board([mech, spider(15301, 6, 3)]), self.board([mech, spider(15302, 6, 3)]), {2})
+        self.assertEqual(lp.unit_uid_map(want3, got3, {2}, m), {15301: 15302, 15302: 15303})
+        # No unique match: nothing to map.
         got["units"][1]["x"] = 4
         self.assertEqual(lp.unit_uid_map(want, got, {1}), {})
 

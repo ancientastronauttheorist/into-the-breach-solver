@@ -680,8 +680,14 @@ bomb created that turn moved and acted, every step matching the game.
   `weapon_slots` (the save has no record of it until the next turn); the
   game numbers it itself. `live_play.py turn` matches it after the deploy
   step by type and tile (`unit_uid_map`) and sends the tank's `MOVE_NATIVE`
-  and `ATTACK` under the game's uid (slot from `weapons`). From the next
-  turn on it is an ordinary unit of the board. No bridge change was needed.
+  and `ATTACK` under the game's uid (slot from `weapons`). The map is
+  explicit and one to one for every unit created that turn: earlier matches
+  keep their live uids, equal numbers map to themselves, and a created
+  unit's step is never sent under the engine's raw uid (re-solve if it has
+  no match). The two counters drift apart, so the engine's second unit can
+  carry the game's uid of the first (live 2026-10-16: two tanks, then two
+  spiders, refused moves). From the next turn on it is an ordinary unit of
+  the board. No bridge change was needed.
 - Tests: `test_deployables.cpp` (every upgrade's unit, the drop area and the
   one use, acting the turn it lands, each tank's shot, score, Vek targeting,
   the solver dropping a tank and firing it, keeping it alive),
