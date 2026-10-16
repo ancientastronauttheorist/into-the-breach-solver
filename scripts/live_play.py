@@ -3,7 +3,9 @@
 
 Nothing runs on import; every command checks the bridge first (fresh
 heartbeat, a readable state, `bridge_ext_disabled` unset) and refuses to act
-otherwise.
+otherwise. The commands that act (turn, end-turn, mission, deploy, restore;
+not --dry-run) hold the driver lock (<bridge dir>/itb_driver.lock), which
+scripts/fuzz_play.py holds too, and refuse while another holder runs.
 
     python3 scripts/live_play.py status
     python3 scripts/live_play.py deploy [--tiles C5,D6,E5] [--dry-run]
@@ -408,6 +410,53 @@ def preflight(bridge: Bridge, args) -> dict:
     return state
 
 
+# ------------------------------------------------------------------ driver lock
+#
+# One driver at a time: every command that acts on the game (turn, end-turn,
+# mission, deploy, restore; not --dry-run) and scripts/fuzz_play.py hold an
+# exclusive flock on <bridge dir>/itb_driver.lock while they run, so live play
+# and fuzzing never interleave. The kernel drops the lock when the holder
+# exits, however it exits; the file names the holder for the refusal.
+
+def driver_lock_path() -> Path:
+    return lv.BRIDGE / "itb_driver.lock"
+
+
+class DriverLock:
+    def __init__(self, who: str):
+        self.who = who
+        self.fh = None
+
+    def acquire(self) -> "DriverLock":
+        import fcntl
+        path = driver_lock_path()
+        fh = open(path, "a+")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.seek(0)
+            holder = fh.read().strip() or "unknown"
+            fh.close()
+            raise Refused(f"another driver is acting on the game ({path}: {holder})")
+        fh.seek(0)
+        fh.truncate()
+        fh.write(json.dumps({"pid": os.getpid(), "who": self.who, "since": now_iso()}))
+        fh.flush()
+        self.fh = fh
+        return self
+
+    def release(self) -> None:
+        if self.fh is not None:
+            import fcntl
+            try:
+                self.fh.seek(0)
+                self.fh.truncate()
+                fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
+            finally:
+                self.fh.close()
+                self.fh = None
+
+
 # ------------------------------------------------------------------ engine
 
 class Engine:
@@ -506,6 +555,11 @@ class Engine:
 
     def board(self, path: Path) -> dict:
         return self.request({"cmd": "board", "state": str(path)})["board"]
+
+    def actions(self, path: Path, plan: list, effects: bool = True) -> dict:
+        """Every sub-action the engine accepts after the plan prefix
+        (itb_live "actions"; scripts/fuzz_play.py)."""
+        return self.request({"cmd": "actions", "state": str(path), "plan": plan, "effects": effects})
 
     def deploy(self, path: Path, time_limit: float, always: list | None = None, ranking: dict | None = None) -> dict:
         """The engine's deployment search (itb_live deploy) on a state with
@@ -1720,6 +1774,37 @@ def load_plan(path: str) -> list:
     return plan
 
 
+def play_step(ctx, step: dict, state: dict, known: set, n: int, tracked: dict, under: dict, history: dict,
+              moved: set, text: str) -> tuple:
+    """Executes one predicted step (its uid already the live one) and
+    compares the settled board with the step's predicted board. Updates and
+    saves what the run carries: each unit's moves and actions (`history`,
+    `moved`), the engine's queued shots (`tracked`), Burrowers underground
+    (`under`) and confirmed structure shields. Returns (state, state path,
+    live compact board, differences, shields). Shared by `turn` and
+    scripts/fuzz_play.py."""
+    bridge, engine, run = ctx.bridge, ctx.engine, ctx.run
+    execute_step(bridge, step, state, ctx.loadout, None if getattr(ctx.args, "no_click", False) else ctx.click)
+    if step["sub"] == "move":
+        moved.add(step["uid"])
+    history[step["uid"]] = history.get(step["uid"], "") + ("M" if step["sub"] == "move" else "A")
+    run.save_unit_actions(state, history)
+    # Bodies of the units it killed gone first (BODY_WAIT): the next action
+    # would push them.
+    state = bridge.settled_state(before=state)
+    path = run.save_state(state, f"step{n}")
+    live = engine.board(path)
+    diffs, _ = diff_boards(step["board"], live, known)
+    track_queued(tracked, step["board"], live, known)
+    run.save_engine_queued(state, tracked)
+    track_underground(under, step["board"], live, known)
+    run.save_engine_underground(state, under)
+    shields = confirmed_shields(step["board"], live)
+    run.save_engine_shields(state, shields)
+    run.event("step", {"step": text, "state": path.name, "diffs": diffs})
+    return state, path, live, diffs, shields
+
+
 def play_turn(ctx) -> list:
     """One player turn. Returns the anomalies (empty: every step matched)."""
     bridge, engine, run, args = ctx.bridge, ctx.engine, ctx.run, ctx.args
@@ -1842,26 +1927,9 @@ def play_turn(ctx) -> list:
                 blocked = ui_blocked(state, step["uid"])
                 if blocked:
                     raise Anomaly(f"{text}: the unit is {blocked}; the game's UI allows no weapon or Repair there")
-            execute_step(bridge, step, state, ctx.loadout,
-                         None if getattr(ctx.args, "no_click", False) else ctx.click)
-            if step["sub"] == "move":
-                moved.add(step["uid"])
-            history[step["uid"]] = history.get(step["uid"], "") + ("M" if step["sub"] == "move" else "A")
-            run.save_unit_actions(state, history)
             executed.append((plan_id, step))
-            # Bodies of the units it killed gone first (BODY_WAIT): the
-            # next action would push them.
-            state = bridge.settled_state(before=state)
-            path = run.save_state(state, f"step{len(executed)}")
-            live = engine.board(path)
-            diffs, _ = diff_boards(step["board"], live, known)
-            track_queued(tracked, step["board"], live, known)
-            run.save_engine_queued(state, tracked)
-            track_underground(under, step["board"], live, known)
-            run.save_engine_underground(state, under)
-            shields = confirmed_shields(step["board"], live)
-            run.save_engine_shields(state, shields)
-            run.event("step", {"step": text, "state": path.name, "diffs": diffs})
+            state, path, live, diffs, shields = play_step(ctx, step, state, known, len(executed), tracked, under,
+                                                          history, moved, text)
             if not diffs:
                 uid_map = unit_uid_map(step["board"], live, known, uid_map)
                 for u in live["units"]:
@@ -2511,6 +2579,8 @@ class Context:
 
 COMMANDS = {"turn": play_turn, "end-turn": end_turn, "mission": mission, "deploy": deploy, "status": status,
             "restore": restore}
+# The commands that act on the game: they hold the driver lock (DriverLock).
+ACTING = ("turn", "end-turn", "mission", "deploy", "restore")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2621,7 +2691,10 @@ def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
     ctx = Context(args, bridge=bridge, engine=engine, run=run, click=click)
     if ctx.engine is None and args.command in ("turn", "end-turn", "mission"):
         ctx.engine = Engine(args.threads, args.game, run.path / "itb_live.log")
+    lock = None
     try:
+        if args.command in ACTING and not args.dry_run:
+            lock = DriverLock(f"live_play.py {args.command}").acquire()
         if run:
             run.event("command", {"argv": sys.argv[1:] if argv is None else list(argv)})
         anomalies = COMMANDS[args.command](ctx)
@@ -2635,6 +2708,8 @@ def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
             run.event("anomaly", str(e))
         return 1
     finally:
+        if lock is not None:
+            lock.release()
         if ctx.engine is not None and engine is None:
             ctx.engine.close()
 
