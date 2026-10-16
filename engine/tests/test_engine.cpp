@@ -299,6 +299,49 @@ TEST_CASE("Engine: moves run the Lua Move skill and are checked against its area
   CHECK(b3.find_pawn(m3)->alive());
 }
 
+TEST_CASE("Engine: an Adjacent_Heal pilot (Rosie Rivets) heals the player pawns next to where she stops") {
+  NEED_ENGINE();
+  // ae_pilots.lua Pilot_Caretaker: Skill = "Adjacent_Heal". weapons_base.lua
+  // Move:GetSkillEffect: after the move, SpaceDamage(-1) on each adjacent
+  // TEAM_PLAYER pawn but the mover. A heal (stage 2 P8) also clears fire
+  // and ACID, even at full HP.
+  CHECK(E.data().pilot_ability("Pilot_Caretaker") == kPilotAdjacentHeal);
+  Board b;
+  const int32_t rosie = place(b, "PunchMech", {2, 7}, true);
+  const int32_t burning = place(b, "PunchMech", {1, 5}, true);
+  const int32_t full = place(b, "PunchMech", {3, 5}, true);
+  const int32_t diagonal = place(b, "PunchMech", {1, 4}, true);
+  const int32_t vek = place(b, "Scorpion1", {2, 4});
+  b.find_pawn(rosie)->pilot_abilities = E.data().pilot_ability("Pilot_Caretaker");
+  for (int32_t uid : {rosie, burning, full, diagonal}) b.find_pawn(uid)->active = true;
+  b.find_pawn(rosie)->hp = 1;
+  b.find_pawn(burning)->hp = 1;
+  b.find_pawn(burning)->fire = true;
+  b.find_pawn(burning)->acid = true;
+  b.find_pawn(full)->fire = true;
+  b.find_pawn(diagonal)->hp = 1;
+  b.find_pawn(diagonal)->fire = true;
+  b.find_pawn(vek)->hp = 1;
+  Board plain = b;
+  const ActionResult r = E.move(b, rosie, {2, 5});
+  REQUIRE_MESSAGE(r.ok(), to_string(r.status));
+  CHECK(b.find_pawn(rosie)->pos == Point{2, 5});
+  CHECK(b.find_pawn(rosie)->hp == 1);  // not herself
+  CHECK(b.find_pawn(burning)->hp == 2);
+  CHECK_FALSE(b.find_pawn(burning)->fire);
+  CHECK_FALSE(b.find_pawn(burning)->acid);
+  CHECK(b.find_pawn(full)->hp == 3);  // clamped at max
+  CHECK_FALSE(b.find_pawn(full)->fire);
+  CHECK(b.find_pawn(diagonal)->hp == 1);
+  CHECK(b.find_pawn(diagonal)->fire);
+  CHECK(b.find_pawn(vek)->hp == 1);  // enemy team
+  // Without the pilot the same move heals no one.
+  plain.find_pawn(rosie)->pilot_abilities = kPilotNone;
+  REQUIRE(E.move(plain, rosie, {2, 5}).ok());
+  CHECK(plain.find_pawn(burning)->hp == 1);
+  CHECK(plain.find_pawn(burning)->fire);
+}
+
 TEST_CASE("Engine: a queued Vek attack fires from the current tile") {
   NEED_ENGINE();
   Board b;

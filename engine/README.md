@@ -432,6 +432,14 @@ Done so far (build order from the decompile):
      on is settled.
    - Every first move the old bot executed in a recording is reachable here:
      `itb_inspect --moves recordings`.
+   - The `Move` skill's pawn abilities: `Pawn:IsAbility` (Lua and the native
+     port alike) reads the pilot's skill through the one name table of
+     `pilot_skill_ability`. Adjacent_Heal (Rosie Rivets, `Pilot_Caretaker`)
+     heals each adjacent player-team pawn but the mover by 1 after the move
+     (−1 damage, so like any heal it also clears fire, frozen and ACID,
+     even at full HP). It had no ability bit until live run 34 (2026-10-15,
+     Mission_Final turn 4): the game healed the TrimissileMech next to her
+     from 1 to 2 HP, the engine predicted 1.
 - **Stages 3 and 4: pushes, deaths and the SkillEffect executor**
   (`executor.hpp`, `timing.hpp`).
    - A frame-exact simulation of how the game resolves an effect: the six

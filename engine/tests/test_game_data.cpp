@@ -173,6 +173,7 @@ TEST_CASE("pilot skills come from the pilot tables") {
   CHECK(data->pilot_ability("Pilot_Arrogant") == kPilotArrogantBoost);  // AE pilot
   CHECK(data->pilot_ability("Pilot_Rock") == kPilotRockSkill);
   CHECK(data->pilot_ability("Pilot_Original") == kPilotExtraXp);
+  CHECK(data->pilot_ability("Pilot_Caretaker") == kPilotAdjacentHeal);  // AE pilot Rosie Rivets
   CHECK(data->pilot_skill("Pilot_Rust").empty());  // a recruit
   CHECK(data->pilot_ability("Pilot_Rust") == kPilotNone);
   CHECK(data->pilot_ability("no_such_pilot") == kPilotNone);

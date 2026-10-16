@@ -390,6 +390,7 @@ uint32_t pilot_skill_ability(std::string_view skill) {
       {"Youth_Move", kPilotYouthMove},     {"Arrogant_Boost", kPilotArrogantBoost},
       {"Regen", kPilotRegen},              {"Zoltan_Skill", kPilotZoltan},
       {"Extra_XP", kPilotExtraXp},         {"KO_Boost", kPilotKoBoost},
+      {"Adjacent_Heal", kPilotAdjacentHeal},
   };
   for (const auto& [name, bit] : kNames) {
     if (skill == name) return bit;

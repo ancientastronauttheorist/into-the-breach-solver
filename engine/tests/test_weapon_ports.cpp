@@ -84,6 +84,39 @@ TEST_CASE("weapon ports: switched off, every call runs in Lua") {
   CHECK_FALSE(native.effect.empty());
 }
 
+TEST_CASE("weapon ports: Move's Adjacent_Heal (Pawn:IsAbility) is the same in Lua and the port") {
+  NEED_GAME();
+  // weapons_base.lua Move:GetSkillEffect asks Pawn:IsAbility("Adjacent_Heal")
+  // (Pilot_Caretaker): SpaceDamage(-1) on each adjacent TEAM_PLAYER pawn but
+  // the mover, after the walk.
+  Board b;
+  auto add = [&](const char* type, Point p, bool mech) {
+    Pawn q = G.data->make_pawn(*G.data->pawn(type), static_cast<int32_t>(b.pawns().size()), p);
+    if (mech) {
+      q.mech = true;
+      q.team = Team::Player;
+    }
+    b.add_pawn(q);
+  };
+  add("PunchMech", {2, 7}, true);
+  add("PunchMech", {1, 5}, true);
+  add("PunchMech", {3, 5}, true);
+  add("Scorpion1", {2, 4}, false);
+  b.find_pawn(0)->pilot_abilities = G.data->pilot_ability("Pilot_Caretaker");
+  REQUIRE(b.find_pawn(0)->pilot_abilities != kPilotNone);
+  const Pawn& mover = *b.find_pawn(0);
+  H.set_native_weapons(false);
+  const LuaSkillEffect lua = H.skill_effect_raw(b, mover, "Move", {2, 7}, {2, 5});
+  H.set_native_weapons(true);
+  const LuaSkillEffect native = H.skill_effect_raw(b, mover, "Move", {2, 7}, {2, 5});
+  CHECK(lua == native);
+  std::vector<Point> healed;
+  for (const LuaSpaceDamage& sd : native.effect) {
+    if (sd.iDamage == -1) healed.push_back(sd.loc);
+  }
+  CHECK(healed == std::vector<Point>{{3, 5}, {1, 5}});  // DIR_VECTORS order: right, then left
+}
+
 TEST_CASE("weapon ports: identical to Lua on random boards") {
   NEED_GAME();
   const std::vector<std::string> weapons = ported_weapons(H);

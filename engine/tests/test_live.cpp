@@ -794,3 +794,34 @@ TEST_CASE("live: a deploy weapon's tank, the turn it lands and the turns after")
   fs::remove(spent);
   fs::remove(later);
 }
+
+TEST_CASE("live: Rosie Rivets' move heals the mech next to where she stops (live 20261015_202706 m40 t4)") {
+  NEED_SESSION();
+  // Mission_Final turn 4. HydrantMech#2 (pilot Pilot_Caretaker, skill
+  // Adjacent_Heal) moves G4 -> C6, next to TrimissileMech#1 (1 of 4 HP) and
+  // Crab2#14652 (1 HP). The game healed the mech to 2 and not the Crab; the
+  // engine used to leave the mech at 1 (the skill had no pilot ability bit).
+  const std::string start = std::string(ITB_FIXTURE_DIR) + "/live_final_t4_solve_input.json";
+  const json plan = json::array({{{"uid", 2}, {"move", {2, 5}}}});
+  const json r = S.handle({{"cmd", "predict"}, {"state", start}, {"plan", plan}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  REQUIRE(r["refused"] == -1);
+  REQUIRE(r["steps"].size() == 1);
+  const json& want = r["steps"][0]["board"];
+  const json* tri = board_unit(want, 1);
+  REQUIRE(tri);
+  CHECK((*tri)["hp"] == 2);
+  // The game's board after the move: same units, places and HP.
+  const json live =
+      S.handle({{"cmd", "board"}, {"state", std::string(ITB_FIXTURE_DIR) + "/live_final_t4_step1.json"}});
+  REQUIRE_MESSAGE(live["ok"].get<bool>(), live.dump());
+  CHECK(uids(want) == uids(live["board"]));
+  for (const json& u : live["board"]["units"]) {
+    const json* p = board_unit(want, u["uid"].get<int>());
+    REQUIRE(p);
+    INFO(u.dump());
+    CHECK((*p)["x"] == u["x"]);
+    CHECK((*p)["y"] == u["y"]);
+    CHECK((*p)["hp"] == u["hp"]);
+  }
+}

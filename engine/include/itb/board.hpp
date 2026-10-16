@@ -99,6 +99,7 @@ enum PilotAbility : uint32_t {
   kPilotZoltan = 1u << 15,          // Zoltan_Skill: shield at turn start, kept by Mission_Shields
   kPilotExtraXp = 1u << 16,         // Extra_XP (Experienced): +2 XP per XP-giving kill
   kPilotKoBoost = 1u << 17,         // KO_Boost: Boost after a kill
+  kPilotAdjacentHeal = 1u << 18,    // Adjacent_Heal (Rosie Rivets): a move heals adjacent player-team pawns 1
 };
 
 // AE pilot level-up skills, in Pilot::GetAllPilotSkills order (@0085d0c0):

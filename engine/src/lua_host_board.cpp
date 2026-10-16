@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "itb/game_data.hpp"
 #include "itb/movement.hpp"
 #include "itb/tile_rules.hpp"
 #include "lua_host_internal.hpp"
@@ -145,21 +146,12 @@ int lua_type_int(lua_State* L, const Pawn& p, const char* field, int fallback) {
   return v;
 }
 
-// Pilot skill names the engine models (pilots.lua Skill values).
+// Pawn:IsAbility(name) (Pilot::IsAbility): true when the pawn's pilot has
+// that skill. The pilot skill names the engine models are those of
+// pilot_skill_ability (game_data.cpp), one table for the loader and Lua.
 bool has_ability(const Pawn& p, const std::string& name) {
-  static const std::pair<const char*, PilotAbility> kNames[] = {
-      {"Armored", kPilotArmored},          {"Thick", kPilotThick},
-      {"Rock_Skill", kPilotRockSkill},     {"Retaliation", kPilotRetaliation},
-      {"Flying", kPilotFlying},            {"Disable_Immunity", kPilotDisableImmunity},
-      {"Freeze_Walk", kPilotFreezeWalk},   {"Pain_Immunity", kPilotPainImmunity},
-      {"Road_Runner", kPilotRoadRunner},   {"Shifty", kPilotShifty},
-      {"Post_Move", kPilotPostMove},       {"Double_Shot", kPilotDoubleShot},
-      {"Youth_Move", kPilotYouthMove},     {"Arrogant_Boost", kPilotArrogantBoost},
-  };
-  for (const auto& [n, bit] : kNames) {
-    if (name == n) return p.has_pilot(bit);
-  }
-  return false;
+  const uint32_t bit = pilot_skill_ability(name);
+  return bit != kPilotNone && p.has_pilot(static_cast<PilotAbility>(bit));
 }
 
 // ---- write recording -----------------------------------------------------------------
