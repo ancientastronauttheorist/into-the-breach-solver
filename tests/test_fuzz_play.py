@@ -1,0 +1,499 @@
+"""scripts/fuzz_play.py against the fake bridge and engine of
+tests/test_live_play.py. Nothing here touches the game or the desktop:
+clicks go to a recorder, the game process check is stubbed.
+
+    python3 -m unittest tests.test_fuzz_play
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import random
+import shutil
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+
+from tests import test_live_play as tlp  # sets ITB_BRIDGE_DIR to a temp dir first
+
+import fuzz_play as fz  # noqa: E402  (scripts/ is on sys.path via test_live_play)
+
+lp, lv = tlp.lp, tlp.lv
+fz.TITLE_SILENT = 0.2
+fz.SAVE_QUIET = 0.05
+fz.PAUSE_STALL = 0.1
+lp.CONTINUE_RETRY = 0.5
+
+
+def to_step(a: dict, i: int) -> dict:
+    """A plan action (one sub-action) as the step itb_live predicts for it."""
+    if a["kind"] == "none":
+        return {"sub": "move", "uid": a["uid"], "to": a["move"], "action": i}
+    return {"sub": a["kind"], "uid": a["uid"], "weapon": a.get("weapon"), "target": a.get("target"),
+            "target2": a.get("target2"), "action": i}
+
+
+class FuzzEngine(tlp.FakeEngine):
+    """The fake engine with itb_live's "actions": every candidate of every
+    team-1 unit, whatever it already did (the fuzzer's UI filter must sort
+    them out), with an effect the fuzzer weights. `predict` plays the plan
+    it is given. `chance` marks steps with a chance node; `grid_loss` makes
+    the named weapon cost that much grid."""
+
+    def __init__(self, candidates, chance=(), grid_loss=None, **kw):
+        super().__init__(**kw)
+        self.candidates = candidates
+        self.chance = set(chance)
+        self.grid_loss = grid_loss or {}
+        self.action_requests = []
+
+    def _play(self, st: dict, plan: list) -> dict:
+        b = copy.deepcopy(st)
+        for i, a in enumerate(plan):
+            tlp.apply(b, to_step(a, i))
+            b["grid_power"] -= self.grid_loss.get(a.get("weapon"), 0)
+        return b
+
+    def actions(self, path, plan, effects=True):
+        self.action_requests.append(list(plan))
+        b = self._play(self._state(path), plan)
+        out = []
+        for c in self.candidates:
+            u = next((v for v in b["units"] if v["uid"] == c["uid"]), None)
+            if u is None or (c["sub"] == "move" and list(c["target"]) == [u["x"], u["y"]]):
+                continue
+            a = dict(c, slot=0 if c["sub"] == "weapon" else -1, target2=None, end=c["target"])
+            a["effect"] = {"hp": {"player": 0, "enemy": 1 if c["sub"] == "weapon" else 0, "neutral": 0},
+                           "kills": {}, "grid": self.grid_loss.get(c.get("weapon"), 0)}
+            out.append(a)
+        return {"ok": True, "refused": -1, "board": self._board(b), "actions": out, "rejected": {"no effect": 1}}
+
+    def predict(self, path, plan):
+        self.predicts.append(plan)
+        st = self._state(path)
+        self.predict_states.append(st)
+        steps = [to_step(a, i) for i, a in enumerate(plan)]
+        out = self._simulate(st, steps)
+        b = self._play(st, plan)
+        for s, a in zip(out["steps"], plan):
+            if a.get("weapon") in self.chance:
+                s["chance_nodes"] = 1
+        out["after_enemy"]["grid_power"] = b["grid_power"]
+        for k, s in enumerate(out["steps"]):
+            s["board"]["grid_power"] = self._play(st, plan[:k + 1])["grid_power"]
+        return out
+
+
+CANDIDATES = [
+    {"sub": "move", "uid": 0, "weapon": "Move", "target": [3, 4], "target_kind": "road"},
+    {"sub": "weapon", "uid": 0, "weapon": "Prime_Lasermech_A", "target": [3, 3], "target_kind": "unit_enemy"},
+    {"sub": "repair", "uid": 0, "weapon": "Skill_Repair", "target": [6, 6], "target_kind": "unit_player"},
+    {"sub": "weapon", "uid": 1, "weapon": "Brute_Tankmech", "target": [3, 3], "target_kind": "unit_enemy"},
+]
+
+
+def args_for(extra=()) -> object:
+    return fz.build_parser().parse_args(["--seed", "3", "--stop-prob", "0", *extra])
+
+
+class FuzzTest(unittest.TestCase):
+    def setUp(self):
+        # test_live_play's tearDownModule removes the fake bridge directory
+        # when both modules run in one process.
+        lv.BRIDGE.mkdir(parents=True, exist_ok=True)
+        self.tmp = Path(tempfile.mkdtemp(prefix="itb_fuzz_play_"))
+        self._roots = (lp.LIVE_ROOT, lp.CURRENT, lp.PROFILE, lp.RESTORE_BACKUPS, lp.game_running)
+        lp.LIVE_ROOT = self.tmp / "live"
+        lp.CURRENT = self.tmp / "current.json"
+        lp.PROFILE = self.tmp / "profile_Alpha"
+        lp.RESTORE_BACKUPS = self.tmp / "restore_backups"
+        lp.game_running = lambda: True
+        self.fb = None
+        self.clicks = []
+
+    def tearDown(self):
+        if self.fb:
+            self.fb.close()
+        lp.LIVE_ROOT, lp.CURRENT, lp.PROFILE, lp.RESTORE_BACKUPS, lp.game_running = self._roots
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ------------------------------------------------------------ recordings
+
+    def record(self, run="20261016_000000", mission=0, turn=1, state=None, save=True) -> Path:
+        d = lp.LIVE_ROOT / run
+        d.mkdir(parents=True, exist_ok=True)
+        st = state or tlp.base_state()
+        st["turn"] = turn
+        p = d / f"m{mission:02d}_turn_{turn:02d}_solve_input.json"
+        p.write_text(json.dumps({"run_id": run, "label": "solve_input", "data": {"bridge_state": st}}))
+        if save:
+            (d / f"m{mission:02d}_turn_{turn:02d}_saveData.lua").write_text(f"-- checkpoint {mission} {turn}")
+            (d / f"m{mission:02d}_turn_{turn:02d}_undoSave.lua").write_text(f"-- undo {mission} {turn}")
+        return p
+
+    def test_finds_recorded_turn_starts_and_their_checkpoints(self):
+        self.record(turn=1)
+        self.record(turn=2, save=False)
+        self.record(run="20261016_111111", mission=3, turn=2)
+        starts = fz.find_turn_starts(lp.LIVE_ROOT)
+        self.assertEqual([s.key for s in starts], ["20261016_000000/m00/t01", "20261016_000000/m00/t02",
+                                                   "20261016_111111/m03/t02"])
+        self.assertIsNone(starts[1].save)
+        with_saves = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+        self.assertEqual(len(with_saves), 2)
+        self.assertEqual(len(fz.find_turn_starts(lp.LIVE_ROOT, runs=["20261016_111111"])), 1)
+
+    def test_last_turns_are_left_out_unless_asked(self):
+        st = tlp.base_state()
+        st["turn"], st["total_turns"] = 5, 5
+        self.assertTrue(fz.playable(st))
+        self.assertFalse(fz.playable(st, last_turns=False))
+        st["turn"] = 4
+        self.assertTrue(fz.playable(st, last_turns=False))
+
+    def test_recorded_carry(self):
+        st = tlp.base_state()
+        st["units"].append({"uid": 300, "type": "Burrower1", "x": 1, "y": 1, "hp": 2, "max_hp": 3, "team": 6,
+                            "underground": True})
+        st["reactivation_visible_list"] = [100]
+        carry = fz.recorded_carry(st, {"patches": {"tile_shields": [[2, 2]]}})
+        self.assertEqual(sorted(carry.underground), [300])
+        self.assertEqual(carry.shields, [[2, 2]])
+        self.assertEqual(carry.reactivation, [100])
+
+    # ------------------------------------------------------------ choosing
+
+    def test_ui_limits_filter_the_candidates(self):
+        a_move = {"uid": 0, "sub": "move"}
+        a_shot = {"uid": 0, "sub": "weapon"}
+        self.assertTrue(fz.ui_allows(a_move, {}, {0: None}))
+        self.assertTrue(fz.ui_allows(a_shot, {0: "M"}, {0: None}))
+        self.assertFalse(fz.ui_allows(a_move, {0: "MA"}, {0: None}))
+        self.assertFalse(fz.ui_allows(a_shot, {0: "A"}, {0: None}))
+        self.assertTrue(fz.ui_allows(a_move, {0: "MA"}, {0: "Shifty"}))  # Sidestep: a move after acting
+        self.assertFalse(fz.ui_allows(a_shot, {0: "MA"}, {0: "Shifty"}))
+        self.assertTrue(fz.ui_allows(a_shot, {0: "A"}, {0: "Double_Shot"}))  # two shots without moving
+        self.assertFalse(fz.ui_allows(a_shot, {0: "MA"}, {0: "Double_Shot"}))
+        self.assertFalse(fz.ui_allows(a_move, {0: "AA"}, {0: "Double_Shot"}))
+
+    def test_an_unpowered_pilot_skill_gives_no_extra_action(self):
+        st = tlp.base_state()
+        tlp.unit(st, 0)["pilot"] = {"id": "Pilot_Miner", "power": [0, 0]}
+        self.assertIsNone(fz.unit_skills(st)[0])
+        tlp.unit(st, 0)["pilot"] = {"id": "Pilot_Miner", "power": [1, 1]}
+        self.assertEqual(fz.unit_skills(st)[0], "Double_Shot")
+
+    def test_odd_actions_weigh_more(self):
+        plain = {"uid": 0, "sub": "weapon", "weapon": "W", "target_kind": "road",
+                 "effect": {"hp": {"enemy": 1}, "kills": {}}}
+        friendly = dict(plain, target_kind="unit_player", effect={"hp": {"player": 2}, "kills": {}, "bumps": 1})
+        lua = dict(plain, effect={"hp": {"enemy": 1}, "kills": {}, "unapplied_lua_writes": 1})
+        nothing = dict(plain, effect={"hp": {}, "kills": {}})
+        self.assertGreater(fz.interest(friendly), fz.interest(plain))
+        self.assertGreater(fz.interest(lua), fz.interest(plain))
+        self.assertLess(fz.interest(nothing), fz.interest(plain))
+        self.assertIn("friendly_damage", fz.effect_tags(friendly))
+        chooser = fz.Chooser(random.Random(1))
+        for _ in range(50):
+            self.assertIn(chooser.choose([plain, friendly, lua, nothing]), [plain, friendly, lua, nothing])
+        self.assertTrue(all(chooser.weight(a) > 0 for a in (plain, friendly, lua, nothing)))
+
+    def test_generate_plays_only_what_the_ui_allows(self):
+        path = self.record()
+        eng = FuzzEngine(CANDIDATES)
+        for seed in range(20):
+            rng = random.Random(seed)
+            seq = fz.generate(eng, path, fz.Chooser(rng), rng, {}, {0: None, 1: None}, max_steps=10, stop_prob=0)
+            seqs = {}
+            for a in seq.plan:
+                seqs[a["uid"]] = seqs.get(a["uid"], "") + ("M" if a["kind"] == "none" else "A")
+            for uid, s in seqs.items():
+                self.assertTrue(lp.ui_sequence_ok(s, None), (seed, uid, s))
+            self.assertEqual(len(seq.boards), len(seq.plan) + 1)
+            # Every unit has done all it may: nothing is left to choose.
+            self.assertEqual(set(seqs), {0, 1})
+
+    def test_generate_keeps_the_grid_floor(self):
+        path = self.record()
+        eng = FuzzEngine(CANDIDATES, grid_loss={"Brute_Tankmech": 6})
+        for seed in range(10):
+            rng = random.Random(seed)
+            seq = fz.generate(eng, path, fz.Chooser(rng), rng, {}, {}, 10, 0, grid_floor=2)
+            self.assertNotIn("Brute_Tankmech", [a.get("weapon") for a in seq.plan])
+
+    def test_engine_checks_catch_a_board_the_prediction_does_not_reach(self):
+        path = self.record()
+        eng = FuzzEngine(CANDIDATES)
+        rng = random.Random(0)
+        seq = fz.generate(eng, path, fz.Chooser(rng), rng, {}, {}, 4, 0)
+        pred = eng.predict(path, seq.plan)
+        self.assertEqual(fz.engine_checks(seq, pred), [])
+        seq.boards[1] = copy.deepcopy(seq.boards[1])
+        seq.boards[1]["units"][0]["hp"] += 1
+        self.assertTrue(fz.engine_checks(seq, pred))
+        pred["refused"] = 0
+        self.assertTrue(any("refused" in p for p in fz.engine_checks(seq, pred)))
+
+    def test_dry_run_writes_samples_and_never_acts(self):
+        self.record()
+        self.record(turn=2)
+        eng = FuzzEngine(CANDIDATES)
+        out = self.tmp / "fuzz"
+        rc = fz.main(["--dry-run", "--recordings", str(lp.LIVE_ROOT), "--samples", "4", "--seed", "1",
+                      "--out", str(out)], engine=eng)
+        self.assertEqual(rc, 0)
+        sess = next(out.iterdir())
+        samples = [json.loads(line) for line in (sess / "samples.jsonl").read_text().splitlines()]
+        self.assertEqual(len(samples), 4)
+        self.assertTrue(all(s["problems"] == [] for s in samples))
+        meta = json.loads((sess / "session.json").read_text())
+        self.assertTrue(meta["dry_run"])
+        self.assertEqual(meta["samples"], 4)
+        self.assertFalse((sess / "findings.jsonl").exists())
+        self.assertFalse(lv.CMD.exists())
+
+    # ------------------------------------------------------------ safety
+
+    def test_other_drivers_are_found_but_not_ourselves_or_dry_runs(self):
+        lines = ["  1     0 /sbin/launchd",
+                 " 50     1 /bin/zsh -c python3 scripts/fuzz_play.py --samples 3",
+                 " 51    50 python3 scripts/fuzz_play.py --samples 3",
+                 " 60     1 python3 scripts/live_play.py mission --max-turns 8",
+                 " 61     1 python3 scripts/live_play.py turn --dry-run",
+                 " 62     1 /bin/bash /tmp/x/scratchpad/drive2.sh run40",
+                 " 63     1 python3 scripts/live_play.py status"]
+        found = fz.match_drivers(lines, 51)
+        self.assertEqual([f.split()[0] for f in found], ["60", "62"])
+
+    def test_the_driver_lock_keeps_live_play_out(self):
+        self.fb = tlp.FakeBridge(tlp.base_state())
+        lock = lp.DriverLock("fuzz test").acquire()
+        try:
+            with self.assertRaises(lp.Refused):
+                lp.DriverLock("other").acquire()
+            rc = lp.main(["turn", "--new-run"], engine=tlp.FakeEngine(), click=lambda xy: True)
+            self.assertEqual(rc, 2)
+            self.assertEqual([c for c in self.fb.commands if c.split()[0] not in ("SNAPSHOT", "LUA")], [])
+            # A dry run only reads: it does not need the lock.
+            self.assertEqual(lp.main(["turn", "--dry-run", "--new-run"], engine=tlp.FakeEngine()), 0)
+        finally:
+            lock.release()
+        lp.DriverLock("after").acquire().release()
+
+    def test_live_refuses_while_another_driver_runs(self):
+        self.record()
+        orig = fz.other_drivers
+        fz.other_drivers = lambda own_pid=None: ["60 python3 scripts/live_play.py mission"]
+        try:
+            rc = fz.main(["--recordings", str(lp.LIVE_ROOT), "--out", str(self.tmp / "fuzz")], engine=FuzzEngine([]))
+        finally:
+            fz.other_drivers = orig
+        self.assertEqual(rc, 2)
+        self.assertFalse((self.tmp / "fuzz").exists())
+
+    def test_clicks_mode_needs_the_main_menu_point(self):
+        self.record()
+        rc = fz.main(["--recordings", str(lp.LIVE_ROOT), "--restore-mode", "clicks"], engine=FuzzEngine([]))
+        self.assertEqual(rc, 2)
+
+    # ------------------------------------------------------------ restore inside the game
+
+    def test_restore_in_game_puts_the_checkpoint_in_and_continues(self):
+        path = self.record()
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text("-- the player's own run")
+        (lp.PROFILE / "undoSave.lua").write_text("-- the player's own undo")
+        want = json.loads(path.read_text())["data"]["bridge_state"]
+
+        class TitleBridge:  # the title screen: silent until Continue loads the save
+            def __init__(self):
+                self.live = False
+
+            def heartbeat_age(self):
+                return 0.01 if self.live else 100.0
+
+            def raw_state(self):
+                return lv.read_json(lv.STATE)
+
+            def settled_state(self, before=None):
+                return lv.read_json(lv.STATE)
+
+        tb = TitleBridge()
+        clicks = []
+
+        def click(xy):
+            clicks.append(xy)
+            if xy == lp.TITLE_CONTINUE:
+                tb.live = True
+                lv.STATE.write_text(json.dumps(want))
+            return True
+
+        args = args_for(["--at-title"])
+        sess = fz.Session(args, self.tmp / "fuzz")
+        ctx = lp.Context(args, bridge=tb, engine=None, run=None, click=click)
+        state = fz.restore_in_game(ctx, sess, ts)
+        self.assertEqual(state["turn"], 1)
+        self.assertEqual(clicks, [lp.TITLE_CONTINUE])
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- checkpoint 0 1")
+        self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- undo 0 1")
+        self.assertEqual((sess.backup / "saveData.lua").read_text(), "-- the player's own run")
+        # Back on the title screen (you confirm it), the profile's own files return.
+        tb.live = False
+        (sess.dir / "at_title").write_text("")
+        fz.put_back(ctx, sess)
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
+        self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- the player's own undo")
+
+    def test_restore_refuses_a_board_that_differs_from_the_checkpoint(self):
+        path = self.record()
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        other = json.loads(path.read_text())["data"]["bridge_state"]
+        tlp.unit(other, 100)["hp"] = 1
+
+        class B:
+            def heartbeat_age(self):
+                return 100.0
+
+            def raw_state(self):
+                return lv.read_json(lv.STATE)
+
+            def settled_state(self, before=None):
+                return lv.read_json(lv.STATE)
+
+        def click(xy):
+            lv.STATE.write_text(json.dumps(other))
+            return True
+
+        args = args_for(["--at-title"])
+        sess = fz.Session(args, self.tmp / "fuzz")
+        ctx = lp.Context(args, bridge=B(), engine=None, run=None, click=click)
+        with self.assertRaises(lp.Anomaly):
+            fz.restore_in_game(ctx, sess, ts)
+
+    def test_the_title_screen_needs_a_save_or_your_word(self):
+        class Silent:
+            def heartbeat_age(self):
+                return 100.0
+
+        sess = fz.Session(args_for(), self.tmp / "fuzz")
+        self.assertFalse(fz.wait_title(Silent(), 0.3, time.time(), sess.dir / "at_title"))
+        (sess.dir / "at_title").write_text("")
+        self.assertTrue(fz.wait_title(Silent(), 0.3, time.time(), sess.dir / "at_title"))
+        lp.PROFILE.mkdir(parents=True)
+        t0 = time.time()
+        time.sleep(0.02)
+        (lp.PROFILE / "saveData.lua").write_text("saved on the way out")
+        self.assertTrue(fz.wait_title(Silent(), 1.0, t0))
+
+    # ------------------------------------------------------------ live turns (fake bridge)
+
+    def live_session(self, eng, extra=(), next_turn=None):
+        self.record()
+        self.fb = tlp.FakeBridge(tlp.base_state())
+        if next_turn:
+            self.fb.next_turn = next_turn
+        args = args_for(["--samples", "1", *extra])
+        sess = fz.Session(args, self.tmp / "fuzz")
+        starts = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+
+        def click(xy):
+            self.clicks.append(xy)
+            if xy == lv.END_TURN_SCREEN:
+                threading.Thread(target=self.fb.advance, daemon=True).start()
+            return True
+
+        orig = fz.restore_in_game
+        fz.restore_in_game = lambda ctx, s, ts: ctx.bridge.settled_state()
+        try:
+            rc = fz.live(args, eng, sess, starts, click=click)
+        finally:
+            fz.restore_in_game = orig
+        findings = []
+        if (sess.dir / "findings.jsonl").exists():
+            findings = [json.loads(line) for line in (sess.dir / "findings.jsonl").read_text().splitlines()]
+        return rc, sess, findings
+
+    def acting(self):
+        return [c for c in self.fb.commands if c.split()[0] not in ("SNAPSHOT", "LUA", "EXEC_MODE")]
+
+    def test_a_live_turn_that_matches_ends_the_turn_and_compares(self):
+        eng = FuzzEngine(CANDIDATES)
+        rc, sess, findings = self.live_session(eng)
+        self.assertEqual(rc, 0)
+        self.assertEqual(findings, [])
+        acts = self.acting()
+        self.assertEqual(acts[-1], "END_TURN")
+        self.assertTrue(any(c.startswith("ATTACK") for c in acts))
+        self.assertIn("EXEC_MODE native", self.fb.commands)
+        self.assertEqual(sess.outcomes["matched"], 1)
+        sample = sess.dir / "s000"
+        self.assertTrue((sample / "plan.json").exists())
+        self.assertTrue(list(sample.glob("m00_turn_02_after_enemy_*.json")))
+        # The lock is free again.
+        lp.DriverLock("after").acquire().release()
+
+    def test_a_step_difference_is_a_finding_and_the_turn_is_not_ended(self):
+        eng = FuzzEngine([c for c in CANDIDATES if c["uid"] == 1])
+        orig_init = tlp.FakeBridge.__init__
+
+        def init(fb, state):
+            orig_init(fb, state)
+            fb.damage = 2  # the game hits harder than the engine predicts
+
+        tlp.FakeBridge.__init__ = init
+        try:
+            rc, sess, findings = self.live_session(eng)
+        finally:
+            tlp.FakeBridge.__init__ = orig_init
+        self.assertEqual([f["kind"] for f in findings], ["step"])
+        f = findings[0]
+        self.assertTrue(any("hp: engine 2, game 1" in d for d in f["diffs"]))
+        self.assertEqual(f["plan"][-1]["weapon"], "Brute_Tankmech")
+        self.assertTrue(Path(f["files"]["plan"]).exists())
+        self.assertIn("itb_live predict", f["replay"])
+        self.assertNotIn("END_TURN", self.acting())
+        self.assertEqual(sess.outcomes["diverged"], 1)
+
+    def test_a_difference_after_a_chance_node_resyncs_and_goes_on(self):
+        # Two shots at the Scorpion (3 HP), each with a chance node in the
+        # prediction; the game hits for 2, the engine for 1. The first shot
+        # differs (a chance finding); re-predicted from the live board (1 HP
+        # left), the second kills it in both, and the turn ends.
+        shots = [c for c in CANDIDATES if c["sub"] == "weapon"]
+        eng = FuzzEngine(shots, chance={"Prime_Lasermech_A", "Brute_Tankmech"})
+        orig_init = tlp.FakeBridge.__init__
+
+        def init(fb, state):
+            orig_init(fb, state)
+            fb.damage = 2
+
+        tlp.FakeBridge.__init__ = init
+        try:
+            rc, sess, findings = self.live_session(eng)
+        finally:
+            tlp.FakeBridge.__init__ = orig_init
+        self.assertEqual([f["kind"] for f in findings], ["chance"])
+        self.assertEqual(len(findings[0]["plan"]), 1)
+        self.assertEqual(len(eng.predicts), 3)  # the plan, the rest from the live board, End Turn
+        self.assertEqual(len(eng.predicts[1]), 1)
+        self.assertEqual(self.acting()[-1], "END_TURN")
+        self.assertEqual(sess.outcomes["resynced"], 1)
+
+    def test_an_enemy_phase_difference_is_a_finding(self):
+        def next_turn(st):
+            st = tlp.FakeBridge.default_next(st)
+            tlp.unit(st, 0)["hp"] -= 1  # the game hurt a mech the engine left alone
+            return st
+
+        eng = FuzzEngine([c for c in CANDIDATES if c["sub"] == "move"])
+        rc, sess, findings = self.live_session(eng, next_turn=next_turn)
+        self.assertEqual([f["kind"] for f in findings], ["enemy_phase"])
+        self.assertTrue(any("PunchMech#0 hp" in d for d in findings[0]["diffs"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

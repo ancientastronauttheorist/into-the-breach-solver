@@ -21,6 +21,8 @@ run/
 recordings/[0-9]*/
 # scripts/live_play.py runs (recordings/live/<YYYYMMDD_HHMMSS>/).
 recordings/live/[0-9]*_[0-9]*/
+# scripts/fuzz_play.py sessions.
+recordings/fuzz/
 recordings/live_top_mainmenu_*/
 recordings/lightning_session_clock_proof.json
 recordings/lightning_*/

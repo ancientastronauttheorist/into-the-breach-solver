@@ -289,6 +289,7 @@ The engine side is `itb_live` (`tools/live_tool.hpp`), JSON in and out:
 engine/build/itb_live solve state.json --time 10 [--max-time 120 --min-tiers 5] --threads 8 [--out FILE] [--pretty]
 engine/build/itb_live predict state.json --plan @plan.json
 engine/build/itb_live board state.json
+engine/build/itb_live actions state.json [--plan @prefix.json] [--no-effects]   # the fuzzer's move list
 engine/build/itb_live deploy state.json [--time 45] [--threads 8] [--samples 12] [--finalists 3]
           [--screen-samples 3] [--solve-time 0.5] [--seed 1] [--placements @p.json] [--always @p.json]
 engine/build/itb_live serve --threads 8   # one JSON request per stdin line (what live_play.py uses)
@@ -327,6 +328,111 @@ uid (uid, type, x, y, hp, team, mech, fire, acid, frozen, shield, web;
 `leader` for a psion: its mutation number), plus `underground`,
 `acid_tiles`, `smoke_tiles` and `shield_tiles` (shielded buildings and
 mountains, [x, y]).
+
+`actions` plays a plan prefix exactly as `predict` does (same options, same
+Lua seeding), then lists every sub-action the engine accepts from there:
+the solver's Action model ("Perfect-turn search", Action model), enumerated
+as its search does (moves to the Move skill's area, every non-passive slot
+at every target incl. second clicks, Repair), each run once on a copy of
+the board. Each entry has `sub`, `uid`, `weapon`, `slot`, `target`,
+`target2`, `target_kind` (what the target tile holds: `unit_player`,
+`building`, `water`, ...), `end`, and (unless `--no-effects`) its `effect`:
+HP lost and kills by team, the actor's own HP, pushes, bumps, falls,
+drownings, units created, statuses changed, building / grid / mountain
+loss, tiles changed, chance nodes, timing flags, Lua errors, unmodelled
+writes, mission hooks. Refused and empty ones are only counted
+(`rejected`, by status). The reply also has `board` (after the prefix) and
+`units` (`can_move` / `can_act` per controllable unit); `refused` >= 0 if
+the prefix itself was refused.
+
+### Fuzzing
+
+`scripts/fuzz_play.py` plays random but UI-legal turns in the game and
+checks every step against the engine. Live play only executes the solver's
+choices, so a rare interaction the engine mis-models as bad is never tried;
+the fuzzer tries exactly those.
+
+```bash
+python3 scripts/fuzz_play.py --dry-run --samples 500                 # engine only, never touches the game
+python3 scripts/fuzz_play.py --dry-run --run 20261016_130634 --mission 2 --turn 2 --samples 20
+python3 scripts/fuzz_play.py --samples 20 --minutes 60               # live; --restore-mode manual (default)
+python3 scripts/fuzz_play.py --samples 20 --restore-mode clicks --main-menu-xy X,Y [--confirm-xy X,Y]
+python3 scripts/fuzz_play.py --put-back recordings/fuzz/<session>    # the profile's own saves back (title screen)
+python3 scripts/coverage_report.py [--unseen]                        # what the recordings never exercised
+```
+
+- **Turn starts** are the recorded `m<MM>_turn_<TT>_solve_input.json` of
+  `recordings/live/<run>/` (`--recordings`, `--run`); live mode needs their
+  `_saveData.lua` checkpoint. A mission's last turn is left out
+  (`--last-turns`: its enemy phase ends the mission or the run).
+- **Moves** come from `itb_live actions` on the board after the prefix,
+  filtered by what the UI allows (`ui_sequence_ok`: move then act;
+  Shifty / Post_Move one move after acting; Double_Shot two actions
+  without moving; an unpowered pilot skill gives nothing), and executed as
+  live play executes them (`play_step`: EXEC_MODE native, MOVE_NATIVE,
+  ATTACK / TWO_CLICK_ATTACK by slot, REPAIR; no weapon or Repair from smoke
+  or water). The choice is weighted: a (unit, kind, weapon) group first
+  (weapons 3, moves 1.5, Repair 0.4), then a target by its effect's oddity
+  (friendly fire, building hits, bumps, falls, kills, created units,
+  terrain and status changes, and most for Lua errors, unmodelled writes,
+  frame-timing flags and mission hooks), damped by how often the session
+  played the same kind (`--uniform`: none of this). A turn ends with no
+  legal sub-action left, after `--max-steps` (12), or at random
+  (`--stop-prob` 0.06 per step).
+- **Grid safety.** Only sequences the engine predicts keep `--min-grid`
+  (2) grid through the enemy phase (worst case, no resist) are played (up
+  to `--tries` 5, else the start is skipped): at 0 the game leaves for the
+  Timeline Lost screens.
+- **Compared** after each step with `diff_boards` and live play's carried
+  state (queued shots, Burrowers underground, structure shields; the
+  recorded turn start's shields, underground units and
+  Mission_Reactivation list seed each sample's run); End Turn and the
+  enemy phase are `live_play.end_turn` itself (`--turns N`: N turns from
+  each start). Created units are commanded through the uid map.
+- **Findings** go to `recordings/fuzz/<session>/findings.jsonl` (git-ignored):
+  `step`, `chance` (a step whose prediction drew a chance node, e.g. a Grid
+  Defense roll: the rest is re-predicted from the live board and played
+  on), `enemy_phase`, `game_refused` (the bridge refused a sub-action the
+  engine allowed), `ui_blocked`, `uid_unmatched`, `engine_inconsistent`,
+  each with the source turn, the plan up to it, the differences, both
+  boards and the files: the sample's run directory `s<NNN>/` (states,
+  predictions, `events.jsonl`) and `plan_to_step<N>.json`, so
+  `itb_live predict <start> --plan @<plan>` reproduces the engine side.
+  Any difference but `chance` ends the sample without End Turn
+  (`--continue-after-diff` re-predicts and goes on).
+- **Restore inside the running game.** It never quits or launches the game
+  or touches Steam. Each sample takes the game to the title screen (Esc,
+  then the pause menu's Main Menu: `--restore-mode clicks` clicks it only
+  once the heartbeat stalls, i.e. the pause menu is open; `manual` asks
+  you), knows the title screen by a silent bridge plus the save the game
+  writes on the way out (or `touch <session>/at_title`; `--at-title` when
+  it is there already), puts the checkpoint's save files in the profile,
+  clicks Continue and checks the board against the recorded turn start
+  (any difference, or the Grid Defense restart warning, stops the session).
+  The profile's own save files are copied to `<session>/profile_backup/`
+  the first time and put back at the end (left on the title screen;
+  `--end-continue` continues). A mission that ends, a silent bridge after
+  End Turn or a failed restore stops without touching the saves: take the
+  game to the title screen, then `--put-back <session>`.
+- **One driver at a time.** `live_play.py` turn / end-turn / mission /
+  deploy / restore and the fuzzer hold an exclusive lock
+  (`<bridge dir>/itb_driver.lock`, flock: released when the process ends).
+  The fuzzer also refuses while another driver runs (`live_play.py`
+  mission / turn / deploy / end-turn / restore, `drive2.sh`,
+  `drive_final.sh`, `game_loop.py auto_turn`, another fuzzer; not dry
+  runs), when the bridge acked a command or the current live run logged an
+  event within `--idle-seconds` (300), or when the game is not running.
+- **--dry-run** never touches the bridge: it generates and predicts on the
+  recorded states and checks the engine against itself (each picked
+  sub-action replays through `predict` to the board the enumeration's
+  prefix gave, no refusal), writing `samples.jsonl` and the summary: the
+  action mix, weapons, target kinds, effects, and the engine's own notes
+  (chance nodes, inexact enemy phases, Lua errors, timing flags).
+- `scripts/coverage_report.py` lists the player weapons (upgrades apart),
+  passives, pilots, level-up skills, missions and enemy types the recorded
+  turn starts hold (and the weapons the executed plans fired) against the
+  game's scripts (`ITB_GAME_DIR`; enemies via `itb_inspect --pawns`):
+  names only.
 
 ## Python bindings
 
