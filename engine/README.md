@@ -1224,7 +1224,9 @@ to keep that from costing the tiers above it, `LookaheadOptions::base_share`
 (25%) of the budget first goes to a search without the lookahead, and its
 plan, scored with the lookahead by `evaluate_plan` (open loop: a value it
 surely reaches), seeds the incumbent of the lookahead search, which gets the
-rest of the budget (time, or nodes). That search can only return something
+rest of the budget (time, or nodes; the seed evaluation is charged to it,
+"Time budget" below, and its sample values go to the lookahead search's
+table). That search can only return something
 better under the full order, so grid, buildings, mechs and stars are never
 worse than the base search's at that share of the budget (before seeding,
 2 of 60 turns lost grid to it at 20 s and 2 threads). A sample stops when
@@ -1453,8 +1455,14 @@ the live solve (`survival_cap.cpp`, wired in `search_survival`):
   first tier from the start and `survival_goal` 1 (a plan with odds above 0
   disproves the world at once). Together they get `survival_cap_share` of
   the whole budget (`max_time` with the adaptive budget, else `time`;
-  nodes alike); the search after them gets the rest, so the solve stays
-  within its budget.
+  nodes alike), never more than is left of it. They are charged to the
+  whole budget only: with the adaptive budget the search after them keeps
+  its base time (`time` less the survey's time) and its extension still
+  ends by `max_time`; with one budget (`time` alone) both come out of it.
+  (Before 2026-10-15 the pre-pass also came out of the base time: on run 27
+  Factory t3 at one thread the survey and pre-pass took 5.8 s of the base
+  search's 7.5 s, it got 1.7 s and stopped at the goal with no tier proven
+  below the odds.)
 - The ceiling. The ceiling B bounds the odds of every plan from the root,
   not those of a board deeper in the search: after a chance node in the
   player's own actions (a resisted roll) the turn may keep the grid for
@@ -1530,7 +1538,9 @@ plan lost a mech HP). At 1 thread its next_turn is -1025 with the cap off
 too (the -64 above was at 3 threads). The cap off proves its first 4 tiers
 there (the base search completes in 9.3 s); with the cap the survey and the
 pre-pass take 7.5 s of the 7.5 s base time, the base search stops at the
-goal and only the odds are proven. Run 24's M = 1 proof sits at the edge of
+goal and only the odds are proven (since fixed: the pre-pass is charged to
+`max_time` only, and run 27 with the cap proves the same 4 tiers, "Time
+budget" below). Run 24's M = 1 proof sits at the edge of
 the 36 s share (proven in one run, open in the other).
 
 With more time (`--max-time 900 --survival-cap 0.9`, 3 threads): run 24
@@ -1579,6 +1589,73 @@ the first 0, 0, 0 and 4 tiers), `--time 30 --max-time 120 --min-tiers 5`:
 127 s (5 tiers) and 252 s (proven optimal). Every plan's value equals the
 30 s plan's: on these boards the extra time buys the proof, not a better
 plan.
+
+**Time budget** (2026-10-15). A solve with a time budget ends by its whole
+budget, `max_time_s` with the adaptive budget, else `time_limit_s`, with
+everything it runs between the searches included (`solver.cpp` "Time
+budget"; `SolveStats::seed_eval_s`, `recheck_s`, `recheck_cut`, printed by
+`--solve` as "outside the searches").
+- The searches stop 1% of the whole budget early (at most 2 s), kept back
+  for the closing re-check of the returned plan (`evaluate_plan`, a
+  diagnostic for the "re-running the plan gives" warning) and the result.
+  The re-check runs until the whole budget's end; cut there it is skipped
+  (`recheck_cut`, no warning).
+- The survey, the survival cap pre-pass, the base search, the seed
+  evaluation and the lookahead search are charged as they run: the
+  lookahead search gets what is left after the seed. The seed evaluation
+  stops running samples at the searches' end; a leaf without its samples
+  counts at the NextTurn floor, and if even its enemy phases run past the
+  whole budget the base search's value with NextTurn at the floor seeds
+  instead. Both are lower bounds of the plan's value (NextTurn only falls
+  from its cap 0 to the floor; which outcomes count depends on the odds
+  alone), so the seed stays sound and the search after it can only return
+  a plan better under the full order. The re-check accepts a value above
+  such a seed's.
+- With the lookahead both evaluations run the samples only for the chance
+  leaves whose NextTurn can still change the plan's value: with the
+  missing leaves at the floor and at the cap the value lies between the
+  two, and the leaves are run in increasing order of their score until
+  the two meet. They share sample values with the lookahead search (the
+  seed's go to its table; the re-check reads it). A sample is a function of
+  its end board, so values are unchanged.
+- Past the deadline a solve only finishes what it is running: one enemy
+  phase or lookahead sample per thread, and the result. The caller's work
+  comes on top (`itb_live` predicts the plan's board, `--solve` scores the
+  recorded plan with the eager `evaluate_plan`).
+
+Before, the base plan's seed evaluation and the closing re-check ran
+outside the budget: each is every chance leaf of the plan times 8 samples,
+on one thread whatever the solve's thread count. Measured with the live
+flags (`--time 30 --min-tiers 7 --threat-tier --objectives-first --mech-grid
+2 --mech-grid-turns --mech-grid-pilot --lookahead --grid-survival`), one
+thread, `nice`, other jobs on the machine; solve time (`time_s`), base =
+82fed1e6:
+
+| turn | budget | base | now | plan |
+|---|---|---|---|---|
+| run 28 Cave t1 (`20261014_233706` m41) | `--max-time 300` | 519.3 s | 298.2 s (seed 40.8 s, re-check 0.1 s) | odds 0.5304, grid -8, buildings -4, mechs 0, stars -1 in both; next_turn -1030 vs -1092 (the old lookahead search had 75 s, now 34 s) |
+| run 32 Cave t3 (`20261015_132930` m41) | `--max-time 300 --survival-cap 0.3` | 325.7 s | 298.1 s (seed 9.1 s, re-check 0.01 s) | the same value |
+| run 27 Factory t3 (`20261014_222734` m14) | `--max-time 120 --survival-cap 0.3` | 120.7 s, odds proven, 0 tiers below | 118.9 s, odds proven, 4 tiers | the same value |
+| run 27 Factory t3 | `--max-time 120` | 120.7 s, 4 tiers | 118.9 s, 4 tiers | the same value |
+
+Run 28's base search runs to its 75% share (no tier proven) and its plan's
+leaves need 40.8 s of samples (the Cave bomb's 16 tiles times the rolls;
+the old seed evaluation and re-check, every leaf's samples each, took the
+old solve 219 s past its cap). Run 27 with the cap: the survey (1.9 s) and
+the pre-pass (3.0 s) no longer come out of the base search's 7.5 s, so it
+completes (all ten plain tiers, as with the cap off) instead of getting
+1.7 s and stopping at the proven odds. Every check is identical:
+`--corpus`, `--moves`, `--weapons`, `--replay`, `--replay --turns` byte for
+byte against 82fed1e6; 40 sample boards at 20 000 nodes (plain flags) and 20
+at 4 000 nodes with the live flags, with and without `--survival-cap 0.3`,
+the same in every reported field but the times (no time budget: no
+deadline, the shared samples change only the lookahead counters).
+`test_solver.cpp` "time budget": a lookahead solve at 0.4 s (and 0.1 s
+without the adaptive budget) on `board_m07_turn01` ends within 0.3 s of its
+budget (the unbounded re-check alone takes 0.25 s there, the seed
+evaluation as much); tiny lookahead boards give the same values, plans and
+nodes with a time budget as without; the pre-pass leaves the search after
+it its base time less the survey's.
 
 **Validation.** `test_solver.cpp`: hand-built boards with known optima
 (save a building, the greedy kill that loses a building, two threats and two
@@ -1772,7 +1849,8 @@ measured with one thread, other jobs on the machine).
   phases per leaf (Grid Defense rolls times the Cave's 16 bomb tiles). That
   solve also ran 240-280 s past its 300 s cap: the plan is re-checked
   (`evaluate_plan`, every chance leaf times 8 lookahead samples) outside
-  the budget.
+  the budget, and so was the base plan's seed evaluation (fixed since:
+  "Time budget" under the search).
 
 Before and after (base = 662e64ca; one thread, `nice`, one process at a
 time, other jobs on the machine). Every check is identical: `--corpus`,
