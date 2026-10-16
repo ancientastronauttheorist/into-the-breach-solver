@@ -292,6 +292,11 @@ GameData GameData::load(const std::filesystem::path& game_root, ScriptLoadReport
           lua_getfield(L, -1, "Skill");
           if (lua_type(L, -1) == LUA_TSTRING) data.pilot_skills_[lua_tostring(L, -3)] = lua_tostring(L, -1);
           lua_pop(L, 1);
+          lua_getfield(L, -1, "PowerCost");
+          if (lua_isnumber(L, -1) && lua_tonumber(L, -1) > 0) {
+            data.pilot_power_costs_[lua_tostring(L, -3)] = static_cast<int>(lua_tonumber(L, -1));
+          }
+          lua_pop(L, 1);
         }
       }
       lua_pop(L, 1);
@@ -377,6 +382,11 @@ std::string_view GameData::pilot_skill(std::string_view pilot_id) const {
 
 uint32_t GameData::pilot_ability(std::string_view pilot_id) const {
   return pilot_skill_ability(pilot_skill(pilot_id));
+}
+
+int GameData::pilot_power_cost(std::string_view pilot_id) const {
+  auto it = pilot_power_costs_.find(std::string(pilot_id));
+  return it == pilot_power_costs_.end() ? 0 : it->second;
 }
 
 uint32_t pilot_skill_ability(std::string_view skill) {

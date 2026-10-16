@@ -129,6 +129,18 @@ CONTINUE_RETRY = 30.0
 SETTLE_INTERVAL = 0.4
 SETTLE_TRIES = 8
 POLL = 0.5
+# A unit killed by an action stays on the board, dead, until its death
+# animation is over (about 1.2 s, plus a 0.5 s fade-out; the longest shipped
+# ones about 2.2 s), and the game does not count it as busy in the player's
+# turn. It is still pushed then, and bumps what it is pushed into (live
+# 2026-10-16, run 37 Mission_Factory: a Wall killed by the first shot was
+# pushed into a building by the next one, 1 HP the engine did not predict:
+# its board has the body gone). So the next action waits until it is gone:
+# while the bridge lists it ("dying_bodies"), at most BODY_WAIT; a bridge
+# without the list makes it wait BODY_FALLBACK after any kill.
+BODY_POLL = 0.1
+BODY_WAIT = 5.0
+BODY_FALLBACK = 2.5
 # Seconds to wait for the phase to change after each End Turn click.
 CLICK_WAIT = 8
 # The bridge's heartbeat comes from Mission.BaseUpdate, so it stops once the
@@ -194,7 +206,7 @@ class Bridge:
 
     def raw_state(self) -> dict | None:
         try:
-            return lv.read_json(lv.STATE)
+            return fill_pilot_power(lv.read_json(lv.STATE))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -220,17 +232,34 @@ class Bridge:
         ack = self.send("SNAPSHOT live_play", 15)
         if ack.startswith("OK SNAPSHOT "):
             try:
-                return lv.read_json(Path(ack[len("OK SNAPSHOT "):].strip()))
+                return fill_pilot_power(lv.read_json(Path(ack[len("OK SNAPSHOT "):].strip())))
             except (OSError, json.JSONDecodeError):
                 pass
         t0 = time.time()
         self.send("LUA return 'refresh'", 15)
-        return lv.fresh_state(t0)
+        return fill_pilot_power(lv.fresh_state(t0))
 
-    def settled_state(self) -> dict:
+    def settled_state(self, before: dict | None = None) -> dict:
         """A dump taken while the board is idle. Bridges that report
         `stable` say so directly; for older ones, wait until two dumps in a
-        row agree (reads taken mid-animation showed stale unit tiles)."""
+        row agree (reads taken mid-animation showed stale unit tiles).
+        With `before` (the board before an action), also wait for the
+        bodies of the units it killed to leave the board (BODY_WAIT)."""
+        state = self._settled()
+        if before is None:
+            return state
+        if "dying_bodies" in state:
+            deadline = time.time() + BODY_WAIT
+            while state.get("dying_bodies") and time.time() < deadline:
+                time.sleep(BODY_POLL)
+                state = self._settled()
+            return state
+        if killed_units(before, state):
+            time.sleep(BODY_FALLBACK)
+            state = self._settled()
+        return state
+
+    def _settled(self) -> dict:
         prev = self.fresh_state()
         if prev.get("stable") is True:
             return prev
@@ -247,6 +276,103 @@ class Bridge:
 
 def units(state: dict) -> list:
     return [u for u in state.get("units", []) if not u.get("is_extra_tile")]
+
+
+def killed_units(before: dict, after: dict) -> list:
+    """The uids of the units on `before` that `after` no longer lists,
+    mechs aside (a mech leaves a corpse): the units an action killed (or
+    that left the board), whose bodies may still be on it."""
+    now = {u.get("uid") for u in units(after)}
+    return sorted(u["uid"] for u in units(before)
+                  if u.get("uid") not in now and not u.get("mech") and (u.get("hp") or 0) > 0)
+
+
+# Pilots whose own skill needs reactor power (pilots.lua PowerCost): the
+# game grants it only while the pilot is powered in the mech bay
+# (Pilot::IsAbility). Unpowered, Silica gets no second action, Archimedes no
+# move after shooting, Prospero does not fly, Gana does not deploy anywhere.
+PILOT_POWER_COST = {"Pilot_Miner": 2, "Pilot_Aquatic": 1, "Pilot_Recycler": 1, "Pilot_Warrior": 1}
+
+_save_pilot_cache: dict = {}
+
+
+def save_pilot_power(path: Path | None = None) -> dict:
+    """Pilot id -> reactor power cells, from the squad's pilots in the
+    save (GameData.current pilot0-2, e.g. {0, 0} for an unpowered Silica),
+    for bridges that do not export them. Pilots without a PowerCost have no
+    cells. {} when the file is missing; an id listed twice with different
+    cells is left out."""
+    path = path or PROFILE / "saveData.lua"
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if _save_pilot_cache.get("key") == key:
+            return _save_pilot_cache["value"]
+        text = path.read_text(errors="replace")
+    except OSError:
+        return {}
+    head = text.split("RegionData", 1)[0]
+    out: dict = {}
+    clash = set()
+    found = list(re.finditer(r'\["pilot\d+"\]\s*=\s*\{\["id"\]\s*=\s*"([^"]+)"', head))
+    for i, m in enumerate(found):
+        pid = m.group(1)
+        body = head[m.end():found[i + 1].start() if i + 1 < len(found) else len(head)]
+        pm = re.search(r'\["power"\]\s*=\s*\{([^}]*)\}', body)
+        if not pm:
+            continue
+        cells = [int(v) for v in re.findall(r"-?\d+", pm.group(1))]
+        if pid in out and out[pid] != cells:
+            clash.add(pid)
+        out[pid] = cells
+    for pid in clash:
+        out.pop(pid, None)
+    _save_pilot_cache.update(key=key, value=out)
+    return out
+
+
+def fill_pilot_power(state):
+    """Adds the save's pilot power cells (save_pilot_power) to each mech
+    whose bridge record has none (bridges before 2026-10-16), as
+    pilot.power with pilot.power_source "save"; the engine and the UI
+    checks then leave an unpowered pilot's skill out."""
+    if not isinstance(state, dict):
+        return state
+    need = [u for u in units(state) if u.get("team") == 1 and pilot_id(u) in PILOT_POWER_COST
+            and "power" not in (u.get("pilot") or {}) and "skill_active" not in (u.get("pilot") or {})]
+    if not need:
+        return state
+    power = save_pilot_power()
+    for u in need:
+        cells = power.get(pilot_id(u))
+        if cells is None:
+            continue
+        pilot = u.get("pilot") if isinstance(u.get("pilot"), dict) else {"id": pilot_id(u)}
+        pilot["power"], pilot["power_source"] = list(cells), "save"
+        u["pilot"] = pilot
+    return state
+
+
+def pilot_id(u: dict) -> str | None:
+    return u.get("pilot_id") or (u.get("pilot") or {}).get("id")
+
+
+def pilot_skill_on(u: dict) -> bool:
+    """Whether the unit's pilot's own skill is on: always for a skill
+    without a PowerCost; else the bridge's live skill_active
+    (Pawn:IsAbility), or the power cells (on when the first is set,
+    PowerState::IsPowered); on when neither is known."""
+    if pilot_id(u) not in PILOT_POWER_COST:
+        return True
+    pilot = u.get("pilot") or {}
+    if isinstance(pilot.get("skill_active"), bool):
+        return pilot["skill_active"]
+    cells = pilot.get("power")
+    if isinstance(cells, list):
+        return bool(cells) and cells[0] != 0
+    if isinstance(cells, dict):  # an empty Lua table
+        return bool(cells)
+    return True
 
 
 def signature(state: dict):
@@ -922,7 +1048,7 @@ def ui_blocked(state: dict, uid) -> str | None:
     pid = u.get("pilot_id") or (u.get("pilot") or {}).get("id")
     if t.get("smoke") and not (traits.get("ignore_smoke") or pid in SMOKE_IMMUNE_PILOTS):
         return "on smoke"
-    flying = u.get("flying") or traits.get("flying") or pid in FLYING_PILOTS
+    flying = u.get("flying") or traits.get("flying") or (pid in FLYING_PILOTS and pilot_skill_on(u))
     # Water and lava are terrain 3 (old bridges named terrain 5, ice, "lava").
     if (t.get("terrain_id") == 3 or t.get("terrain") == "water") and not flying:
         return "submerged"
@@ -934,9 +1060,11 @@ def state_unit_value(state: dict, uid, key: str):
 
 
 def pilot_skill(u: dict) -> str | None:
-    """The movement/action pilot skill of a bridge unit (PILOT_SKILLS), or None."""
-    pid = u.get("pilot_id") or (u.get("pilot") or {}).get("id")
-    return PILOT_SKILLS.get(pid)
+    """The movement/action pilot skill of a bridge unit (PILOT_SKILLS), or
+    None; None too while the skill is unpowered (pilot_skill_on: an
+    unpowered Silica acts once, live 2026-10-16)."""
+    skill = PILOT_SKILLS.get(pilot_id(u))
+    return skill if skill and pilot_skill_on(u) else None
 
 
 def ui_sequence_ok(seq: str, skill: str | None) -> bool:
@@ -1721,7 +1849,9 @@ def play_turn(ctx) -> list:
             history[step["uid"]] = history.get(step["uid"], "") + ("M" if step["sub"] == "move" else "A")
             run.save_unit_actions(state, history)
             executed.append((plan_id, step))
-            state = bridge.settled_state()
+            # Bodies of the units it killed gone first (BODY_WAIT): the
+            # next action would push them.
+            state = bridge.settled_state(before=state)
             path = run.save_state(state, f"step{len(executed)}")
             live = engine.board(path)
             diffs, _ = diff_boards(step["board"], live, known)

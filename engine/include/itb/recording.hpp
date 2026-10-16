@@ -35,7 +35,11 @@ struct Recording {
   std::vector<int32_t> attack_order;  // Vek uids in the order the game reported
   // Pilot table name per unit uid (e.g. "Pilot_Rock"); the pilot's Lua Skill
   // gives its ability (Engine::pilot_ability), which load_recording already
-  // puts on the board's pawns when it has the GameData.
+  // puts on the board's pawns when it has the GameData. A pilot whose Skill
+  // needs reactor power (Lua PowerCost > 0) that the recording shows
+  // unpowered is left out: the game gives it no Skill (Pilot::IsAbility),
+  // and none of these Skills changes the Repair skill either. Its entry in
+  // pilot_info says so (skill_unpowered).
   std::vector<std::pair<int32_t, std::string>> pilots;
   int difficulty = -1;  // the bridge's GetDifficulty(), -1 if not recorded
   // The mission and environment data stage 7 needs (TurnContext::mission).
@@ -56,6 +60,12 @@ struct Recording {
     int32_t uid = -1;
     std::string id;
     int level = -1, xp = -1, skill1 = -1, skill2 = -1;
+    // The pilot's own Skill is recorded as off: the bridge's live
+    // "skill_active" (Pawn:IsAbility of the pilot's Skill) is false, or,
+    // without it, the save's pilot "power" cells are unset (PowerState::
+    // IsPowered: non-empty and the first cell set) for a Skill with a
+    // PowerCost. False when the recording does not say (older bridges).
+    bool skill_unpowered = false;
   };
   std::vector<PilotInfo> pilot_info;
   // The environment steps the bridge saw (env_strike_log; validation data

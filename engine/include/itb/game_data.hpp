@@ -111,6 +111,11 @@ class GameData {
   std::string_view pilot_skill(std::string_view pilot_id) const;
   // The rule-changing ability (board.hpp PilotAbility) of that Skill.
   uint32_t pilot_ability(std::string_view pilot_id) const;
+  // The reactor power the pilot's Skill needs (its Lua PowerCost: Silica's
+  // Double_Shot 2; Gana, Archimedes and Prospero 1); 0 if none or unknown.
+  // Pilot::IsAbility (0x00859010) only grants such a Skill while the pilot's
+  // power is on (PowerState::IsPowered: the first cell set).
+  int pilot_power_cost(std::string_view pilot_id) const;
 
  private:
   std::vector<PawnDef> pawns_;
@@ -119,6 +124,7 @@ class GameData {
   std::unordered_map<Symbol, size_t> anim_by_symbol_;
   std::unordered_map<std::string, float> values_;
   std::unordered_map<std::string, std::string> pilot_skills_;
+  std::unordered_map<std::string, int> pilot_power_costs_;
 };
 
 // The PilotAbility bit for a pilot's Lua Skill name ("Rock_Skill" ->

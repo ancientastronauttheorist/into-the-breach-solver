@@ -148,6 +148,18 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   actions this turn are kept in the run manifest (`unit_actions`); a unit
   that acted and is active again gets its pilot bonus in re-solves
   (`bonus_shift`, or `moved` for Double_Shot), which the bridge cannot read.
+  A pilot skill with a PowerCost counts only while the pilot is powered
+  (see "Action model"): the bridge exports the save's `pilot.power` cells
+  and the live `pilot.skill_active`; for older bridges the driver fills the
+  cells from the save's squad pilots (`power_source: "save"`). After each
+  action it also waits until the bodies of the units it killed have left
+  the board: a dead non-corpse pawn stays in its tile while its death
+  animation plays (about 1.2 s plus a 0.5 s fade-out, not "busy" in the
+  player's turn), and the next action would still push it into whatever is
+  behind it (live 2026-10-16: a Wall killed by one shot bumped a building
+  on the next). The bridge lists them in `dying_bodies`
+  (`Board:GetPawn(p, false)`); without the list the driver waits 2.5 s
+  after any kill.
 - **Ranking options** (all off by default; each is passed to every solve and
   re-solve of the turn): `--threat-tier`, `--threat-kills`,
   `--objectives-first`, `--mech-grid N [--mech-grid-turns]
@@ -1086,6 +1098,16 @@ follows for the pilots (FireWeapon's bookkeeping, stage 5 §2.4):
   marked moved and active again: exactly one more action, no move. After a
   move, one action.
 - Every other pawn: one action, which ends its turn.
+- A Skill whose pilot has a Lua `PowerCost` (Silica's Double_Shot 2;
+  Gana's Deploy_Anywhere, Archimedes' Post_Move, Prospero's Flying 1) is
+  only on while the pilot is powered in the mech bay: `Pilot::IsAbility`
+  (0x00859010) checks the pilot's `PowerState` (0x0051e290: non-empty, first
+  cell set) when `PowerCost > 0`. The loader leaves such a pilot's Skill
+  out (and the pilot out of `Recording::pilots`) when the recording says it
+  is off: the bridge's `pilot.skill_active` (`Pawn:IsAbility`), else the
+  save's `pilot.power` cells (`{0, 0}` = unpowered). Unknown counts as on
+  (live 2026-10-16, run 37: an unpowered Silica's mech was planned to fire
+  twice; the game ended its turn after one shot).
 
 **Disable_Immunity** (Evasion, Camila Vera, `Pilot_Soldier`; "Mech
 unaffected by Webbing and Smoke") is read in three places, all

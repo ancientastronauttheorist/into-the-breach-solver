@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,6 +16,7 @@
 #include "itb/engine.hpp"
 #include "itb/game_data.hpp"
 #include "itb/movement.hpp"
+#include "itb/recording.hpp"
 
 using namespace itb;
 
@@ -477,6 +480,65 @@ TEST_CASE("Engine: Double_Shot acts twice unmoved, once after a move") {
     CHECK(acts == (moved ? 1 : 2));
     CHECK(E.repair(b, mech).status == ActionStatus::CannotAct);
     CHECK(E.move(b, mech, {3, 5}).status == ActionStatus::CannotAct);
+  }
+}
+
+// Live 2026-10-16, run 37 Mission_Factory turn 1: Silica (Pilot_Miner,
+// Double_Shot, PowerCost 2) flew the Pulse Mech unpowered (save pilot power
+// {0, 0}); the plan had the mech fire twice and the game ended its turn
+// after the first shot (Pilot::IsAbility gates a Skill with a PowerCost on
+// the pilot's PowerState).
+TEST_CASE("Engine: an unpowered pilot's Skill is off (Silica's Double_Shot)") {
+  NEED_ENGINE();
+  const std::string fixture = std::string(ITB_FIXTURE_DIR) + "/live_silica_t1_solve_input.json";
+  CHECK(E.data().pilot_power_cost("Pilot_Miner") == 2);
+  CHECK(E.data().pilot_power_cost("Pilot_Warrior") == 1);
+  CHECK(E.data().pilot_power_cost("Pilot_Aquatic") == 1);
+  CHECK(E.data().pilot_power_cost("Pilot_Recycler") == 1);
+  CHECK(E.data().pilot_power_cost("Pilot_Leader") == 0);
+  CHECK(E.data().pilot_power_cost("Pilot_Caretaker") == 0);
+  std::ifstream in(fixture);
+  REQUIRE(in.good());
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::string unpowered = "\"power\":[0,0]";
+  REQUIRE(text.find(unpowered) != std::string::npos);
+  struct Case {
+    const char* what;
+    std::string power;  // replaces the save's {0, 0}
+    bool double_shot;
+  };
+  for (const Case& c : {Case{"save power {0, 0}", unpowered, false},
+                        Case{"save power {1, 1}", "\"power\":[1,1]", true},
+                        Case{"live skill_active false", "\"power\":[1,1],\"skill_active\":false", false},
+                        Case{"no power recorded (older bridges)", "\"no_power\":0", true}}) {
+    INFO(c.what);
+    std::string edited = text;
+    edited.replace(edited.find(unpowered), unpowered.size(), c.power);
+    const auto path = std::filesystem::temp_directory_path() / "itb_silica_fixture.json";
+    {
+      std::ofstream out(path);
+      out << edited;
+    }
+    std::string error;
+    auto rec = load_recording(path, &E.data(), &error);
+    std::filesystem::remove(path);
+    REQUIRE_MESSAGE(rec.has_value(), error);
+    Board b = rec->board;
+    const Pawn* pulse = b.find_pawn(1);
+    REQUIRE(pulse != nullptr);
+    CHECK(pulse->has_pilot(kPilotDoubleShot) == c.double_shot);
+    const bool listed = std::any_of(rec->pilots.begin(), rec->pilots.end(),
+                                    [](const auto& e) { return e.first == 1; });
+    CHECK(listed == c.double_shot);
+    for (const auto& info : rec->pilot_info) {
+      if (info.uid == 1) CHECK(info.skill_unpowered == !c.double_shot);
+      if (info.uid != 1) CHECK_FALSE(info.skill_unpowered);
+    }
+    // Rosie Rivets (no PowerCost) keeps her Skill.
+    CHECK(b.find_pawn(0)->has_pilot(kPilotAdjacentHeal));
+    // The plan's first and fourth steps: Science_Repulse at D6 twice.
+    REQUIRE(E.fire_weapon(b, 1, 0, {2, 4}).ok());
+    CHECK(E.fire_weapon(b, 1, 0, {2, 4}).ok() == c.double_shot);
   }
 }
 

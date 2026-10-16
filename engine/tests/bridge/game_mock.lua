@@ -330,7 +330,10 @@ end)
 pawn_methods.GetShotsRemaining = bind("Pawn", "GetShotsRemaining", {{}}, function(self)
     return DATA[self].shots or 1
 end)
-pawn_methods.IsAbility = bind("Pawn", "IsAbility", {{"string"}}, function() return false end)
+-- Pawn::IsAbility: the skills in the pawn's `abilities` set.
+pawn_methods.IsAbility = bind("Pawn", "IsAbility", {{"string"}}, function(self, name)
+    return (DATA[self].abilities or {})[name] == true
+end)
 -- Pawn::IsBusy: walking, leaping, being pushed. `busy = true` stays busy;
 -- `busy_polls = n` is busy for the next n polls.
 pawn_methods.IsBusy = bind("Pawn", "IsBusy", {{}}, function(self)
@@ -516,9 +519,22 @@ end)
 board_methods.GetBusyState = bind("Board", "GetBusyState", {{}}, function()
     return MOCK.busy > 0 and 6 or 0
 end)
-board_methods.GetPawn = bind("Board", "GetPawn", {{"Point"}, {"Point", "bool"}, {"int"}}, function(self, a)
+board_methods.GetPawn = bind("Board", "GetPawn", {{"Point"}, {"Point", "bool"}, {"int"}}, function(self, a, b)
     if type(a) == "number" then return find_pawn(a) end
     if not valid(a) then return nil end
+    if b == false then
+        -- Board::GetPawn(Point, false): the first living pawn in the tile,
+        -- else the last pawn there (a dead body still on the board).
+        local last = nil
+        for _, u in ipairs(MOCK.pawns) do
+            local d = DATA[u]
+            if d.x == a.x and d.y == a.y then
+                if d.hp > 0 then return u end
+                last = u
+            end
+        end
+        return last
+    end
     return pawn_at(a)
 end)
 board_methods.GetPawns = bind("Board", "GetPawns", {{"int"}}, function(self, team)

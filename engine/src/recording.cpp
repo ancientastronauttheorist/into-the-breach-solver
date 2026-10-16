@@ -771,6 +771,25 @@ void rebuild_webs(Board& b, const std::vector<std::pair<int32_t, int32_t>>& repo
   }
 }
 
+// Whether a bridge "pilot" record shows the pilot's own Skill off. In the
+// game (Pilot::IsAbility 0x00859010) a Skill whose pilot has a PowerCost
+// (Silica's Double_Shot 2; Gana's Deploy_Anywhere, Archimedes' Post_Move,
+// Prospero's Flying 1) only counts while the pilot's PowerState is powered
+// (0x0051e290: non-empty, first cell set); the mech bay sets it. The live
+// "skill_active" (Pawn:IsAbility(Skill)) wins; else the save's "power"
+// cells, e.g. {0, 0} for an unpowered Silica. Unknown: on. A Skill without
+// a PowerCost is always on.
+bool pilot_skill_unpowered(const json& pilot, const std::string& id, const GameData* data) {
+  if (!data || data->pilot_power_cost(id) <= 0) return false;
+  if (auto it = pilot.find("skill_active"); it != pilot.end() && it->is_boolean()) return !it->get<bool>();
+  auto it = pilot.find("power");
+  if (it == pilot.end()) return false;
+  // An empty Lua table may come out as {} as well as [].
+  if (it->is_object()) return it->empty();
+  if (!it->is_array()) return false;
+  return it->empty() || !(*it)[0].is_number() || (*it)[0].get<double>() == 0;
+}
+
 }  // namespace
 
 std::optional<Recording> load_recording(const std::filesystem::path& path,
@@ -835,6 +854,7 @@ std::optional<Recording> load_recording(const std::filesystem::path& path,
     Pawn& p = b.add_pawn(load_unit(u, data, rec.warnings));
     if (p.webbed) web_reported.emplace_back(p.uid, get_or<int>(u, "web_source_uid", -1));
     std::string pilot = get_or<std::string>(u, "pilot_id", "");
+    bool skill_off = false;
     if (auto it = u.find("pilot"); it != u.end() && it->is_object()) {
       Recording::PilotInfo info;
       info.uid = p.uid;
@@ -844,9 +864,11 @@ std::optional<Recording> load_recording(const std::filesystem::path& path,
       info.skill1 = get_or<int>(*it, "skill1", -1);
       info.skill2 = get_or<int>(*it, "skill2", -1);
       if (pilot.empty()) pilot = info.id;
+      info.skill_unpowered = pilot_skill_unpowered(*it, pilot, data);
+      skill_off = info.skill_unpowered;
       rec.pilot_info.push_back(std::move(info));
     }
-    if (!pilot.empty()) {
+    if (!pilot.empty() && !skill_off) {
       rec.pilots.emplace_back(p.uid, pilot);
       // The pilot's own ability (its Lua Skill) now, before the standing move
       // bonus below takes out what base_move computes live: Youth_Move and

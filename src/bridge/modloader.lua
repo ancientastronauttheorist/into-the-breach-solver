@@ -1642,6 +1642,10 @@ function ITBX.parse_save(content)
                     skill1 = tonumber(string.match(pilot, '%["skill1"%]%s*=%s*(%-?%d+)') or ""),
                     skill2 = tonumber(string.match(pilot, '%["skill2"%]%s*=%s*(%-?%d+)') or ""),
                 }
+                -- Reactor power on the pilot's Skill ({0, 0} = an unpowered
+                -- Silica); only pilots whose Skill has a PowerCost have it.
+                local power = string.match(pilot, '%["power"%]%s*=%s*(%b{})')
+                if power then rec.pilot.power = itbx_int_list(power) end
             end
             out.pawns[id] = rec
         end
@@ -1808,6 +1812,33 @@ function ITBX.after_units(state, save_data)
     end
 end
 
+-- Dead pawns that are still on the board: a non-corpse pawn stays in its
+-- tile until its death animation is over (about 1.2 s, plus a 0.5 s
+-- fade-out), and the board does not count as busy for it in the player's
+-- turn. Board:GetPawns skips it, but it is still pushed, and a push into a
+-- building or unit still bumps (live 2026-10-16: a Wall killed by the first
+-- shot was pushed into a building by the next one). Board:GetPawn(p, false)
+-- returns it when nothing alive shares the tile. The live driver waits for
+-- this list to empty before the next action.
+function ITBX.dying_bodies(state)
+    local out = {}
+    for x = 0, 7 do
+        for y = 0, 7 do
+            local ok, p = pcall(function() return Board:GetPawn(Point(x, y), false) end)
+            if ok and p then
+                local ok_h, hp = pcall(function() return p:GetHealth() end)
+                local ok_c, corpse = pcall(function() return p:IsCorpse() end)
+                local ok_m, mech = pcall(function() return p:IsMech() end)
+                if ok_h and type(hp) == "number" and hp < 1
+                        and not (ok_c and corpse) and not (ok_m and mech) then
+                    out[#out + 1] = {uid = p:GetId(), type = p:GetType(), x = x, y = y}
+                end
+            end
+        end
+    end
+    state.dying_bodies = out
+end
+
 -- saveData.lua and undoSave.lua can hold different moments (and an old
 -- run's mission under the same key): keep the active region whose pawns
 -- match the live board best, then the later turn; undoSave on a tie.
@@ -1950,7 +1981,19 @@ function ITBX.unit_ext(u, save, scenario)
     local rec = save and save.pawns and save.pawns[u.uid]
     if rec and (rec.type == nil or rec.type == u.type) then
         if rec.mutation then u.mutation = rec.mutation end
-        if rec.pilot and rec.pilot.id then u.pilot = rec.pilot end
+        if rec.pilot and rec.pilot.id then
+            u.pilot = {}
+            for k, v in pairs(rec.pilot) do u.pilot[k] = v end
+            -- The pilot's own Skill as the game applies it: Pilot::IsAbility
+            -- grants a Skill with a PowerCost (Silica's Double_Shot, ...) only
+            -- while the pilot is powered in the mech bay.
+            local pdef = _G[rec.pilot.id]
+            if p and type(pdef) == "table" and type(pdef.Skill) == "string" and pdef.Skill ~= ""
+                    and (tonumber(pdef.PowerCost) or 0) > 0 then
+                local ok_a, a = pcall(function() return p:IsAbility(pdef.Skill) end)
+                if ok_a and type(a) == "boolean" then u.pilot.skill_active = a end
+            end
+        end
         if #rec.weapons > 0 then
             -- Calibrate GetShotsRemaining: while the pawn has not acted in
             -- the turn the save was written, its live uses equal the saved
@@ -3183,6 +3226,7 @@ local function dump_state(out_path, out_tmp)
     -- Bridge extension: per-unit traits, weapons, pilots, non-enemy queued
     -- shots and scenario-queued attacks (before attack_order reads them).
     ITBX.try("after_units", ITBX.after_units, state, save_data)
+    ITBX.try("dying_bodies", ITBX.dying_bodies, state)
 
     -- Attack order: enemies with queued attacks in live unit-list order.
     -- Do not sort by UID; Mission_Factory captures showed Pinnacle bots can

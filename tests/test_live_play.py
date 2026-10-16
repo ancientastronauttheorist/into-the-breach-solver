@@ -34,6 +34,9 @@ import live_validate as lv  # noqa: E402
 
 lp.SETTLE_INTERVAL = 0.01
 lp.POLL = 0.02
+lp.BODY_POLL = 0.01
+lp.BODY_WAIT = 2.0
+lp.BODY_FALLBACK = 0.05
 BRIDGE = Path(_BRIDGE_DIR)
 
 
@@ -1779,6 +1782,120 @@ class UiLimitTest(unittest.TestCase):
         self.assertEqual(patches["0.bonus_shift"], 1)
         self.assertEqual(patches["3.active"], False)
         self.assertNotIn("bonus_shift", state["units"][0])
+
+    # Silica's Double_Shot needs 2 reactor power (pilots.lua PowerCost):
+    # unpowered she acts once like anyone (live 2026-10-16, run 37
+    # Mission_Factory: the PulseMech was done after its first shot).
+    def test_an_unpowered_pilot_skill_gives_no_bonus(self):
+        cases = [({"id": "Pilot_Miner", "power": [0, 0]}, False),
+                 ({"id": "Pilot_Miner", "power": [1, 1]}, True),
+                 ({"id": "Pilot_Miner", "power": {}}, False),  # an empty Lua table
+                 ({"id": "Pilot_Miner", "power": [1, 1], "skill_active": False}, False),
+                 ({"id": "Pilot_Miner", "power": [0, 0], "skill_active": True}, True),
+                 ({"id": "Pilot_Miner"}, True)]  # not known: as before
+        for pilot, on in cases:
+            state = {"units": [{"uid": 1, "pilot": pilot}]}
+            self.assertEqual(lp.pilot_skill(state["units"][0]), "Double_Shot" if on else None, pilot)
+            errors = lp.ui_limit_errors(self.steps(1, "AA"), {}, state)
+            self.assertEqual(errors == [], on, pilot)
+        # Archimedes: no move after shooting while unpowered.
+        state = {"units": [{"uid": 2, "pilot": {"id": "Pilot_Aquatic", "power": [0]}}]}
+        self.assertEqual(len(lp.ui_limit_errors(self.steps(2, "MAM"), {}, state)), 1)
+        # Prospero flies (and fires over water) only while powered.
+        def prospero(power):
+            u = {"uid": 0, "x": 1, "y": 1, "flying": False, "traits": {},
+                 "pilot": {"id": "Pilot_Recycler", "power": power}}
+            return {"units": [u], "tiles": [{"x": 1, "y": 1, "terrain": "water", "terrain_id": 3}]}
+        self.assertIsNone(lp.ui_blocked(prospero([1]), 0))
+        self.assertEqual(lp.ui_blocked(prospero([0]), 0), "submerged")
+        # A skill without a PowerCost is always on.
+        self.assertEqual(lp.pilot_skill({"pilot": {"id": "Pilot_Leader", "power": [0]}}), "Shifty")
+
+    SAVE = ('GameData = {["network"] = 7, \n["current"] = {["score"] = 1, \n'
+            '["mechs"] = {"InfernoMech", "PulseMech", "ScarabMech", },\n'
+            '["pilot0"] = {["id"] = "Pilot_Caretaker", ["name"] = "Rosie Rivets", ["skill1"] = 2, '
+            '["level"] = 2, ["last_end"] = 2, },\n'
+            '["pilot1"] = {["id"] = "Pilot_Miner", ["name"] = "Silica", ["skill1"] = 13, ["level"] = 0, '
+            '["power"] = {0, 0, },\n},\n'
+            '["pilot2"] = {["id"] = "Pilot_Aquatic", ["name"] = "Archimedes", ["power"] = {1, },\n},\n'
+            '}, }\n'
+            'RegionData = {\n["region0"] = {["map_data"] = {["pawn2"] = {["pilot"] = {["id"] = "Pilot_Miner", '
+            '["power"] = {1, 1, },\n}, }, }, }, }\n')
+
+    def test_an_old_bridge_gets_the_pilot_power_from_the_save(self):
+        tmp = Path(tempfile.mkdtemp(prefix="itb_pilot_power_"))
+        saved = lp.PROFILE
+        try:
+            lp.PROFILE = tmp
+            (tmp / "saveData.lua").write_text(self.SAVE)
+            self.assertEqual(lp.save_pilot_power(), {"Pilot_Miner": [0, 0], "Pilot_Aquatic": [1]})
+            state = {"units": [
+                {"uid": 0, "team": 1, "pilot": {"id": "Pilot_Caretaker", "level": 2}},
+                {"uid": 1, "team": 1, "pilot": {"id": "Pilot_Miner", "level": 0}},
+                {"uid": 2, "team": 1, "pilot_id": "Pilot_Aquatic"},
+                {"uid": 3, "team": 1, "pilot": {"id": "Pilot_Miner", "power": [1, 1]}},  # the bridge's wins
+            ]}
+            lp.fill_pilot_power(state)
+            u = {x["uid"]: x for x in state["units"]}
+            self.assertNotIn("power", u[0]["pilot"])
+            self.assertEqual(u[1]["pilot"], {"id": "Pilot_Miner", "level": 0, "power": [0, 0],
+                                             "power_source": "save"})
+            self.assertEqual(u[2]["pilot"]["power"], [1])
+            self.assertEqual(u[3]["pilot"], {"id": "Pilot_Miner", "power": [1, 1]})
+            self.assertIsNone(lp.pilot_skill(u[1]))
+            self.assertEqual(lp.pilot_skill(u[2]), "Post_Move")
+        finally:
+            lp.PROFILE = saved
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(lp.save_pilot_power(Path("/nonexistent/saveData.lua")), {})
+
+
+class BodyWaitTest(unittest.TestCase):
+    """A killed unit stays on the board, dead, while its death animation
+    plays; the next action would push it (live 2026-10-16, run 37
+    Mission_Factory: a dead Wall bumped a building). settled_state(before)
+    waits until it is gone."""
+
+    class Bridge(lp.Bridge):
+        def __init__(self, states):
+            super().__init__()
+            self.states, self.reads = list(states), 0
+
+        def fresh_state(self):
+            self.reads += 1
+            return self.states.pop(0) if len(self.states) > 1 else self.states[0]
+
+    def boards(self):
+        before = base_state()
+        after = copy.deepcopy(before)
+        after["units"] = [u for u in after["units"] if u["uid"] != 100]
+        after["stable"] = True
+        return before, after
+
+    def test_waits_while_the_bridge_lists_a_body(self):
+        before, after = self.boards()
+        lingering = dict(copy.deepcopy(after), dying_bodies=[{"uid": 100, "type": "Scorpion1", "x": 3, "y": 3}])
+        gone = dict(copy.deepcopy(after), dying_bodies=[])
+        b = self.Bridge([lingering, lingering, gone])
+        self.assertEqual(b.settled_state(before=before)["dying_bodies"], [])
+        self.assertEqual(b.reads, 3)
+        # Without `before` (no action just played) it does not wait.
+        b = self.Bridge([lingering, gone])
+        self.assertTrue(b.settled_state()["dying_bodies"])
+
+    def test_an_old_bridge_waits_after_a_kill(self):
+        before, after = self.boards()
+        self.assertEqual(lp.killed_units(before, after), [100])
+        b = self.Bridge([after])
+        b.settled_state(before=before)
+        self.assertEqual(b.reads, 2)  # read, BODY_FALLBACK, read again
+        # Nothing killed (a mech wreck stays as a corpse): no wait.
+        b = self.Bridge([after])
+        b.settled_state(before=after)
+        self.assertEqual(b.reads, 1)
+        dead_mech = copy.deepcopy(before)
+        dead_mech["units"] = [u for u in dead_mech["units"] if u["uid"] != 0]
+        self.assertEqual(lp.killed_units(before, dead_mech), [])
 
 
 class PatchStateWebTest(unittest.TestCase):

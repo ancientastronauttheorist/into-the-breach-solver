@@ -121,6 +121,10 @@ local mech1 = MOCK.add_pawn{id = 1, type = "LimitMech", x = 3, y = 3, team = 1, 
 local vek_a = MOCK.add_pawn{id = 50, type = "Firefly1", x = 5, y = 5, team = 6, selected_weapon = 1}
 local vek_b = MOCK.add_pawn{id = 51, type = "Scorpion1", x = 6, y = 2, team = 6, selected_weapon = 1}
 local psion = MOCK.add_pawn{id = 52, type = "Jelly_Health1", x = 7, y = 7, team = 6}
+-- A Wall killed a moment ago: dead, still on the board (death animation).
+local body = MOCK.add_pawn{id = 53, type = "Wall", x = 1, y = 4, team = 2, hp = 0, max = 1}
+-- Silica (pilots.lua): Double_Shot needs 2 reactor power.
+Pilot_Miner = {Skill = "Double_Shot", PowerCost = 2}
 local train = MOCK.add_pawn{id = 60, type = "Train_Pawn", x = 4, y = 4, team = 1}
 MOCK.tiles[0][0].terrain = TERRAIN_BUILDING
 MOCK.tiles[0][0].hp, MOCK.tiles[0][0].max, MOCK.tiles[0][0].populated = 1, 1, true
@@ -162,7 +166,8 @@ local region3 = '["region3"] = {["mission"] = "Mission3", ["player"] = {["iCurre
     .. pawn_block(2, '["type"] = "LimitMech", ["id"] = 1, ["mech"] = true, '
         .. '["primary"] = "Ranged_Limited", ["primary_mod1"] = {0, }, ["primary_mod2"] = {0, }, '
         .. '["primary_uses"] = 2, ["primary_damaged"] = false, '
-        .. '["pilot"] = {["id"] = "Pilot_Rock", ["exp"] = 3, ["level"] = 0, ["skill1"] = 1, ["skill2"] = 2, }, '
+        .. '["pilot"] = {["id"] = "Pilot_Miner", ["exp"] = 3, ["level"] = 0, ["skill1"] = 1, ["skill2"] = 2, '
+        .. '["power"] = {0, 0, },\n}, '
         .. '["iQueuedSkill"] = -1')
     .. pawn_block(3, '["type"] = "Firefly1", ["id"] = 50, ["mech"] = false, ["iMutation"] = 1, '
         .. '["piTarget"] = Point(5,4), ["piOrigin"] = Point(5,5), ["piQueuedShot"] = Point(5,4), ["iQueuedSkill"] = 1')
@@ -352,6 +357,16 @@ do
     check(type(st.dump_seq) == "number", "dump_seq")
     local m1 = unit(st, 1)
     eq(m1.shots_remaining, 2, "shots remaining")
+    eq(m1.pilot.id, "Pilot_Miner", "pilot id")
+    eq(#m1.pilot.power, 2, "pilot power cells from the save")
+    eq(m1.pilot.power[1], 0, "unpowered pilot")
+    eq(m1.pilot.skill_active, false, "unpowered Double_Shot: Pawn:IsAbility false")
+    eq(m0.pilot.power, nil, "no power cells for a pilot without a PowerCost")
+    eq(m0.pilot.skill_active, nil, "no skill_active for a pilot without a PowerCost")
+    eq(#st.dying_bodies, 1, "one dead body still on the board")
+    eq(st.dying_bodies[1].uid, 53, "the dead Wall")
+    eq(st.dying_bodies[1].x, 1, "dead body tile")
+    eq(unit(st, 53), nil, "the dead Wall is not a unit")
     eq(m1.weapon_slots[1].uses, 2, "limited uses (calibrated at turn start)")
     eq(m1.weapon_slots[1].uses_basis, "calibrated", "uses basis")
     local t = unit(st, 60)
