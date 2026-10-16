@@ -1659,3 +1659,124 @@ TEST_CASE("a bump always makes a burrower dive, on a cracked tile too") {
   CHECK_FALSE(w.pawn(1)->pos.valid());
   CHECK(w.pawn(1)->movement.prev_pos == R);
 }
+
+// ---- Passive_CritDefense (Critical Shields) ---------------------------------------
+// PowerBar::Damage raises event 17 when an unresisted building hit leaves the
+// grid at exactly 1; the next frame's Board::OnLoop shields every tile whose
+// terrain is still BUILDING.
+
+namespace {
+
+void crit_building(Tile& t, int hp, int max_hp = 2, bool populated = true) {
+  t.terrain = Terrain::Building;
+  t.hp = static_cast<int8_t>(hp);
+  t.max_hp = static_cast<int8_t>(max_hp);
+  t.populated = populated;
+}
+
+struct CritWorld : World {
+  CritWorld(int grid, bool passive) {
+    board.grid_power = grid;
+    if (passive) board.passives = kPassiveCritDefense;
+    crit_building(tile({3, 3}), 1, 1);
+    crit_building(tile({4, 4}), 1, 1);
+    crit_building(tile({5, 5}), 1);  // damaged 2-HP building
+    // A unique building at 0 HP stays a building.
+    crit_building(tile({6, 1}), 0, 1, /*populated=*/false);
+    tile({6, 1}).unique_building = intern("str_power1");
+    make_mountain(tile({6, 6}));
+  }
+};
+
+}  // namespace
+
+TEST_CASE("Critical Shields: a hit leaving the grid at 1 shields every building") {
+  CritWorld w(2, true);
+  SkillEffect se;
+  se.add_damage(space_damage({3, 3}, 1));
+  w.fire(se);
+  CHECK(w.board.grid_power == 1);
+  CHECK(w.tile({3, 3}).terrain == Terrain::Rubble);
+  CHECK_FALSE(w.tile({3, 3}).shield);
+  CHECK(w.tile({4, 4}).shield);
+  CHECK(w.tile({5, 5}).shield);
+  CHECK(w.tile({6, 1}).shield);
+  CHECK_FALSE(w.tile({6, 6}).shield);  // mountains are not on the building list
+  // The next hit is absorbed: the grid holds at 1.
+  SkillEffect next;
+  next.add_damage(space_damage({4, 4}, 1));
+  w.fire(next);
+  CHECK(w.board.grid_power == 1);
+  CHECK(w.tile({4, 4}).hp == 1);
+  CHECK_FALSE(w.tile({4, 4}).shield);
+  CHECK(w.tile({5, 5}).shield);
+}
+
+TEST_CASE("Critical Shields go up the frame after the hit") {
+  CritWorld w(2, true);
+  // Two hits in the same frame: the shields come too late for the second.
+  SkillEffect same;
+  same.add_damage(space_damage({3, 3}, 1));
+  same.add_damage(space_damage({4, 4}, 1));
+  w.fire(same);
+  CHECK(w.board.grid_power == 0);
+  CHECK(w.tile({4, 4}).terrain == Terrain::Rubble);
+  CHECK(w.tile({5, 5}).shield);  // the event still fires
+
+  // A delay in between: the second hit meets the shield.
+  CritWorld d(2, true);
+  SkillEffect later;
+  later.add_damage(space_damage({3, 3}, 1));
+  later.add_delay(0.1f);
+  later.add_damage(space_damage({4, 4}, 1));
+  d.fire(later);
+  CHECK(d.board.grid_power == 1);
+  CHECK(d.tile({4, 4}).hp == 1);
+  CHECK(d.tile({5, 5}).shield);
+}
+
+TEST_CASE("Critical Shields: only an unresisted hit ending at exactly 1, with the passive") {
+  {
+    CritWorld w(2, false);  // no passive
+    SkillEffect se;
+    se.add_damage(space_damage({3, 3}, 1));
+    w.fire(se);
+    CHECK(w.board.grid_power == 1);
+    CHECK_FALSE(w.tile({4, 4}).shield);
+  }
+  {
+    CritWorld w(3, true);  // 3 -> 2
+    SkillEffect se;
+    se.add_damage(space_damage({3, 3}, 1));
+    w.fire(se);
+    CHECK(w.board.grid_power == 2);
+    CHECK_FALSE(w.tile({4, 4}).shield);
+  }
+  {
+    CritWorld w(3, true);  // a 2-HP building: 3 -> 1 in one hit
+    crit_building(w.tile({5, 5}), 2);
+    SkillEffect se;
+    se.add_damage(space_damage({5, 5}, 2));
+    w.fire(se);
+    CHECK(w.board.grid_power == 1);
+    CHECK(w.tile({4, 4}).shield);
+  }
+  {
+    CritWorld w(2, true);  // Grid Defense resists: no grid loss, no event
+    w.ctx.rules.grid_resist = [](Point, int) { return true; };
+    SkillEffect se;
+    se.add_damage(space_damage({3, 3}, 1));
+    w.fire(se);
+    CHECK(w.board.grid_power == 2);
+    CHECK_FALSE(w.tile({4, 4}).shield);
+  }
+  {
+    CritWorld w(2, true);  // an unpopulated building costs no grid
+    w.tile({3, 3}).populated = false;
+    SkillEffect se;
+    se.add_damage(space_damage({3, 3}, 1));
+    w.fire(se);
+    CHECK(w.board.grid_power == 2);
+    CHECK_FALSE(w.tile({4, 4}).shield);
+  }
+}

@@ -25,7 +25,8 @@ void damage_building(Board& board, Point p, int damage, RulesContext& ctx) {
   Tile& t = board.tile(p);
   const int n = std::min<int>(damage, t.hp);
   if (n <= 0) return;
-  if (is_populated(t) && !ctx.freeze_events) {
+  const bool grid_hit = is_populated(t) && !ctx.freeze_events;
+  if (grid_hit) {
     if (ctx.grid_resist && ctx.grid_resist(p, n)) {
       emit(ctx, RulesEventType::GridResisted, p, -1, n);
       return;
@@ -37,6 +38,16 @@ void damage_building(Board& board, Point p, int damage, RulesContext& ctx) {
   emit(ctx, RulesEventType::BuildingDamaged, p, -1, n);
   if (t.hp == 0) emit(ctx, RulesEventType::BuildingDestroyed, p);
   if (board.has_passive(kPassiveAutoShield) && t.hp > 0) set_tile_shield(board, p, true, ctx);
+  // PowerBar::Damage: an unresisted hit that leaves the grid at exactly 1
+  // raises event 17, which Board::OnLoop answers in the next frame with
+  // Critical Shields. Without the frame-exact executor they go up at once.
+  if (grid_hit && board.grid_power == 1 && board.has_passive(kPassiveCritDefense)) {
+    if (ctx.frame) {
+      ctx.frame->grid_critical();
+    } else {
+      crit_defense_shields(board, ctx);
+    }
+  }
 }
 
 // D6c: what a damaging hit does to the terrain itself. Bumps only reach

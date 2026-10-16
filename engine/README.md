@@ -501,6 +501,18 @@ Done so far (build order from the decompile):
      before the death was processed, the kill went to nobody and Viscera
      Nanobots did not heal the Judo, as the game did.
    - Boost and Vek Hormones are baked in when an effect is computed.
+   - Critical Shields (`Passive_CritDefense`, AE, PowerCost 0): an
+     unresisted hit on a populated building that leaves the grid at exactly
+     1 raises event 17 (`PowerBar::Damage` @008f4230). Events are current
+     for one frame, the frame after they are raised, so the next frame's
+     `Board::OnLoop` (@00955070, after the weapon animations, before the
+     tiles) shields every tile whose terrain is still BUILDING (objective
+     and unique buildings too; not mountains, not rubble). It fires every
+     time a hit ends at 1, in either phase; a resisted roll or a hit to 0
+     does not fire it, and a second hit in the same frame is not blocked.
+     As for every passive, only the skill's power counts, not whether its
+     mech lives. The bounds stay sound: shields never raise grid power or
+     building HP, they only stop losses.
    - Outcomes that hinge on two events within one frame are reported as
      timing-sensitive; Grid Defense rolls and spider-egg picks are logged as
      chance nodes.

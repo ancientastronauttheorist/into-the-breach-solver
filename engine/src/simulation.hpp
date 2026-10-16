@@ -231,6 +231,7 @@ class Simulation final : public FrameHooks {
   bool start_fall(Pawn& pawn) override;
   void instant_kill(const Pawn& pawn) override;
   void start_dive(Pawn& pawn) override;
+  void grid_critical() override;
 
  private:
   // ---- frame loop (executor.cpp)
@@ -339,6 +340,9 @@ class Simulation final : public FrameHooks {
   int env_xp_ = 0;
 
   bool track_leaders_ = false;  // the board's psion comes from leader pawns on it
+  // Event 17 (grid left at 1) raised since the current frame started
+  // (grid_critical); run_frame makes it current for the next frame.
+  bool crit_pending_ = false;
   int causes_ = 0;
 
   // ctx.timelines when it matches this clock, durations and data, else a

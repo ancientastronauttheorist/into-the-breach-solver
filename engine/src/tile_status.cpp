@@ -431,6 +431,14 @@ void set_tile_shield(Board& board, Point p, bool on, RulesContext& ctx) {
   if (has_pawn(board, p)) set_pawn_shield(board, *first_occupant(board, p), false);
 }
 
+void crit_defense_shields(Board& board, RulesContext& ctx) {
+  for (int i = 0; i < kTileCount; ++i) {
+    const Point p = Point::from_index(i);
+    const Tile& t = board.tile(p);
+    if (t.is_building() && (t.hp > 0 || t.unique_building != kNoSymbol)) set_tile_shield(board, p, true, ctx);
+  }
+}
+
 void set_tile_frozen(Board& board, Point p, bool on, RulesContext& ctx) {
   Tile& t = board.tile(p);
   if (on && t.lava) return;

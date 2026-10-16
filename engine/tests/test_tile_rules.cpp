@@ -560,6 +560,23 @@ TEST_CASE("v40 Auto_Shield re-shields a surviving building") {
   CHECK(w.tile().shield);
 }
 
+TEST_CASE("Critical Shields without the executor: the grid at 1 shields the buildings at once") {
+  World w;
+  w.board.passives = kPassiveCritDefense;
+  w.board.grid_power = 2;
+  make_building(w.tile(), 1, 1);
+  const Point other{5, 5};
+  make_building(w.tile(other), 2, 2);
+  w.hit(1);
+  CHECK(w.board.grid_power == 1);
+  CHECK(w.tile().terrain == Terrain::Rubble);
+  CHECK_FALSE(w.tile().shield);
+  CHECK(w.tile(other).shield);
+  w.hit(1, other);
+  CHECK(w.board.grid_power == 1);
+  CHECK(w.tile(other).hp == 2);
+}
+
 TEST_CASE("v41 unique buildings are populated only at full HP and never rubble") {
   World w;
   make_building(w.tile(), 2, 2, /*populated=*/false);

@@ -431,6 +431,20 @@ TEST_CASE("unpowered weapons cannot fire and unpowered passives do nothing") {
   CHECK(b.has_passive(kPassiveFlameImmune));
 }
 
+TEST_CASE("Passive_CritDefense (Critical Shields) is read from the mechs' weapons") {
+  std::string error;
+  auto rec = load_text("itb_recording_critdefense.json", R"({
+      "tiles": [], "units": [
+        {"uid": 0, "type": "PunchMech", "x": 1, "y": 1, "hp": 3, "max_hp": 3, "team": 1, "mech": true,
+         "weapons_exact": ["Prime_Punchmech", "Passive_CritDefense"],
+         "weapon_slots": [{"id": "Prime_Punchmech", "limited": 0, "powered": true},
+                          {"id": "Passive_CritDefense", "limited": 0, "powered": true}]}]})",
+                       &error);
+  REQUIRE_MESSAGE(rec.has_value(), error);
+  CHECK(rec->board.has_passive(kPassiveCritDefense));
+  CHECK_FALSE(rec->board.has_passive(kPassiveAutoShield));
+}
+
 TEST_CASE("Mission_Reactivation's visible list marks its pawns; the mission's own list is ignored") {
   // `visible`: live_play's reactivation_visible_list; the bridge's
   // instance.Enemies (the mission's hidden list) is always [7] here.

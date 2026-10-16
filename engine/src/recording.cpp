@@ -362,6 +362,7 @@ uint32_t passive_of(std::string_view weapon) {
       {"Passive_Burrows", kPassiveBurrows},
       {"Passive_FastDecay", kPassiveFastDecay},
       {"Passive_VoidShock", kPassiveVoidShock},
+      {"Passive_CritDefense", kPassiveCritDefense},
   };
   for (const auto& [name, bits] : kNames) {
     if (weapon.starts_with(name)) return bits;

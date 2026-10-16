@@ -149,6 +149,10 @@ enum Passive : uint32_t {
   // with the upgrade.
   kPassiveLeechKill = 1u << 18,        // Passive_Leech / "Leech_Kill"
   kPassiveLeechKillA = 1u << 19,       // Passive_Leech_A / "Leech_Kill_A"
+  // Critical Shields (AE): an unresisted building hit that leaves the grid at
+  // exactly 1 shields every building the next frame (tile_rules.hpp
+  // crit_defense_shields).
+  kPassiveCritDefense = 1u << 20,      // Passive_CritDefense
 };
 
 inline constexpr int kMaxWeapons = 4;

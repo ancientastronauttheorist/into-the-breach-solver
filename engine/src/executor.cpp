@@ -188,6 +188,9 @@ Simulation::Simulation(Resolver& owner, Board& board, ResolveContext& ctx)
 }
 
 Simulation::~Simulation() {
+  // A grid hit no frame followed (every run ends with it answered): its
+  // shields still go up.
+  if (crit_pending_ && board_.has_passive(kPassiveCritDefense)) crit_defense_shields(board_, rules_);
   rules_.frame = saved_frame_;
   rules_.grid_resist = std::move(saved_resist_);
   if (script_replaced_) rules_.run_script = std::move(saved_script_);
@@ -346,8 +349,16 @@ void Simulation::run_frame(int64_t f) {
   // BoardPlayer::OnLoop starts with UpdateXP, before Board::OnLoop.
   update_xp();
 
+  // EventSystem::OnLoop: the events raised before this frame become current.
+  const bool crit_now = crit_pending_;
+  crit_pending_ = false;
+
   phase_ = Phase::P1;
   update_weapon_anims();
+
+  // Board::OnLoop, between the weapon animations and the tiles: Critical
+  // Shields answer a grid hit of the previous frame that left the grid at 1.
+  if (crit_now && board_.has_passive(kPassiveCritDefense)) crit_defense_shields(board_, rules_);
 
   phase_ = Phase::P2;
   update_tiles();
@@ -390,7 +401,7 @@ void Simulation::run_frame(int64_t f) {
 }
 
 bool Simulation::idle() const {
-  if (!stack_.empty() || !anims_.empty() || !tile_anims_.empty() || !holes_.empty()) return false;
+  if (!stack_.empty() || !anims_.empty() || !tile_anims_.empty() || !holes_.empty() || crit_pending_) return false;
   for (const Pawn& p : board_.pawns()) {
     const PawnSim* ps = find_state(p.uid);
     if (!ps) {
@@ -413,6 +424,7 @@ int64_t Simulation::next_event(int64_t f) const {
   auto consider = [&](int64_t at) {
     if (at > f) best = std::min(best, at);
   };
+  if (crit_pending_) consider(f + 1);
   for (const WeaponAnim& a : anims_) consider(a.end_frame);
   for (const TileAnim& t : tile_anims_) consider(t.end_frame);
   for (const TileAnim& h : holes_) consider(h.end_frame);
@@ -1008,6 +1020,13 @@ void Simulation::start_dive(Pawn& pawn) {
   ps.burrow_phase = 1;
   ps.burrow_to = kInvalidPoint;
   ps.burrow_end = first_pawn_update(pawn.uid) + clock_.tracker_updates(dur_.burrow_dive) - 1;
+  changed_ = true;
+}
+
+// EventSystem::AddEvent(17) from PowerBar::Damage: pending until the next
+// frame starts (EventSystem::OnLoop), current for that frame only.
+void Simulation::grid_critical() {
+  crit_pending_ = true;
   changed_ = true;
 }
 

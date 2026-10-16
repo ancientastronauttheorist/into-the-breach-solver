@@ -94,6 +94,9 @@ class FrameHooks {
   // Pawn::Burrow(-1, -1) of a hurt burrower (stage 2 H4): the executor plays
   // the dive and takes the pawn off the board when it ends.
   virtual void start_dive(Pawn& pawn) = 0;
+  // PowerBar::Damage raised event 17 (an unresisted hit left the grid at
+  // exactly 1): the next frame's Board::OnLoop runs crit_defense_shields.
+  virtual void grid_critical() = 0;
 };
 
 struct RulesContext {
@@ -189,6 +192,11 @@ void set_tile_acid(Board& board, Point p, bool on, RulesContext& ctx);
 void set_tile_frozen(Board& board, Point p, bool on, RulesContext& ctx);
 // SetForceField / RemoveForceField: structure shield, else the first pawn's.
 void set_tile_shield(Board& board, Point p, bool on, RulesContext& ctx);
+// Passive_CritDefense (Board::OnLoop @00955070, the frame after PowerBar::
+// Damage @008f4230 left the grid at exactly 1): SetForceField on every tile
+// whose terrain is still BUILDING. A plain building at 0 HP is rubble by
+// then and is skipped; a unique building at 0 HP is not.
+void crit_defense_shields(Board& board, RulesContext& ctx);
 // Tile IsForceField / IsFrozen: the structure's, or the first pawn's.
 bool tile_shielded(const Board& board, Point p);
 bool tile_frozen(const Board& board, Point p);
