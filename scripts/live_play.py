@@ -65,7 +65,11 @@ under .local_runs/live_play/restore_backups/, relaunches the game through the
 offline Steam client, clicks Continue on the title screen and compares the
 loaded board with that turn's solve input (mission, turn, grid, buildings,
 units). Continue resumes the run at the
-start of that turn.
+start of that turn. The game reads its saves only at launch (Continue after
+the pause menu's Main Menu resumes the run in memory), hence the relaunch.
+--reload then loads the save once more against the Grid Defense restart
+quirk (Esc, the pause menu's Main Menu, Continue on the title screen) and
+fails if the bridge still reports a wrong Grid Defense base.
 
 deploy: places the mechs on the bridge's exported drop zone (tiles the deploy
 UI refuses are not in it, and DEPLOY refuses them anyway) with a simple
@@ -126,6 +130,14 @@ STEAM_RUN = "steam://run/590380"
 TITLE_CONTINUE = (140, 233)
 CONTINUE_DELAY = 15.0
 CONTINUE_RETRY = 30.0
+# The pause menu (Esc in a mission), fullscreen 1360x768: CONTINUE (530, 246),
+# MAIN MENU (530, 438), SAVE and QUIT (530, 502); Main Menu has no confirm
+# dialog. The heartbeat stalls while it is open (PAUSE_STALL s, looked for
+# PAUSE_WAIT s after Esc); MENU_TO_TITLE s after Main Menu the title is up.
+PAUSE_MAIN_MENU = (530, 438)
+PAUSE_STALL = 2.0
+PAUSE_WAIT = 5.0
+MENU_TO_TITLE = 5.0
 
 # Timings (seconds). Tests shrink them.
 SETTLE_INTERVAL = 0.4
@@ -2496,10 +2508,23 @@ def launch_game() -> None:
     subprocess.run(["open", STEAM_RUN], capture_output=True, check=False)
 
 
+def press_escape() -> bool:
+    """Presses Esc in the game. False if no key tool is available."""
+    cliclick = shutil.which("cliclick") or "/opt/homebrew/bin/cliclick"
+    if not os.path.exists(cliclick):
+        return False
+    subprocess.run(["osascript", "-e", 'tell application "Into the Breach" to activate'],
+                   capture_output=True, check=False)
+    time.sleep(0.4)
+    subprocess.run([cliclick, "kp:esc"], capture_output=True, check=False)
+    return True
+
+
 def restore(ctx) -> list:
     """Puts a turn's checkpoint back and resumes the run there (see the
     module docstring). Returns the differences between the loaded board and
-    that turn's solve input."""
+    that turn's solve input; with --reload, then loads it once more
+    (reload_save) and adds a Grid Defense base still wrong (grid_base_wrong)."""
     args, run = ctx.args, ctx.run
     pre = f"m{args.mission:02d}_turn_{args.turn:02d}"
     files = {name: run.path / f"{pre}_{name}" for name in SAVE_FILES}
@@ -2516,64 +2541,218 @@ def restore(ctx) -> list:
         say("  quitting the game")
         quit_game()
     backup = RESTORE_BACKUPS / time.strftime("%Y%m%d_%H%M%S")
-    backup.mkdir(parents=True, exist_ok=True)
-    for name in SAVE_FILES:
-        if (PROFILE / name).exists():
-            shutil.copy2(PROFILE / name, backup / name)
-        if files[name].exists():
-            shutil.copy2(files[name], PROFILE / name)
-        elif (PROFILE / name).exists():
-            (PROFILE / name).unlink()
+    swap_saves(files, backup)
     say(f"  save files in place (previous ones in {backup})")
-    t0 = time.time()
-    launch_game()
-    deadline = t0 + args.timeout
-    while time.time() < deadline and not game_running():
-        time.sleep(POLL)
-    if not game_running():
-        raise Anomaly(f"the game did not start within {args.timeout:.0f}s")
-    # The bridge is silent on the title screen (no heartbeat, no state), so
-    # Continue is clicked after a delay and again every CONTINUE_RETRY s until
-    # a state written after the click shows the player turn (the state file
-    # can be the old session's).
-    state, clicked = None, 0.0
-    while time.time() < deadline:
-        if time.time() - clicked > CONTINUE_RETRY:
-            time.sleep(CONTINUE_DELAY)
-            say("  clicking Continue")
-            clicked = time.time()
-            ctx.click(args.continue_xy)
-        time.sleep(POLL)
-        try:
-            fresh = lv.STATE.stat().st_mtime > clicked
-        except OSError:
-            fresh = False
-        st = (ctx.bridge.raw_state() or {}) if fresh else {}
-        if in_combat(st) and st.get("phase") == "combat_player" and active_mechs(st):
-            state = st
-            break
-    if state is None:
-        raise Anomaly(f"no player turn within {args.timeout:.0f}s of the launch")
-    state = ctx.bridge.settled_state()
+    t0 = relaunch(args.timeout)
+    state = continue_to_player_turn(ctx, t0 + args.timeout, args.continue_xy)
     say(f"  loaded {state.get('mission_id')} turn {state.get('turn')}")
+    extra = []
+    if getattr(args, "reload", False):
+        state = reload_save(ctx, args.timeout)
+        say(f"  loaded again: {state.get('mission_id')} turn {state.get('turn')}")
+        warning = grid_base_wrong(state)
+        if warning:
+            say("  " + warning)
+            extra.append(warning)
     if want is None:
-        return []
+        return extra
     diffs = checkpoint_diffs(want, state)
     for d in diffs:
         say(f"  differs from the checkpoint's solve input: {d}")
     if not diffs:
         say("  board matches the checkpoint's solve input")
-    return diffs
+    return diffs + extra
+
+
+# ------------------------------------------------------------------ restore pieces (live_play restore, fuzz_play)
+#
+# The game reads its save files only at launch: Continue on the title screen
+# after Main Menu resumes the run still in memory, whatever saveData.lua now
+# holds. So a save is put in place with the game stopped (quit_game, then
+# swap_saves: its exit save cannot overwrite it), the game is relaunched
+# (relaunch) and Continue clicked on the title screen (continue_until). The
+# bridge is silent on the title screen and on the island map (no heartbeat,
+# no state), so title-screen clicks go out only right after a launch or
+# right after the pause menu's Main Menu, never once the bridge ticks.
+
+def swap_saves(files: dict, backup: Path | None = None) -> None:
+    """With the game stopped: copies the profile's save files into `backup`
+    (when given), then puts `files` ({name: path or None}) in their place;
+    None or a missing path removes that file (a checkpoint without
+    undoSave.lua; a profile with no run in progress has no saveData.lua)."""
+    PROFILE.mkdir(parents=True, exist_ok=True)
+    if backup is not None:
+        backup.mkdir(parents=True, exist_ok=True)
+    for name in SAVE_FILES:
+        if backup is not None and (PROFILE / name).exists():
+            shutil.copy2(PROFILE / name, backup / name)
+        src = files.get(name)
+        if src is not None and Path(src).exists():
+            shutil.copy2(src, PROFILE / name)
+        elif (PROFILE / name).exists():
+            (PROFILE / name).unlink()
+
+
+def relaunch(timeout: float) -> float:
+    """launch_game() (the offline Steam client's steam://run) and waits for
+    the game process. Returns the launch time."""
+    t0 = time.time()
+    launch_game()
+    deadline = t0 + timeout
+    while time.time() < deadline and not game_running():
+        time.sleep(POLL)
+    if not game_running():
+        raise Anomaly(f"the game did not start within {timeout:.0f}s")
+    return t0
+
+
+def bridge_alive_since(bridge, t: float) -> bool:
+    """The heartbeat (Mission.BaseUpdate: a mission is open and not paused)
+    ticked after time t."""
+    age = bridge.heartbeat_age()
+    return age is not None and time.time() - age > t
+
+
+def state_since(t: float) -> bool:
+    try:
+        return lv.STATE.stat().st_mtime > t
+    except OSError:
+        return False
+
+
+def fresh_player_turn(bridge, since: float) -> dict | None:
+    """The bridge state, if written after `since` and showing a player turn
+    with an active mech."""
+    st = (bridge.raw_state() or {}) if state_since(since) else {}
+    return st if in_combat(st) and st.get("phase") == "combat_player" and active_mechs(st) else None
+
+
+def fresh_mission(bridge, since: float) -> dict | None:
+    """The bridge state, if the bridge ticked and wrote it after `since` (a
+    mission is open, whatever its phase)."""
+    if not (bridge_alive_since(bridge, since) and state_since(since)):
+        return None
+    return bridge.raw_state() or None
+
+
+def continue_until(ctx, deadline: float, xy: tuple, ready, *, delay: float | None = None,
+                   guard: bool = False, what: str = "the launch") -> dict:
+    """Clicks the title screen's Continue at xy, `delay` s (default
+    CONTINUE_DELAY) after each CONTINUE_RETRY s without a result, until
+    ready(click time) gives a state (written after the click: the state file
+    can be an older session's). guard: a retry only while the bridge has
+    stayed silent since the last click (once it ticks a mission is open, and
+    no title-screen click goes to it). --no-click asks once instead.
+    Returns that state."""
+    no_click = getattr(ctx.args, "no_click", False)
+    clicked = 0.0
+    while time.time() < deadline:
+        retry = not clicked or (not no_click and time.time() - clicked > CONTINUE_RETRY
+                                and not (guard and bridge_alive_since(ctx.bridge, clicked)))
+        if retry and no_click:
+            say("  >>> click Continue on the title screen now")
+            clicked = time.time()
+        elif retry:
+            time.sleep(CONTINUE_DELAY if delay is None else delay)
+            say("  clicking Continue")
+            clicked = time.time()
+            ctx.click(xy)
+        time.sleep(POLL)
+        state = ready(clicked)
+        if state is not None:
+            return state
+    raise Anomaly(f"no player turn within {ctx.args.timeout:.0f}s of {what}")
+
+
+def continue_to_player_turn(ctx, deadline: float, xy: tuple, *, delay: float | None = None,
+                            guard: bool = False, what: str = "the launch") -> dict:
+    """continue_until a fresh player turn; returns the settled state."""
+    continue_until(ctx, deadline, xy, lambda t: fresh_player_turn(ctx.bridge, t), delay=delay, guard=guard,
+                   what=what)
+    return ctx.bridge.settled_state()
+
+
+def wait_stall(bridge, timeout: float) -> bool:
+    """True once the heartbeat has stalled PAUSE_STALL s (the pause menu is
+    open, or the mission closed) within `timeout`."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not bridge_alive_since(bridge, time.time() - PAUSE_STALL):
+            return True
+        time.sleep(POLL / 2)
+    return False
+
+
+def reload_save(ctx, timeout: float, player_turn: bool = True) -> dict:
+    """The second load after a restart (engine/README.md "Live play": a save
+    continued right after the game starts gets the Grid Defense base of the
+    settings file's difficulty; loading it once more builds the power bar
+    under the save's). From an open mission: Esc; once the heartbeat stalls
+    (the pause menu is open; never a click on the board) the pause menu's
+    MAIN MENU (--main-menu-xy, no confirm dialog); MENU_TO_TITLE s later,
+    with the bridge still silent, Continue on the title screen (again only
+    while the bridge stays silent since the click), until a fresh player
+    turn (player_turn False: until the bridge ticks with a fresh state).
+    --no-click asks you to do it. Returns that state (settled for a player
+    turn)."""
+    args, bridge = ctx.args, ctx.bridge
+    menu_xy = getattr(args, "main_menu_xy", None) or PAUSE_MAIN_MENU
+    continue_xy = getattr(args, "continue_xy", None) or TITLE_CONTINUE
+    deadline = time.time() + timeout
+    if not bridge_alive_since(bridge, time.time() - PAUSE_STALL):
+        raise Anomaly("second load: no mission is open (the bridge is silent): nothing pressed")
+    say("  loading the save once more (Grid Defense restart quirk): Esc, Main Menu, Continue")
+    if getattr(args, "no_click", False):
+        say("  >>> press Esc and click MAIN MENU")
+        if not wait_stall(bridge, timeout):
+            raise Anomaly("second load: the mission did not close")
+    else:
+        for _ in range(2):
+            if not ctx.escape():
+                raise Refused("no cliclick: cannot press Esc for the second load")
+            if wait_stall(bridge, PAUSE_WAIT):
+                break
+        else:
+            raise Anomaly("second load: Esc did not open the pause menu (the heartbeat did not stall): "
+                          "nothing clicked")
+        say("  clicking Main Menu")
+        menu = time.time()
+        ctx.click(menu_xy)
+        time.sleep(MENU_TO_TITLE)
+        if bridge_alive_since(bridge, menu):
+            raise Anomaly("second load: the bridge ticked after Main Menu (not on the title screen?): "
+                          "nothing more clicked")
+    if player_turn:
+        return continue_to_player_turn(ctx, deadline, continue_xy, delay=0.0, guard=True,
+                                       what="the second load")
+    return continue_until(ctx, deadline, continue_xy, lambda t: fresh_mission(bridge, t), delay=0.0, guard=True,
+                          what="the second load")
+
+
+def grid_base_wrong(st: dict) -> str | None:
+    """grid_base_warning, and the other way round as well: a power bar
+    built under a difficulty on the other side of Unfair than the save's
+    (grid_base_difficulty against difficulty; unknown on older bridges)."""
+    warning = grid_base_warning(st)
+    if warning:
+        return warning
+    built = st.get("grid_base_difficulty")
+    difficulty = st.get("difficulty", (st.get("mission_state") or {}).get("difficulty"))
+    if isinstance(built, int) and isinstance(difficulty, int) and (built == 3) != (difficulty == 3):
+        return (f"WARNING: Grid Defense base {st.get('grid_defense_base')}% built under difficulty {built} on a "
+                f"difficulty {difficulty} save (restart bug)")
+    return None
 
 
 class Context:
-    def __init__(self, args, bridge=None, engine=None, run=None, click=None):
+    def __init__(self, args, bridge=None, engine=None, run=None, click=None, escape=None):
         self.args = args
         self.run = run
         self.bridge = bridge or Bridge(log=lambda k, d: self.run.event(k, d) if self.run else None)
         self.engine = engine
         self.loadout = load_loadout(getattr(args, "loadout", None))
         self.click = click or click_end_turn
+        self.escape = escape or press_escape
         self.mission_over = False
 
 
@@ -2672,10 +2851,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--timeout", type=float, default=180.0, help="wait for the loaded player turn (s)")
     p.add_argument("--continue-xy", type=lambda s: tuple(int(v) for v in s.split(",")),
                    default=TITLE_CONTINUE, help="title screen Continue point (default: fullscreen 1360x768)")
+    p.add_argument("--reload", action="store_true",
+                   help="then load the save once more (Esc, the pause menu's Main Menu, Continue: the Grid Defense "
+                        "restart quirk) and check the Grid Defense base")
+    p.add_argument("--main-menu-xy", type=lambda s: tuple(int(v) for v in s.split(",")), default=PAUSE_MAIN_MENU,
+                   help="with --reload: the pause menu's MAIN MENU point (default: fullscreen 1360x768)")
     return ap
 
 
-def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
+def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int:
     args = build_parser().parse_args(argv)
     if getattr(args, "survival_cap", False) and not getattr(args, "grid_survival", False):
         say("note: --survival-cap needs --grid-survival: ignored")
@@ -2688,7 +2872,7 @@ def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
         run = Run(path, Run._read_meta(path))
     else:
         run = None if args.command == "status" and not args.new_run else Run.open(args.run, args.new_run)
-    ctx = Context(args, bridge=bridge, engine=engine, run=run, click=click)
+    ctx = Context(args, bridge=bridge, engine=engine, run=run, click=click, escape=escape)
     if ctx.engine is None and args.command in ("turn", "end-turn", "mission"):
         ctx.engine = Engine(args.threads, args.game, run.path / "itb_live.log")
     lock = None

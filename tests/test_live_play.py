@@ -32,6 +32,14 @@ for _m in ("live_validate", "live_play"):
 import live_play as lp  # noqa: E402
 import live_validate as lv  # noqa: E402
 
+def _never(*_a, **_k):
+    raise AssertionError("a test reached the real game: quit / launch / click / Esc (stub them)")
+
+
+# The real game may be running on this machine: no test may quit or launch
+# it, click or press keys (tests put fakes in their place: FakeGame).
+lp.quit_game = lp.launch_game = lp.click_end_turn = lp.press_escape = _never
+
 lp.SETTLE_INTERVAL = 0.01
 lp.POLL = 0.02
 lp.BODY_POLL = 0.01
@@ -366,6 +374,94 @@ class FakeBridge:
         self.thread.join(timeout=2)
 
 
+class FakeGame:
+    """The game process around a FakeBridge, for the restore path: it reads
+    the profile's saveData.lua only at launch (Continue after Main Menu
+    resumes the run in memory); the bridge is silent on the title screen,
+    on the island map and in the pause menu; Continue on the title loads the
+    save read at launch (greyed without one); Esc in a mission opens the
+    pause menu, whose MAIN MENU goes to the title. The first load after a
+    launch builds the power bar under the settings file's difficulty
+    (`settings`; the saves are Unfair): Grid Defense base 15. `boards`: save
+    text -> the board it resumes at (None: the island map). Use quit / launch
+    / click / escape in place of live_play's. A click where it does nothing
+    useful is logged as ("MISCLICK", screen, xy)."""
+
+    def __init__(self, boards: dict, own: str, settings: int = 2, quirk_sticks: bool = False):
+        self.boards = boards
+        self.settings = settings
+        self.quirk_sticks = quirk_sticks  # the second load keeps the bad base too
+        self.events = []
+        self.running = True
+        self.memory = own
+        self.loads = 1
+        self.screen = "mission" if boards.get(own) is not None else "island"
+        self.fb = FakeBridge(self.board(own, first=False) if boards.get(own) is not None else base_state())
+        self.fb.silent = self.screen != "mission"
+
+    def board(self, save: str, first: bool) -> dict:
+        st = copy.deepcopy(self.boards[save])
+        built = self.settings if first or self.quirk_sticks else 3
+        st.update(difficulty=3, grid_base_difficulty=built, grid_defense_base=0 if built == 3 else 15)
+        return st
+
+    def quit(self, timeout: float = 20.0):
+        self.events.append("quit")
+        self.running, self.screen, self.fb.silent = False, None, True
+
+    def launch(self):
+        self.events.append("launch")
+        save = lp.PROFILE / "saveData.lua"
+        self.memory = save.read_text() if save.exists() else None
+        self.running, self.screen, self.loads, self.fb.silent = True, "title", 0, True
+
+    def escape(self) -> bool:
+        self.events.append("esc")
+        if self.screen == "mission":
+            self.screen, self.fb.silent = "paused", True
+        return True
+
+    def click(self, xy) -> bool:
+        self.events.append(tuple(xy))
+        if tuple(xy) == lp.TITLE_CONTINUE and self.screen == "title":
+            if self.memory is None:
+                return True  # greyed out
+            self.loads += 1
+            if self.boards.get(self.memory) is None:
+                self.screen = "island"
+                return True
+            self.fb.state = self.board(self.memory, first=self.loads == 1)
+            self.screen, self.fb.silent = "mission", False
+            self.fb.write_state()
+        elif tuple(xy) == lp.PAUSE_MAIN_MENU and self.screen == "paused":
+            self.screen = "title"
+        elif tuple(xy) == lv.END_TURN_SCREEN and self.screen == "mission":
+            threading.Thread(target=self.fb.advance, daemon=True).start()
+        else:
+            self.events.append(("MISCLICK", self.screen, tuple(xy)))
+        return True
+
+    def install(self):
+        """Puts this game in place of live_play's process functions; returns
+        a function that puts them back."""
+        saved = (lp.game_running, lp.quit_game, lp.launch_game, lp.CONTINUE_DELAY, lp.PAUSE_STALL,
+                 lp.PAUSE_WAIT, lp.MENU_TO_TITLE)
+        lp.game_running = lambda: self.running
+        lp.quit_game, lp.launch_game = self.quit, self.launch
+        lp.CONTINUE_DELAY, lp.PAUSE_STALL, lp.PAUSE_WAIT, lp.MENU_TO_TITLE = 0.0, 0.1, 1.0, 0.1
+
+        def undo():
+            (lp.game_running, lp.quit_game, lp.launch_game, lp.CONTINUE_DELAY, lp.PAUSE_STALL, lp.PAUSE_WAIT,
+             lp.MENU_TO_TITLE) = saved
+        return undo
+
+    def misclicks(self) -> list:
+        return [e for e in self.events if isinstance(e, tuple) and e and e[0] == "MISCLICK"]
+
+    def close(self):
+        self.fb.close()
+
+
 class LivePlayTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="itb_live_play_"))
@@ -554,6 +650,73 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual((backups[0] / "undoSave.lua").read_text(), "current undo")
         # The current run is not switched to the restored one.
         self.assertFalse(lp.CURRENT.exists())
+
+    def restore_game(self, quirk_sticks=False):
+        st = base_state()
+        run = self.tmp / "live" / "old"
+        run.mkdir(parents=True)
+        (run / "m03_turn_02_saveData.lua").write_text("checkpoint")
+        (run / "m03_turn_02_solve_input.json").write_text(json.dumps({"data": {"bridge_state": st}}))
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text("current")
+        game = FakeGame({"checkpoint": st, "current": None}, "current", quirk_sticks=quirk_sticks)
+        self.fb = game.fb
+        return run, game
+
+    def test_restore_reload_loads_the_save_twice(self):
+        # Continue right after the launch gets the settings file's
+        # difficulty (base 15 on the Unfair save); --reload loads it once
+        # more (Esc, pause menu Main Menu, Continue) and the base is right.
+        run, game = self.restore_game()
+        undo = game.install()
+        try:
+            rc = lp.main(["restore", "--run", str(run), "--mission", "3", "--turn", "2", "--timeout", "10",
+                          "--reload"], engine=FakeEngine(), click=game.click, escape=game.escape)
+            st = lp.Bridge().raw_state()
+        finally:
+            undo()
+        self.assertEqual(rc, 0)
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, "esc", lp.PAUSE_MAIN_MENU,
+                                       lp.TITLE_CONTINUE])
+        self.assertEqual((st["grid_defense_base"], st["grid_base_difficulty"]), (0, 3))
+        self.assertIsNone(lp.grid_base_wrong(st))
+
+    def test_restore_reload_fails_on_a_base_still_wrong(self):
+        run, game = self.restore_game(quirk_sticks=True)
+        undo = game.install()
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = lp.main(["restore", "--run", str(run), "--mission", "3", "--turn", "2", "--timeout", "10",
+                              "--reload"], engine=FakeEngine(), click=game.click, escape=game.escape)
+        finally:
+            undo()
+        self.assertEqual(rc, 1)
+        self.assertIn("Grid Defense base 15% on an Unfair save", out.getvalue())
+
+    def test_grid_base_wrong_both_ways(self):
+        self.assertIsNotNone(lp.grid_base_wrong({"grid_defense_base": 15, "difficulty": 3}))
+        self.assertIsNotNone(lp.grid_base_wrong({"grid_defense_base": 0, "grid_base_difficulty": 3,
+                                                 "difficulty": 2}))
+        self.assertIsNone(lp.grid_base_wrong({"grid_defense_base": 15, "grid_base_difficulty": 1,
+                                              "difficulty": 2}))
+        self.assertIsNone(lp.grid_base_wrong({"grid_defense_base": 0, "grid_base_difficulty": 3,
+                                              "difficulty": 3}))
+        self.assertIsNone(lp.grid_base_wrong({"difficulty": 3}))
+
+    def test_swap_saves_backs_up_and_removes_what_the_source_lacks(self):
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "undoSave.lua").write_text("own undo")  # no run in progress: no saveData.lua
+        src = self.tmp / "ck_saveData.lua"
+        src.write_text("ck")
+        backup = self.tmp / "backup"
+        lp.swap_saves({"saveData.lua": src, "undoSave.lua": None}, backup)
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "ck")
+        self.assertFalse((lp.PROFILE / "undoSave.lua").exists())
+        self.assertEqual(sorted(p.name for p in backup.iterdir()), ["undoSave.lua"])
+        lp.swap_saves({name: backup / name for name in lp.SAVE_FILES})
+        self.assertFalse((lp.PROFILE / "saveData.lua").exists())
+        self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "own undo")
 
     def test_new_run_stays_current_while_an_older_command_writes(self):
         # Live 2026-10-14: `status --new-run` at 08:17 while a `mission` begun
