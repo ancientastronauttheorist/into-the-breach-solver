@@ -1,6 +1,7 @@
 """scripts/fuzz_play.py against the fake bridge and engine of
 tests/test_live_play.py. Nothing here touches the game or the desktop:
-clicks go to a recorder, the game process check is stubbed.
+clicks and Esc go to a recorder (FakeGame), the game process functions
+(running, quit, launch) are FakeGame's or refuse (test_live_play._never).
 
     python3 -m unittest tests.test_fuzz_play
 """
@@ -22,10 +23,10 @@ from tests import test_live_play as tlp  # sets ITB_BRIDGE_DIR to a temp dir fir
 import fuzz_play as fz  # noqa: E402  (scripts/ is on sys.path via test_live_play)
 
 lp, lv = tlp.lp, tlp.lv
-fz.TITLE_SILENT = 0.2
-fz.SAVE_QUIET = 0.05
-fz.PAUSE_STALL = 0.1
 lp.CONTINUE_RETRY = 0.5
+fz.END_CONTINUE_DELAY = 0.0
+fz.END_WAIT = 0.5
+fz.END_SETTLE = 0.0
 
 
 def to_step(a: dict, i: int) -> dict:
@@ -112,11 +113,17 @@ class FuzzTest(unittest.TestCase):
         lp.RESTORE_BACKUPS = self.tmp / "restore_backups"
         lp.game_running = lambda: True
         self.fb = None
+        self.game = None
+        self.undo = None
         self.clicks = []
 
     def tearDown(self):
         if self.fb:
             self.fb.close()
+        if self.game:
+            self.game.close()
+        if self.undo:
+            self.undo()
         lp.LIVE_ROOT, lp.CURRENT, lp.PROFILE, lp.RESTORE_BACKUPS, lp.game_running = self._roots
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -294,100 +301,149 @@ class FuzzTest(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertFalse((self.tmp / "fuzz").exists())
 
-    def test_clicks_mode_needs_the_main_menu_point(self):
+    # ------------------------------------------------------------ restore by relaunch
+
+    def fake_game(self, own_board="mission", quirk_sticks=False, own_save=True) -> tlp.FakeGame:
+        """The player's own run in the profile (in a mission, or on the
+        island map: own_board "island"), a checkpoint recorded, the game
+        running that run."""
         self.record()
-        rc = fz.main(["--recordings", str(lp.LIVE_ROOT), "--restore-mode", "clicks"], engine=FuzzEngine([]))
-        self.assertEqual(rc, 2)
-
-    # ------------------------------------------------------------ restore inside the game
-
-    def test_restore_in_game_puts_the_checkpoint_in_and_continues(self):
-        path = self.record()
-        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
         lp.PROFILE.mkdir(parents=True)
-        (lp.PROFILE / "saveData.lua").write_text("-- the player's own run")
+        if own_save:
+            (lp.PROFILE / "saveData.lua").write_text("-- the player's own run")
         (lp.PROFILE / "undoSave.lua").write_text("-- the player's own undo")
-        want = json.loads(path.read_text())["data"]["bridge_state"]
+        own = copy.deepcopy(tlp.base_state())
+        own["mission_id"], own["turn"] = "Mission_Own", 3
+        boards = {"-- checkpoint 0 1": dict(tlp.base_state(), turn=1),
+                  "-- the player's own run": own if own_board == "mission" else None}
+        game = tlp.FakeGame(boards, "-- the player's own run", quirk_sticks=quirk_sticks)
+        self.game = game
+        self.undo = game.install()
+        return game
 
-        class TitleBridge:  # the title screen: silent until Continue loads the save
-            def __init__(self):
-                self.live = False
-
-            def heartbeat_age(self):
-                return 0.01 if self.live else 100.0
-
-            def raw_state(self):
-                return lv.read_json(lv.STATE)
-
-            def settled_state(self, before=None):
-                return lv.read_json(lv.STATE)
-
-        tb = TitleBridge()
-        clicks = []
-
-        def click(xy):
-            clicks.append(xy)
-            if xy == lp.TITLE_CONTINUE:
-                tb.live = True
-                lv.STATE.write_text(json.dumps(want))
-            return True
-
-        args = args_for(["--at-title"])
+    def ctx_for(self, game, extra=()):
+        args = args_for(list(extra))
         sess = fz.Session(args, self.tmp / "fuzz")
-        ctx = lp.Context(args, bridge=tb, engine=None, run=None, click=click)
-        state = fz.restore_in_game(ctx, sess, ts)
-        self.assertEqual(state["turn"], 1)
-        self.assertEqual(clicks, [lp.TITLE_CONTINUE])
+        ctx = lp.Context(args, bridge=None, engine=None, run=None, click=game.click, escape=game.escape)
+        return args, sess, ctx
+
+    def test_restore_relaunches_with_the_checkpoint_and_loads_it_twice(self):
+        # Live 2026-10-16: Continue after Main Menu resumed the run in
+        # memory, not the swapped save; the game reads the saves at launch.
+        game = self.fake_game()
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        state = fz.restore_by_relaunch(ctx, sess, ts)
+        self.assertEqual((state["mission_id"], state["turn"]), ("Mission_Test", 1))
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, "esc", lp.PAUSE_MAIN_MENU,
+                                       lp.TITLE_CONTINUE])
+        self.assertEqual(game.misclicks(), [])
+        self.assertEqual((state["grid_defense_base"], state["grid_base_difficulty"]), (0, 3))
         self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- checkpoint 0 1")
         self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- undo 0 1")
         self.assertEqual((sess.backup / "saveData.lua").read_text(), "-- the player's own run")
-        # Back on the title screen (you confirm it), the profile's own files return.
-        tb.live = False
-        (sess.dir / "at_title").write_text("")
-        fz.put_back(ctx, sess)
+        # A second sample keeps the first backup.
+        fz.restore_by_relaunch(ctx, sess, ts)
+        self.assertEqual((sess.backup / "saveData.lua").read_text(), "-- the player's own run")
+        # The end: the player's own run back, resumed in its mission, loaded twice.
+        game.events.clear()
+        self.assertEqual(fz.put_back(ctx, sess), [])
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, "esc", lp.PAUSE_MAIN_MENU,
+                                       lp.TITLE_CONTINUE])
         self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
         self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- the player's own undo")
+        st = lp.Bridge().raw_state()
+        self.assertEqual((st["mission_id"], st["grid_defense_base"]), ("Mission_Own", 0))
+
+    def test_restore_stops_on_a_grid_defense_base_still_wrong(self):
+        game = self.fake_game(quirk_sticks=True)
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        with self.assertRaisesRegex(lp.Anomaly, "Grid Defense base 15"):
+            fz.restore_by_relaunch(ctx, sess, ts)
 
     def test_restore_refuses_a_board_that_differs_from_the_checkpoint(self):
-        path = self.record()
-        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
-        other = json.loads(path.read_text())["data"]["bridge_state"]
+        game = self.fake_game()
+        other = dict(tlp.base_state(), turn=1)
+        other["units"] = copy.deepcopy(other["units"])
         tlp.unit(other, 100)["hp"] = 1
+        game.boards["-- checkpoint 0 1"] = other
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        with self.assertRaisesRegex(lp.Anomaly, "differs"):
+            fz.restore_by_relaunch(ctx, sess, ts)
 
-        class B:
-            def heartbeat_age(self):
-                return 100.0
+    def test_put_back_on_the_island_map_clicks_continue_once(self):
+        # The own run resumes on the island map (the bridge is silent there):
+        # one Continue, no second load, no title-screen click on the map.
+        game = self.fake_game(own_board="island")
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        fz.restore_by_relaunch(ctx, sess, ts)
+        game.events.clear()
+        notes = fz.put_back(ctx, sess)
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE])
+        self.assertEqual(game.screen, "island")
+        self.assertTrue(notes and "island map" in notes[0])
+        self.assertEqual(game.misclicks(), [])
 
-            def raw_state(self):
-                return lv.read_json(lv.STATE)
+    def test_put_back_without_a_run_leaves_the_title_screen(self):
+        # The previous run was lost: the profile has only undoSave.lua.
+        game = self.fake_game(own_save=False)
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        fz.restore_by_relaunch(ctx, sess, ts)
+        game.events.clear()
+        fz.put_back(ctx, sess)
+        self.assertEqual(game.events, ["quit", "launch"])
+        self.assertFalse((lp.PROFILE / "saveData.lua").exists())
+        self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- the player's own undo")
 
-            def settled_state(self, before=None):
-                return lv.read_json(lv.STATE)
+    def test_put_back_cli_takes_a_backup_without_savedata(self):
+        game = self.fake_game()
+        session = self.tmp / "fuzz" / "old"
+        (session / "profile_backup").mkdir(parents=True)
+        (session / "profile_backup" / "undoSave.lua").write_text("-- undo only")
+        rc = fz.main(["--put-back", str(session), "--dry-run"], click=game.click, escape=game.escape)
+        self.assertEqual((rc, game.events), (0, []))
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
+        orig = fz.other_drivers
+        fz.other_drivers = lambda own_pid=None: []  # whatever runs on this machine
+        try:
+            rc = fz.main(["--put-back", str(session)], click=game.click, escape=game.escape)
+        finally:
+            fz.other_drivers = orig
+        self.assertEqual(rc, 0)
+        self.assertEqual(game.events, ["quit", "launch"])
+        self.assertFalse((lp.PROFILE / "saveData.lua").exists())
+        self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- undo only")
+        self.assertEqual(fz.main(["--put-back", str(self.tmp / "nothing")]), 2)
 
-        def click(xy):
-            lv.STATE.write_text(json.dumps(other))
-            return True
-
-        args = args_for(["--at-title"])
+    def test_a_live_session_restores_plays_and_puts_back(self):
+        game = self.fake_game()
+        args = args_for(["--samples", "1", "--recordings", str(lp.LIVE_ROOT)])
         sess = fz.Session(args, self.tmp / "fuzz")
-        ctx = lp.Context(args, bridge=B(), engine=None, run=None, click=click)
-        with self.assertRaises(lp.Anomaly):
-            fz.restore_in_game(ctx, sess, ts)
+        starts = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+        rc = fz.live(args, FuzzEngine(CANDIDATES), sess, starts, click=game.click, escape=game.escape)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sess.outcomes["matched"], 1)
+        self.assertEqual(game.misclicks(), [])
+        self.assertEqual(game.events.count("quit"), 2)  # the sample, then the put-back
+        self.assertIn("END_TURN", game.fb.commands)
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
+        self.assertEqual(lp.Bridge().raw_state()["mission_id"], "Mission_Own")
+        lp.DriverLock("after").acquire().release()
 
-    def test_the_title_screen_needs_a_save_or_your_word(self):
-        class Silent:
-            def heartbeat_age(self):
-                return 100.0
-
-        sess = fz.Session(args_for(), self.tmp / "fuzz")
-        self.assertFalse(fz.wait_title(Silent(), 0.3, time.time(), sess.dir / "at_title"))
-        (sess.dir / "at_title").write_text("")
-        self.assertTrue(fz.wait_title(Silent(), 0.3, time.time(), sess.dir / "at_title"))
-        lp.PROFILE.mkdir(parents=True)
-        t0 = time.time()
-        time.sleep(0.02)
-        (lp.PROFILE / "saveData.lua").write_text("saved on the way out")
-        self.assertTrue(fz.wait_title(Silent(), 1.0, t0))
+    def test_a_failed_restore_stops_and_still_puts_back(self):
+        game = self.fake_game(quirk_sticks=True)
+        args = args_for(["--samples", "3", "--recordings", str(lp.LIVE_ROOT)])
+        sess = fz.Session(args, self.tmp / "fuzz")
+        starts = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+        rc = fz.live(args, FuzzEngine(CANDIDATES), sess, starts, click=game.click, escape=game.escape)
+        self.assertEqual(rc, 1)
+        self.assertEqual(sess.outcomes["restore_failed"], 1)
+        self.assertEqual(game.events.count("launch"), 2)  # one sample, then the put-back
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
 
     # ------------------------------------------------------------ live turns (fake bridge)
 
@@ -406,12 +462,12 @@ class FuzzTest(unittest.TestCase):
                 threading.Thread(target=self.fb.advance, daemon=True).start()
             return True
 
-        orig = fz.restore_in_game
-        fz.restore_in_game = lambda ctx, s, ts: ctx.bridge.settled_state()
+        orig = fz.restore_by_relaunch
+        fz.restore_by_relaunch = lambda ctx, s, ts: ctx.bridge.settled_state()
         try:
             rc = fz.live(args, eng, sess, starts, click=click)
         finally:
-            fz.restore_in_game = orig
+            fz.restore_by_relaunch = orig
         findings = []
         if (sess.dir / "findings.jsonl").exists():
             findings = [json.loads(line) for line in (sess.dir / "findings.jsonl").read_text().splitlines()]

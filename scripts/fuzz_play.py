@@ -12,7 +12,7 @@ game with the engine after every step and after the enemy phase.
 
     python3 scripts/fuzz_play.py --dry-run --samples 20          # engine only, never touches the game
     python3 scripts/fuzz_play.py --dry-run --run 20261016_130634 --mission 2 --turn 2
-    python3 scripts/fuzz_play.py --samples 10 --restore-mode manual   # live (see engine/README.md "Fuzzing")
+    python3 scripts/fuzz_play.py --samples 10                     # live (see engine/README.md "Fuzzing")
 
 Moves come from the engine's own enumeration (itb_live "actions": the
 solver's Action model, each candidate run once on a copy of the board for
@@ -36,19 +36,25 @@ fuzzer hit) and then differs is a "chance" finding: the driver re-predicts
 the rest from the live board and goes on. Any other step difference ends
 the sample (no End Turn); the next sample restores another turn start.
 
-Live mode restores each turn start inside the running game: it brings the
-game to the title screen (--restore-mode clicks: Esc, then, once the
-heartbeat stalls in the pause menu, its Main Menu at --main-menu-xy
-[--confirm-xy]; manual, the default: you do it), knows the title screen by a
-silent bridge plus the save the game writes on the way out (or a touched
-<session>/at_title file), puts that turn's checkpoint
-(m<MM>_turn_<TT>_saveData.lua / _undoSave.lua) into the profile, clicks
-Continue and checks the loaded board against the recorded one. It never quits or launches the game and never touches
-Steam. The profile's own save files are copied aside the first time the
-title screen is reached and put back at the end (the game is left on the
-title screen; --end-continue clicks Continue). It refuses to start while
-another driver acts (the driver lock live_play holds, a running
-live_play.py mission/turn/deploy/end-turn/restore, drive2.sh /
+Live mode restores each turn start as `live_play.py restore` does, with its
+functions (the game reads its saves only at launch: Continue after the pause
+menu's Main Menu resumes the run in memory): it quits the game, puts that
+turn's checkpoint (m<MM>_turn_<TT>_saveData.lua / _undoSave.lua) into the
+profile, relaunches the game (live_play.launch_game: `open steam://run/...`
+through the offline Steam client, nothing else of Steam), clicks Continue on
+the title screen until a fresh player turn shows, then loads it once more
+(Esc; once the heartbeat stalls, the pause menu's MAIN MENU at
+--main-menu-xy; Continue) against the Grid Defense restart quirk, and checks
+the board against the recorded one and the Grid Defense base. Title-screen
+clicks go out only right after a launch or a Main Menu, and never again once
+the bridge ticks. The profile's own save files are copied aside the first
+time (after the game has exited) and put back at the end the same way: quit,
+swap, relaunch, then with a run in them one Continue (the bridge or END_WAIT
+s: the run may resume on the island map, which is left as it is) and the
+second load if a mission opened; with none (no saveData.lua: no run in
+progress) the game stays on the title screen. It refuses to start while the
+game is not running or another driver acts (the driver lock live_play holds,
+a running live_play.py mission/turn/deploy/end-turn/restore, drive2.sh /
 drive_final.sh, game_loop.py auto_turn, a bridge ack younger than
 --idle-seconds) and holds the driver lock for the whole session.
 
@@ -67,7 +73,6 @@ import math
 import os
 import random
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -90,29 +95,24 @@ OTHER_DRIVERS = (r"live_play\.py\s+(mission|turn|deploy|end-turn|restore)\b", r"
 GROUP_WEIGHT = {"weapon": 3.0, "move": 1.5, "repair": 0.4}
 STOP_PROB = 0.06
 MAX_STEPS = 12
-# The title screen: the bridge's heartbeat (Mission.BaseUpdate) stops there
-# (and stalls in the pause menu: PAUSE_STALL), and the game saves the run on
-# the way (quiet SAVE_QUIET s after).
-TITLE_SILENT = 6.0
-TITLE_WAIT = 120.0
-PAUSE_STALL = 2.0
-SAVE_QUIET = 3.0
+# Putting the profile's own run back at the end: Continue is clicked once,
+# END_CONTINUE_DELAY s after the launch (never again: that run may resume on
+# the island map, where the bridge is silent as on the title screen), then
+# the bridge is given END_WAIT s to show a mission, which gets END_SETTLE s
+# before the second load's Esc.
+END_CONTINUE_DELAY = 25.0
+END_WAIT = 60.0
+END_SETTLE = 3.0
 
 
 def say(msg: str = "") -> None:
     print(msg, flush=True)
 
 
-class GameGone(lp.Anomaly):
-    """The game is not running: stop (this driver never launches it)."""
-
-
 class LeftMission(lp.Anomaly):
-    """The game left the mission (a mission or the run ended, or the bridge
-    went silent after End Turn): stop without touching the save files. The
-    screens after a mission are not the title screen, so restoring from
-    there is left to you: take the game to the title screen, then
-    `fuzz_play.py --put-back <session>`."""
+    """The game left the mission (a mission or the run ended, the bridge
+    went silent after End Turn) or a restore failed: stop the session (the
+    profile's own save files are put back as at any end)."""
 
 
 # ------------------------------------------------------------------ turn starts
@@ -452,7 +452,6 @@ class Session:
             self.dir, n = base.with_name(f"{base.name}-{n}"), n + 1
         self.dir.mkdir(parents=True)
         self.backup: Path | None = None  # the profile's own save files (live)
-        self.used_at_title = False
         self.findings = 0
         self.mix: Counter = Counter()  # sub-action kinds and weapons played
         self.tags: Counter = Counter()  # effect tags of the sub-actions played
@@ -655,172 +654,107 @@ def check_safe(args) -> None:
         if busy:
             raise lp.Refused("the game was driven recently (--idle-seconds): " + "; ".join(busy))
     if not lp.game_running():
-        raise lp.Refused("the game is not running (this driver never launches it)")
+        raise lp.Refused("the game is not running (start it first; each sample then quits and relaunches it)")
 
 
-# ------------------------------------------------------------------ live restore (inside the running game)
+# ------------------------------------------------------------------ live restore (quit, swap, relaunch, Continue twice)
+#
+# The game reads its save files only at launch: Continue after the pause
+# menu's Main Menu resumes the run still in memory, not a save swapped in
+# meanwhile. So each sample restores exactly as `live_play.py restore`
+# does (its pieces: quit_game, swap_saves, relaunch, continue_to_player_turn),
+# then loads once more (live_play.reload_save) against the Grid Defense
+# restart quirk.
 
-def press_escape() -> bool:
-    cliclick = shutil.which("cliclick") or "/opt/homebrew/bin/cliclick"
-    if not os.path.exists(cliclick):
-        return False
-    subprocess.run(["osascript", "-e", 'tell application "Into the Breach" to activate'], capture_output=True,
-                   check=False)
-    time.sleep(0.4)
-    subprocess.run([cliclick, "kp:esc"], capture_output=True, check=False)
-    return True
-
-
-def save_mtime() -> float:
-    try:
-        return (lp.PROFILE / "saveData.lua").stat().st_mtime
-    except OSError:
-        return 0.0
-
-
-def wait_title(bridge, timeout: float, since: float, confirm: Path | None = None) -> bool:
-    """True once the game is on the title screen: the bridge silent
-    TITLE_SILENT s (its heartbeat comes from Mission.BaseUpdate; it also
-    stalls in the pause menu) and the run saved since `since` and quiet for
-    SAVE_QUIET s (the game saves as it leaves for the title screen), or the
-    `confirm` file exists (you confirm it: touch it). Raises GameGone if the
-    game stops."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if not lp.game_running():
-            raise GameGone("the game stopped (this driver never relaunches it)")
-        age = bridge.heartbeat_age()
-        if age is None or age > TITLE_SILENT:
-            if confirm is not None and confirm.exists():
-                confirm.unlink()
-                return True
-            saved = save_mtime()
-            if saved > since and time.time() - saved > SAVE_QUIET:
-                return True
-        time.sleep(lp.POLL)
-    return False
-
-
-def wait_pause(bridge, timeout: float = 5.0) -> bool:
-    """True once the heartbeat stalls (the pause menu is open)."""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        age = bridge.heartbeat_age()
-        if age is None or age > PAUSE_STALL:
-            return True
-        time.sleep(lp.POLL / 2)
-    return False
-
-
-def to_title(ctx, sess) -> None:
-    """Brings the game to the title screen (see wait_title): with
-    --restore-mode clicks, Esc, then (once the heartbeat stalls: the pause
-    menu is open; never a blind click on the board) the pause menu's Main
-    Menu at --main-menu-xy and --confirm-xy if given; with manual, you do it
-    (touch the printed file if the game does not save on the way). A bridge
-    already silent is the title screen only with --at-title (once) or the
-    confirm file."""
-    args, bridge = ctx.args, ctx.bridge
-    confirm = sess.dir / "at_title"
-    t0 = time.time()
-    age = bridge.heartbeat_age()
-    if age is None or age > TITLE_SILENT:
-        if getattr(args, "at_title", False) and not sess.used_at_title:
-            sess.used_at_title = True
-            return
-        say(f"  the bridge is silent: if the game is on the title screen, touch {confirm}")
-    elif args.restore_mode == "clicks":
-        if not press_escape():
-            raise lp.Refused("no cliclick: cannot open the pause menu (use --restore-mode manual)")
-        if not wait_pause(bridge):
-            raise lp.Anomaly("Esc did not open the pause menu (the heartbeat did not stall): nothing clicked")
-        ctx.click(args.main_menu_xy)
-        if args.confirm_xy:
-            time.sleep(1.0)
-            ctx.click(args.confirm_xy)
-    else:
-        say(f"  >>> take the game to the title screen now (Esc, Main Menu); touch {confirm} once there if "
-            "this does not go on by itself")
-    if not wait_title(bridge, TITLE_WAIT, t0, confirm):
-        raise lp.Anomaly(f"the game did not reach the title screen within {TITLE_WAIT:.0f}s")
-
-
-def put_saves(files: dict) -> None:
-    """Copies {name: path or None} into the profile (None: remove it)."""
-    lp.PROFILE.mkdir(parents=True, exist_ok=True)
-    for name in lp.SAVE_FILES:
-        src = files.get(name)
-        if src is not None and Path(src).exists():
-            shutil.copy2(src, lp.PROFILE / name)
-        elif (lp.PROFILE / name).exists():
-            (lp.PROFILE / name).unlink()
-
-
-def continue_from_title(ctx, timeout: float) -> dict:
-    """Clicks the title screen's Continue (again every CONTINUE_RETRY s)
-    until a fresh state shows a player turn with an active mech."""
-    args, bridge = ctx.args, ctx.bridge
-    deadline = time.time() + timeout
-    clicked = 0.0
-    while time.time() < deadline:
-        if time.time() - clicked > lp.CONTINUE_RETRY:
-            clicked = time.time()
-            if args.no_click:
-                say("  >>> click Continue on the title screen now")
-                clicked += 10 * lp.CONTINUE_RETRY  # ask once
-            else:
-                say("  clicking Continue")
-                ctx.click(args.continue_xy)
-        time.sleep(lp.POLL)
-        try:
-            fresh = lv.STATE.stat().st_mtime > clicked
-        except OSError:
-            fresh = False
-        st = (bridge.raw_state() or {}) if fresh else {}
-        if lp.in_combat(st) and st.get("phase") == "combat_player" and lp.active_mechs(st):
-            return bridge.settled_state()
-    raise lp.Anomaly(f"no player turn within {timeout:.0f}s of Continue")
-
-
-def restore_in_game(ctx, sess: Session, ts: TurnStart) -> dict:
-    """Loads a recorded turn start into the running game (see the module
-    docstring) and checks the board against it. Returns the live state."""
-    if not lp.game_running():
-        raise GameGone("the game is not running (this driver never launches it)")
+def restore_by_relaunch(ctx, sess: Session, ts: TurnStart) -> dict:
+    """Loads a recorded turn start: quits the game, puts the checkpoint's
+    save files in the profile (the profile's own ones copied to
+    <session>/profile_backup/ the first time, after the game has exited),
+    relaunches it, clicks Continue on the title screen until a fresh player
+    turn shows, then loads that save once more (Esc, Main Menu, Continue)
+    and checks the board against the recorded turn start and the Grid
+    Defense base (live_play.grid_base_wrong). Returns the live state."""
+    args = ctx.args
     say(f"  restoring {ts.key}")
-    to_title(ctx, sess)
+    if lp.game_running():
+        say("  quitting the game")
+        lp.quit_game()
+    backup = None
     if sess.backup is None:
-        backup = sess.dir / "profile_backup"
-        backup.mkdir(exist_ok=True)
-        for name in lp.SAVE_FILES:
-            if (lp.PROFILE / name).exists():
-                shutil.copy2(lp.PROFILE / name, backup / name)
-        sess.backup = backup
+        backup = sess.backup = sess.dir / "profile_backup"
+    lp.swap_saves({"saveData.lua": ts.save, "undoSave.lua": ts.undo}, backup)
+    if backup is not None:
         say(f"  the profile's own save files are in {backup} (put back at the end)")
-    put_saves({"saveData.lua": ts.save, "undoSave.lua": ts.undo})
-    state = continue_from_title(ctx, ctx.args.timeout)
+    t0 = lp.relaunch(args.timeout)
+    first = lp.continue_to_player_turn(ctx, t0 + args.timeout, args.continue_xy, guard=True)
+    say(f"  loaded {first.get('mission_id')} turn {first.get('turn')} (Grid Defense base "
+        f"{first.get('grid_defense_base')}, built under difficulty {first.get('grid_base_difficulty')})")
+    state = lp.reload_save(ctx, args.timeout)
     want, _ = read_state(ts.raw_path())
     diffs = lp.checkpoint_diffs(want, state)
-    warning = lp.grid_base_warning(state)
-    if warning:
-        diffs.append(warning)
     if diffs:
         raise lp.Anomaly(f"the loaded board differs from {ts.raw_path().name}: " + "; ".join(diffs))
+    warning = lp.grid_base_wrong(state)
+    if warning:
+        raise lp.Anomaly(f"after the second load: {warning}")
+    say(f"  loaded again: board as recorded, Grid Defense base {state.get('grid_defense_base')} "
+        f"(difficulty {state.get('grid_base_difficulty')})")
     return state
 
 
-def put_back(ctx, sess: Session) -> None:
-    """The profile's own save files back, the game on the title screen (or
-    continued, --end-continue)."""
-    if sess.backup is None:
-        return
-    say("putting the profile's own save files back")
-    to_title(ctx, sess)
-    put_saves({name: sess.backup / name if (sess.backup / name).exists() else None for name in lp.SAVE_FILES})
-    if ctx.args.end_continue:
-        continue_from_title(ctx, ctx.args.timeout)
+def restore_profile(ctx, backup: Path) -> list:
+    """The profile's own save files back from `backup`: quits the game,
+    puts them in (a file the backup lacks is removed: no saveData.lua is no
+    run in progress), relaunches. With a run in progress, clicks Continue
+    once and gives the bridge END_WAIT s: a mission that opens is loaded
+    once more (the Grid Defense restart quirk) and its base checked; a
+    silent bridge (the island map, or a click before the title screen was
+    up) is left as it is, and said so. Without one, the game stays on the
+    title screen. Returns warnings."""
+    args, bridge = ctx.args, ctx.bridge
+    has_run = (backup / "saveData.lua").exists()
+    say("putting the profile's own save files back" + ("" if has_run else " (no run in progress in them)"))
+    if lp.game_running():
+        say("  quitting the game")
+        lp.quit_game()
+    lp.swap_saves({name: backup / name for name in lp.SAVE_FILES})
+    t0 = lp.relaunch(args.timeout)
+    if not has_run:
+        say("  relaunched: the game is on the title screen")
+        return []
+    time.sleep(max(0.0, t0 + END_CONTINUE_DELAY - time.time()))
+    if args.no_click:
+        say("  >>> click Continue on the title screen now")
     else:
-        say("  the game is on the title screen; Continue resumes the run that was there before")
+        say("  clicking Continue (once)")
+    clicked = time.time()
+    if not args.no_click:
+        ctx.click(args.continue_xy)
+    deadline = clicked + END_WAIT
+    while time.time() < deadline and lp.fresh_mission(bridge, clicked) is None:
+        time.sleep(lp.POLL)
+    if lp.fresh_mission(bridge, clicked) is None:
+        msg = (f"the bridge stayed silent {END_WAIT:.0f}s after Continue: the run resumed outside a mission "
+               "(the island map; or the game is still on the title screen: click Continue). Not loaded once more: "
+               "the Grid Defense restart quirk applies until the save is loaded again (Esc, Main Menu, Continue) "
+               "before the next mission")
+        say("  " + msg)
+        return [msg]
+    time.sleep(END_SETTLE)  # the resumed mission's opening, before Esc
+    state = lp.reload_save(ctx, args.timeout, player_turn=False)
+    say(f"  resumed {state.get('mission_id')} turn {state.get('turn')} phase {state.get('phase')}")
+    warning = lp.grid_base_wrong(state)
+    if warning:
+        say("  " + warning)
+        return [warning]
+    return []
+
+
+def put_back(ctx, sess: Session) -> list:
+    """At the end of a live session: restore_profile from its backup."""
+    if sess.backup is None:
+        return []
+    return restore_profile(ctx, sess.backup)
 
 
 # ------------------------------------------------------------------ live turns
@@ -981,12 +915,13 @@ def seed_run(run, state: dict, carry: Carry) -> None:
         run.save_reactivation(state, carry.reactivation)
 
 
-def live(args, engine, sess: Session, starts: list, bridge=None, click=None) -> int:
+def live(args, engine, sess: Session, starts: list, bridge=None, click=None, escape=None) -> int:
     rng = random.Random(args.seed)
     chooser = Chooser(rng, uniform=args.uniform)
-    ctx = lp.Context(args, bridge=bridge, engine=engine, run=None, click=click)
+    ctx = lp.Context(args, bridge=bridge, engine=engine, run=None, click=click, escape=escape)
     ctx.loadout = {}
     lock = lp.DriverLock("fuzz_play.py").acquire()
+    rc = 0
     try:
         for i, ts in enumerate(pick_starts(args, starts, rng)):
             if not budget_left(sess, args):
@@ -995,9 +930,7 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None) -> 
             run = lp.Run(sess.dir / f"s{i:03d}", {"tool": "scripts/fuzz_play.py", "source": ts.key})
             ctx.run, ctx.mission_over = run, False
             try:
-                state = restore_in_game(ctx, sess, ts)
-            except GameGone:
-                raise
+                state = restore_by_relaunch(ctx, sess, ts)
             except lp.Anomaly as e:
                 # Never fuzz on (or restore again from) a board that is not
                 # the checkpoint's: stop.
@@ -1010,8 +943,6 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None) -> 
             for t in range(args.turns):
                 try:
                     outcome = live_turn(ctx, sess, ts, i, chooser, rng)
-                except GameGone:
-                    raise
                 except lp.Anomaly as e:
                     sess.finding("driver", ts, i, {"problem": str(e)})
                     if "silent" in str(e):
@@ -1024,48 +955,46 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None) -> 
                     break
             sess.sample_log({"sample": i, "source": ts.key, "dir": str(run.path)})
         say(sess.summary())
-    except (LeftMission, GameGone) as e:
+    except LeftMission as e:
         say(sess.summary())
         say(f"STOPPED: {e}")
-        if sess.backup is not None:
-            say(f"  the profile's own save files are in {sess.backup}: take the game to the title screen, then "
-                f"python3 scripts/fuzz_play.py --put-back {sess.dir}")
-        sess.backup = None  # not put back from here
-        return 1
+        rc = 1
     finally:
         try:
+            ctx.run = None
             put_back(ctx, sess)
+        except (lp.Anomaly, lp.Refused) as e:
+            say(f"STOPPED while putting the profile's own save files back: {e}")
+            say(f"  they are in {sess.backup}: python3 scripts/fuzz_play.py --put-back {sess.dir}")
+            rc = 1
         finally:
             lock.release()
-    return 0
+    return rc
 
 
-def put_back_session(args, bridge=None, click=None) -> int:
-    """--put-back SESSION: the profile's own save files from that session's
-    profile_backup, with the game on the title screen (the bridge silent);
-    --end-continue then clicks Continue."""
+def put_back_session(args, bridge=None, click=None, escape=None) -> int:
+    """--put-back SESSION: the profile's own save files back from that
+    session's profile_backup/ (restore_profile: quit, swap, relaunch,
+    Continue and the second load when they hold a run). A backup without
+    saveData.lua (no run was in progress) is put back as it is."""
     backup = Path(args.put_back) / "profile_backup"
-    if not (backup / "saveData.lua").exists():
-        say(f"REFUSED: no {backup / 'saveData.lua'}")
+    if not backup.is_dir():
+        say(f"REFUSED: no {backup}")
         return 2
+    held = [name for name in lp.SAVE_FILES if (backup / name).exists()]
+    say(f"profile backup {backup}: " + (", ".join(held) if held else "no save files (an empty profile)"))
+    if args.dry_run:
+        say("dry run: would quit the game, put these in the profile (removing the others), relaunch it"
+            + (", click Continue and load once more" if "saveData.lua" in held else ""))
+        return 0
     others = other_drivers()
     if others:
         say("REFUSED: another driver is running: " + " | ".join(others))
         return 2
-    if not lp.game_running():
-        say("REFUSED: the game is not running (start it and go to the title screen)")
-        return 2
-    ctx = lp.Context(args, bridge=bridge, engine=None, run=None, click=click)
+    ctx = lp.Context(args, bridge=bridge, engine=None, run=None, click=click, escape=escape)
     lock = lp.DriverLock("fuzz_play.py --put-back").acquire()
     try:
-        age = ctx.bridge.heartbeat_age()
-        if age is not None and age <= TITLE_SILENT:
-            say("REFUSED: the bridge is live (a mission is open): take the game to the title screen first")
-            return 2
-        put_saves({name: backup / name if (backup / name).exists() else None for name in lp.SAVE_FILES})
-        say(f"the profile's save files are back from {backup}")
-        if args.end_continue:
-            continue_from_title(ctx, args.timeout)
+        restore_profile(ctx, backup)
         return 0
     finally:
         lock.release()
@@ -1077,7 +1006,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dry-run", action="store_true", help="engine only: never touches the game")
     ap.add_argument("--put-back", metavar="SESSION",
-                    help="put a live session's profile_backup save files back (the game on the title screen)")
+                    help="put a live session's profile_backup save files back (quit, swap, relaunch, Continue "
+                         "and the second load; with --dry-run: only say what it would do)")
     ap.add_argument("--recordings", default=str(lp.LIVE_ROOT), help="live_play run directories (default %(default)s)")
     ap.add_argument("--run", action="append", help="only this run (repeatable); with --mission/--turn: that turn")
     ap.add_argument("--mission", type=int, help="mission index MM of m<MM>_turn_<TT> (with --run and --turn)")
@@ -1101,14 +1031,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--game", help="game install for the engine (default: ITB_GAME_DIR / build default)")
     ap.add_argument("--itb-live", help="itb_live binary (default engine/build/itb_live)")
     ap.add_argument("--out", help="session root (default recordings/fuzz)")
-    ap.add_argument("--restore-mode", choices=("manual", "clicks"), default="manual",
-                    help="live: how the game reaches the title screen: you (manual) or Esc + --main-menu-xy")
     xy = lambda s: tuple(int(v) for v in s.split(","))  # noqa: E731
-    ap.add_argument("--main-menu-xy", type=xy, help="live, clicks: the pause menu's Main Menu (screen x,y)")
-    ap.add_argument("--confirm-xy", type=xy, help="live, clicks: its confirmation, if one shows (screen x,y)")
-    ap.add_argument("--continue-xy", type=xy, default=lp.TITLE_CONTINUE, help="the title screen's Continue")
-    ap.add_argument("--end-continue", action="store_true", help="live: click Continue after putting the saves back")
-    ap.add_argument("--at-title", action="store_true", help="live: the game is on the title screen now")
+    ap.add_argument("--continue-xy", type=xy, default=lp.TITLE_CONTINUE,
+                    help="the title screen's Continue (default: fullscreen 1360x768)")
+    ap.add_argument("--main-menu-xy", type=xy, default=lp.PAUSE_MAIN_MENU,
+                    help="the pause menu's MAIN MENU, for the second load (default: fullscreen 1360x768)")
     ap.add_argument("--idle-seconds", type=float, default=300.0,
                     help="live: refuse if the bridge acked a command or the live run logged this recently")
     # live_play.end_turn's options.
@@ -1119,13 +1046,13 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
+def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int:
     args = build_parser().parse_args(argv)
     if args.seed is None:
         args.seed = int(time.time() * 1000) % 2 ** 31
     if args.put_back:
         try:
-            return put_back_session(args, bridge=bridge, click=click)
+            return put_back_session(args, bridge=bridge, click=click, escape=escape)
         except lp.Refused as e:
             say(f"REFUSED: {e}")
             return 2
@@ -1134,9 +1061,6 @@ def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
             return 1
     if (args.mission is None) != (args.turn is None) or (args.mission is not None and not args.run):
         say("REFUSED: --mission and --turn go together, with --run")
-        return 2
-    if args.restore_mode == "clicks" and not args.dry_run and not args.main_menu_xy:
-        say("REFUSED: --restore-mode clicks needs --main-menu-xy (calibrate it on the pause menu)")
         return 2
     if args.itb_live:
         lp.ITB_LIVE = Path(args.itb_live)
@@ -1160,7 +1084,7 @@ def main(argv=None, *, bridge=None, engine=None, click=None) -> int:
             return dry_run(args, engine, sess, starts)
         if click is None:
             click = None if args.no_click else lp.click_end_turn
-        return live(args, engine, sess, starts, bridge=bridge, click=click)
+        return live(args, engine, sess, starts, bridge=bridge, click=click, escape=escape)
     except lp.Refused as e:
         say(f"REFUSED: {e}")
         return 2

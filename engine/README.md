@@ -111,7 +111,14 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   (`.local_runs/live_play/restore_backups/`), puts the checkpoint back,
   relaunches through the offline Steam client and clicks Continue on the
   title screen (the bridge is silent there), then compares the loaded board
-  with that turn's solve input. Continue resumes the run at the start of
+  with that turn's solve input. The game reads its save files only at
+  launch (Continue after the pause menu's Main Menu resumes the run still in
+  memory, whatever the profile now holds), hence the relaunch. `restore
+  --reload` then loads the save once more (Esc; once the heartbeat stalls,
+  the pause menu's MAIN MENU at (530, 438), no confirm dialog; Continue on
+  the title) and fails while the bridge still reports a wrong Grid Defense
+  base (`grid_defense_base` / `grid_base_difficulty` against the save's
+  difficulty). Continue resumes the run at the start of
   that turn, Vek intents and spawn points included, so the same turn can be
   replayed with another plan or other solver settings, and the game referees
   the outcome. `turn --plan FILE` plays a given plan (itb_live's action list,
@@ -355,9 +362,8 @@ the fuzzer tries exactly those.
 ```bash
 python3 scripts/fuzz_play.py --dry-run --samples 500                 # engine only, never touches the game
 python3 scripts/fuzz_play.py --dry-run --run 20261016_130634 --mission 2 --turn 2 --samples 20
-python3 scripts/fuzz_play.py --samples 20 --minutes 60               # live; --restore-mode manual (default)
-python3 scripts/fuzz_play.py --samples 20 --restore-mode clicks --main-menu-xy X,Y [--confirm-xy X,Y]
-python3 scripts/fuzz_play.py --put-back recordings/fuzz/<session>    # the profile's own saves back (title screen)
+python3 scripts/fuzz_play.py --samples 20 --minutes 60               # live: quits and relaunches the game per sample
+python3 scripts/fuzz_play.py --put-back recordings/fuzz/<session> [--dry-run]  # the profile's own saves back
 python3 scripts/coverage_report.py [--unseen]                        # what the recordings never exercised
 ```
 
@@ -400,20 +406,34 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
   `itb_live predict <start> --plan @<plan>` reproduces the engine side.
   Any difference but `chance` ends the sample without End Turn
   (`--continue-after-diff` re-predicts and goes on).
-- **Restore inside the running game.** It never quits or launches the game
-  or touches Steam. Each sample takes the game to the title screen (Esc,
-  then the pause menu's Main Menu: `--restore-mode clicks` clicks it only
-  once the heartbeat stalls, i.e. the pause menu is open; `manual` asks
-  you), knows the title screen by a silent bridge plus the save the game
-  writes on the way out (or `touch <session>/at_title`; `--at-title` when
-  it is there already), puts the checkpoint's save files in the profile,
-  clicks Continue and checks the board against the recorded turn start
-  (any difference, or the Grid Defense restart warning, stops the session).
-  The profile's own save files are copied to `<session>/profile_backup/`
-  the first time and put back at the end (left on the title screen;
-  `--end-continue` continues). A mission that ends, a silent bridge after
-  End Turn or a failed restore stops without touching the saves: take the
-  game to the title screen, then `--put-back <session>`.
+- **Restore by relaunch.** The game reads its save files only at launch:
+  Continue after the pause menu's Main Menu resumes the run still in memory
+  (live 2026-10-16), and the title's Continue stays greyed when there was no
+  run at launch. So each sample restores as `live_play.py restore` does,
+  with its functions: quit the game, put the checkpoint's save files in the
+  profile, relaunch (`launch_game`: `open steam://run/590380` through the
+  offline Steam client, nothing else of Steam), click Continue on the title
+  screen until a fresh player turn shows, then load once more against the
+  Grid Defense restart quirk (as `restore --reload`: Esc; once the
+  heartbeat stalls, i.e. the pause menu is open, its MAIN MENU at
+  `--main-menu-xy`, default (530, 438); Continue). The board is checked
+  against the recorded turn start and the Grid Defense base against the
+  save's difficulty; either one wrong stops the session. Title-screen
+  clicks go out only right after a launch or a Main Menu, and a retry only
+  while the bridge has stayed silent since the last click (it is silent on
+  the island map too). The profile's own save files are copied to
+  `<session>/profile_backup/` the first time (after the game has exited)
+  and put back at every end (done, a mission that ended, a silent bridge,
+  a failed restore): quit, swap, relaunch; with a run in them, one Continue
+  (after `END_CONTINUE_DELAY`, 25 s), then the bridge gets `END_WAIT` (60 s):
+  a mission that opens is loaded once more and its base checked, a silent
+  bridge (the island map) is left as it is and said so (the restart quirk
+  then holds until the next load: Esc, Main Menu, Continue by hand). A
+  backup without `saveData.lua` (no run in progress) is put back as it is
+  and the game left on the title screen. If the put-back itself fails,
+  `--put-back <session>` does it again (`--dry-run`: only says what).
+  A sample takes about 1 to 1.5 min of restore (quit, launch, 15 s before
+  Continue, the load, the second load) plus the turn.
 - **One driver at a time.** `live_play.py` turn / end-turn / mission /
   deploy / restore and the fuzzer hold an exclusive lock
   (`<bridge dir>/itb_driver.lock`, flock: released when the process ends).
