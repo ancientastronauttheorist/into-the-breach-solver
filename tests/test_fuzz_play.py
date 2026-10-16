@@ -8,7 +8,9 @@ clicks and Esc go to a recorder (FakeGame), the game process functions
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import random
 import shutil
@@ -27,6 +29,7 @@ lp.CONTINUE_RETRY = 0.5
 fz.END_CONTINUE_DELAY = 0.0
 fz.END_WAIT = 0.5
 fz.END_SETTLE = 0.0
+fz.MAP_CLICK_WAIT = 0.05
 
 
 def to_step(a: dict, i: int) -> dict:
@@ -262,6 +265,62 @@ class FuzzTest(unittest.TestCase):
         self.assertFalse((sess / "findings.jsonl").exists())
         self.assertFalse(lv.CMD.exists())
 
+    def test_unplayable_says_why(self):
+        st = tlp.base_state()
+        st["turn"], st["total_turns"] = 5, 5
+        self.assertEqual(fz.unplayable(st, last_turns=False)[0], "last_turn")
+        self.assertIsNone(fz.unplayable(st))
+        st["phase"] = "combat_enemy"
+        self.assertEqual(fz.unplayable(st)[0], "not_player_turn")
+        st = tlp.base_state()
+        for u in st["units"]:
+            if u.get("mech"):
+                u["active"] = False
+        self.assertEqual(fz.unplayable(st)[0], "no_active_mech")
+
+    def test_starts_are_drawn_without_replacement(self):
+        starts = [fz.TurnStart("r", 0, t, Path(f"m00_turn_{t:02d}_solve_input.json")) for t in range(1, 6)]
+        pool = fz.StartPool(starts, random.Random(4))
+        first = [pool.draw().key for _ in range(5)]
+        self.assertEqual(sorted(first), sorted(ts.key for ts in starts))
+        self.assertEqual(pool.passes, 1)
+        pool.reject(starts[0], "no")
+        second = [pool.draw().key for _ in range(4)]
+        self.assertEqual(sorted(second), sorted(ts.key for ts in starts[1:]))
+        self.assertEqual(pool.passes, 2)
+        for ts in starts[1:]:
+            pool.reject(ts, "no")
+        self.assertIsNone(pool.draw())
+        # The one named: every time, until rejected.
+        named = fz.StartPool(starts[:1], random.Random(0), starts[0])
+        self.assertEqual([named.draw().key for _ in range(3)], [starts[0].key] * 3)
+        named.reject(starts[0], "the mission's last turn")
+        self.assertIsNone(named.draw())
+        self.assertIn("last turn", named.exhausted())
+
+    def test_dry_run_draws_each_start_once_per_pass(self):
+        self.record()
+        self.record(turn=2)
+        st = tlp.base_state()
+        st["total_turns"] = 3
+        self.record(turn=3, state=st)  # the mission's last turn: never drawn as a sample
+        out = self.tmp / "fuzz"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = fz.main(["--dry-run", "--recordings", str(lp.LIVE_ROOT), "--samples", "4", "--seed", "1",
+                          "--out", str(out)], engine=FuzzEngine(CANDIDATES))
+        self.assertEqual(rc, 0)
+        sess = next(out.iterdir())
+        sources = [json.loads(line)["source"] for line in (sess / "samples.jsonl").read_text().splitlines()]
+        self.assertEqual(len(sources), 4)
+        self.assertEqual(len(set(sources[:2])), 2)
+        self.assertEqual(len(set(sources[2:])), 2)
+        self.assertNotIn("20261016_000000/m00/t03", sources)
+        self.assertIn("drawing them again", buf.getvalue())
+        meta = json.loads((sess / "session.json").read_text())
+        self.assertEqual(meta["outcomes"]["skipped_last_turn"], 1)
+        self.assertIn("20261016_000000/m00/t03", meta["rejected_starts"])
+
     # ------------------------------------------------------------ safety
 
     def test_other_drivers_are_found_but_not_ourselves_or_dry_runs(self):
@@ -335,7 +394,7 @@ class FuzzTest(unittest.TestCase):
         _, sess, ctx = self.ctx_for(game)
         state = fz.restore_by_relaunch(ctx, sess, ts)
         self.assertEqual((state["mission_id"], state["turn"]), ("Mission_Test", 1))
-        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, "esc", lp.PAUSE_MAIN_MENU,
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, lp.PAUSE_GEAR, lp.PAUSE_MAIN_MENU,
                                        lp.TITLE_CONTINUE])
         self.assertEqual(game.misclicks(), [])
         self.assertEqual((state["grid_defense_base"], state["grid_base_difficulty"]), (0, 3))
@@ -348,12 +407,32 @@ class FuzzTest(unittest.TestCase):
         # The end: the player's own run back, resumed in its mission, loaded twice.
         game.events.clear()
         self.assertEqual(fz.put_back(ctx, sess), [])
-        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, "esc", lp.PAUSE_MAIN_MENU,
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, lp.PAUSE_GEAR, lp.PAUSE_MAIN_MENU,
                                        lp.TITLE_CONTINUE])
         self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
         self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- the player's own undo")
         st = lp.Bridge().raw_state()
         self.assertEqual((st["mission_id"], st["grid_defense_base"]), ("Mission_Own", 0))
+
+    def test_the_second_load_falls_back_to_esc(self):
+        # The live 2026-10-16 case the other way round: when the gear does
+        # not open the pause menu, Esc does.
+        game = self.fake_game()
+        game.gear_works = False
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        fz.restore_by_relaunch(ctx, sess, ts)
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, lp.PAUSE_GEAR, "esc",
+                                       lp.PAUSE_MAIN_MENU, lp.TITLE_CONTINUE])
+
+    def test_the_second_load_stops_when_the_pause_menu_does_not_open(self):
+        game = self.fake_game()
+        game.gear_works = game.esc_works = False
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        with self.assertRaisesRegex(lp.Anomaly, "neither the gear nor Esc"):
+            fz.restore_by_relaunch(ctx, sess, ts)
+        self.assertNotIn(lp.PAUSE_MAIN_MENU, game.events)
 
     def test_restore_stops_on_a_grid_defense_base_still_wrong(self):
         game = self.fake_game(quirk_sticks=True)
@@ -373,19 +452,32 @@ class FuzzTest(unittest.TestCase):
         with self.assertRaisesRegex(lp.Anomaly, "differs"):
             fz.restore_by_relaunch(ctx, sess, ts)
 
-    def test_put_back_on_the_island_map_clicks_continue_once(self):
-        # The own run resumes on the island map (the bridge is silent there):
-        # one Continue, no second load, no title-screen click on the map.
+    def test_put_back_on_the_island_map_loads_once_more_by_the_map_gear(self):
+        # The own run resumes on the island map (the bridge is silent there,
+        # and Esc does nothing): one Continue, then the second load blind,
+        # by the map's gear, MAIN MENU and Continue.
         game = self.fake_game(own_board="island")
         ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
         _, sess, ctx = self.ctx_for(game)
         fz.restore_by_relaunch(ctx, sess, ts)
         game.events.clear()
         notes = fz.put_back(ctx, sess)
-        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE])
-        self.assertEqual(game.screen, "island")
-        self.assertTrue(notes and "island map" in notes[0])
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, lp.MAP_GEAR, lp.PAUSE_MAIN_MENU,
+                                       lp.TITLE_CONTINUE])
+        self.assertEqual((game.screen, game.loads), ("island", 2))
+        self.assertTrue(notes and "island map" in notes[0] and "blind" in notes[0])
         self.assertEqual(game.misclicks(), [])
+
+    def test_put_back_on_the_island_map_with_no_click_asks(self):
+        game = self.fake_game(own_board="island")
+        ts = fz.find_turn_starts(lp.LIVE_ROOT)[0]
+        _, sess, ctx = self.ctx_for(game)
+        fz.restore_by_relaunch(ctx, sess, ts)
+        game.events.clear()
+        ctx.args.no_click = True
+        notes = fz.put_back(ctx, sess)
+        self.assertEqual(game.events, ["quit", "launch"])
+        self.assertTrue(notes and "by hand" in notes[0])
 
     def test_put_back_without_a_run_leaves_the_title_screen(self):
         # The previous run was lost: the profile has only undoSave.lua.
@@ -433,6 +525,50 @@ class FuzzTest(unittest.TestCase):
         self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
         self.assertEqual(lp.Bridge().raw_state()["mission_id"], "Mission_Own")
         lp.DriverLock("after").acquire().release()
+
+    def test_unplayable_starts_are_never_restored(self):
+        # Live 2026-10-16: a mission's last turn cost a relaunch, then was
+        # drawn again. Now it is skipped from the recording, before any
+        # restore, and the playable start is not drawn twice in one pass.
+        game = self.fake_game()
+        st = tlp.base_state()
+        st["total_turns"] = 2
+        self.record(turn=2, state=st)  # the mission's last turn
+        low = tlp.base_state()
+        low["grid_power"] = 1
+        self.record(mission=1, turn=1, state=low)  # no sequence keeps --min-grid 2
+        args = args_for(["--samples", "2", "--recordings", str(lp.LIVE_ROOT)])
+        sess = fz.Session(args, self.tmp / "fuzz")
+        starts = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = fz.live(args, FuzzEngine(CANDIDATES), sess, starts, click=game.click, escape=game.escape)
+        self.assertEqual(rc, 0)
+        self.assertEqual((sess.outcomes["skipped_last_turn"], sess.outcomes["skipped_grid_unsafe"]), (1, 1))
+        self.assertEqual(sess.outcomes["matched"], 2)
+        # Two samples of the one playable start (a second pass, said so), then the put-back.
+        self.assertEqual(game.events.count("launch"), 3)
+        self.assertIn("drawing them again", buf.getvalue())
+        self.assertIn("not restored: the mission's last turn", buf.getvalue())
+        self.assertEqual(game.misclicks(), [])
+
+    def test_a_start_unplayable_after_the_restore_is_not_restored_again(self):
+        game = self.fake_game()
+        game.boards["-- checkpoint 0 1"] = dict(tlp.base_state(), turn=1, phase="combat_enemy")
+        args = args_for(["--samples", "3", "--recordings", str(lp.LIVE_ROOT)])
+        sess = fz.Session(args, self.tmp / "fuzz")
+        starts = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+        orig = lp.fresh_player_turn
+        lp.fresh_player_turn = lambda bridge, since: lp.fresh_mission(bridge, since)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = fz.live(args, FuzzEngine(CANDIDATES), sess, starts, click=game.click, escape=game.escape)
+        finally:
+            lp.fresh_player_turn = orig
+        self.assertEqual(rc, 0)
+        self.assertEqual(sess.outcomes["not_playable"], 1)
+        self.assertEqual(game.events.count("launch"), 2)  # one sample, then the put-back
+        self.assertIn("after the restore", sess.pool.bad["20261016_000000/m00/t01"])
 
     def test_a_failed_restore_stops_and_still_puts_back(self):
         game = self.fake_game(quirk_sticks=True)
@@ -534,8 +670,9 @@ class FuzzTest(unittest.TestCase):
             tlp.FakeBridge.__init__ = orig_init
         self.assertEqual([f["kind"] for f in findings], ["chance"])
         self.assertEqual(len(findings[0]["plan"]), 1)
-        self.assertEqual(len(eng.predicts), 3)  # the plan, the rest from the live board, End Turn
-        self.assertEqual(len(eng.predicts[1]), 1)
+        # The check before the restore, the plan, the rest from the live board, End Turn.
+        self.assertEqual(len(eng.predicts), 4)
+        self.assertEqual(len(eng.predicts[2]), 1)
         self.assertEqual(self.acting()[-1], "END_TURN")
         self.assertEqual(sess.outcomes["resynced"], 1)
 

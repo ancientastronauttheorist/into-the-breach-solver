@@ -379,8 +379,10 @@ class FakeGame:
     the profile's saveData.lua only at launch (Continue after Main Menu
     resumes the run in memory); the bridge is silent on the title screen,
     on the island map and in the pause menu; Continue on the title loads the
-    save read at launch (greyed without one); Esc in a mission opens the
-    pause menu, whose MAIN MENU goes to the title. The first load after a
+    save read at launch (greyed without one); the gear at the top left
+    (PAUSE_GEAR in a mission, MAP_GEAR on the island map) opens the pause
+    menu, and so does Esc in a mission (`esc_works`; on the island map it
+    does nothing); its MAIN MENU goes to the title. The first load after a
     launch builds the power bar under the settings file's difficulty
     (`settings`; the saves are Unfair): Grid Defense base 15. `boards`: save
     text -> the board it resumes at (None: the island map). Use quit / launch
@@ -391,6 +393,8 @@ class FakeGame:
         self.boards = boards
         self.settings = settings
         self.quirk_sticks = quirk_sticks  # the second load keeps the bad base too
+        self.esc_works = True
+        self.gear_works = True
         self.events = []
         self.running = True
         self.memory = own
@@ -417,7 +421,7 @@ class FakeGame:
 
     def escape(self) -> bool:
         self.events.append("esc")
-        if self.screen == "mission":
+        if self.screen == "mission" and self.esc_works:
             self.screen, self.fb.silent = "paused", True
         return True
 
@@ -433,7 +437,12 @@ class FakeGame:
             self.fb.state = self.board(self.memory, first=self.loads == 1)
             self.screen, self.fb.silent = "mission", False
             self.fb.write_state()
-        elif tuple(xy) == lp.PAUSE_MAIN_MENU and self.screen == "paused":
+        elif tuple(xy) == lp.PAUSE_GEAR and self.screen == "mission":
+            if self.gear_works:
+                self.screen, self.fb.silent = "paused", True
+        elif tuple(xy) == lp.MAP_GEAR and self.screen == "island":
+            self.screen = "island_paused"
+        elif tuple(xy) == lp.PAUSE_MAIN_MENU and self.screen in ("paused", "island_paused"):
             self.screen = "title"
         elif tuple(xy) == lv.END_TURN_SCREEN and self.screen == "mission":
             threading.Thread(target=self.fb.advance, daemon=True).start()
@@ -676,10 +685,41 @@ class LivePlayTest(unittest.TestCase):
         finally:
             undo()
         self.assertEqual(rc, 0)
-        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, "esc", lp.PAUSE_MAIN_MENU,
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, lp.PAUSE_GEAR, lp.PAUSE_MAIN_MENU,
                                        lp.TITLE_CONTINUE])
         self.assertEqual((st["grid_defense_base"], st["grid_base_difficulty"]), (0, 3))
         self.assertIsNone(lp.grid_base_wrong(st))
+
+    def test_restore_reload_falls_back_to_esc_and_takes_the_gear_point(self):
+        # A click at the --gear-xy given (not the gear) opens nothing: Esc does.
+        run, game = self.restore_game()
+        undo = game.install()
+        try:
+            rc = lp.main(["restore", "--run", str(run), "--mission", "3", "--turn", "2", "--timeout", "10",
+                          "--reload", "--gear-xy", "50,31"], engine=FakeEngine(), click=game.click,
+                         escape=game.escape)
+        finally:
+            undo()
+        self.assertEqual(rc, 0)
+        self.assertEqual(game.events, ["quit", "launch", lp.TITLE_CONTINUE, (50, 31),
+                                       ("MISCLICK", "mission", (50, 31)), "esc", lp.PAUSE_MAIN_MENU,
+                                       lp.TITLE_CONTINUE])
+
+    def test_restore_reload_stops_when_nothing_opens_the_menu(self):
+        run, game = self.restore_game()
+        game.gear_works = game.esc_works = False
+        undo = game.install()
+        try:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = lp.main(["restore", "--run", str(run), "--mission", "3", "--turn", "2", "--timeout", "10",
+                              "--reload"], engine=FakeEngine(), click=game.click, escape=game.escape)
+        finally:
+            undo()
+        self.assertEqual(rc, 1)
+        self.assertIn("neither the gear nor Esc", out.getvalue())
+        # Nothing clicked after the gear and Esc: no Main Menu.
+        self.assertEqual(game.events[-2:], [lp.PAUSE_GEAR, "esc"])
 
     def test_restore_reload_fails_on_a_base_still_wrong(self):
         run, game = self.restore_game(quirk_sticks=True)

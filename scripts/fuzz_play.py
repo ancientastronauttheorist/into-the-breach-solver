@@ -43,16 +43,23 @@ turn's checkpoint (m<MM>_turn_<TT>_saveData.lua / _undoSave.lua) into the
 profile, relaunches the game (live_play.launch_game: `open steam://run/...`
 through the offline Steam client, nothing else of Steam), clicks Continue on
 the title screen until a fresh player turn shows, then loads it once more
-(Esc; once the heartbeat stalls, the pause menu's MAIN MENU at
---main-menu-xy; Continue) against the Grid Defense restart quirk, and checks
-the board against the recorded one and the Grid Defense base. Title-screen
-clicks go out only right after a launch or a Main Menu, and never again once
-the bridge ticks. The profile's own save files are copied aside the first
-time (after the game has exited) and put back at the end the same way: quit,
-swap, relaunch, then with a run in them one Continue (the bridge or END_WAIT
-s: the run may resume on the island map, which is left as it is) and the
-second load if a mission opened; with none (no saveData.lua: no run in
-progress) the game stays on the title screen. It refuses to start while the
+(the pause menu by its gear at --gear-xy, Esc as a fallback; once the
+heartbeat stalls, its MAIN MENU at --main-menu-xy; Continue) against the
+Grid Defense restart quirk, and checks the board against the recorded one
+and the Grid Defense base. Title-screen clicks go out only right after a
+launch or a Main Menu, and never again once the bridge ticks. Turn starts
+are drawn without replacement (a new pass, said so, once all have been
+drawn), and only those the recording shows playable are restored (a
+player turn with an active mech, not a mission's last turn unless
+--last-turns, a sequence the engine predicts keeps --min-grid); the check
+after the restore stays. The profile's own save files are copied aside the
+first time (after the game has exited) and put back at the end the same
+way: quit, swap, relaunch, then with a run in them one Continue and the
+second load: from a mission as above, from the island map (the bridge
+stays silent END_WAIT s; Esc does nothing there) blind, the map's gear at
+--map-gear-xy, MAIN MENU, Continue, MAP_CLICK_WAIT s after each click; with
+none (no saveData.lua: no run in progress) the game stays on the title
+screen. It refuses to start while the
 game is not running or another driver acts (the driver lock live_play holds,
 a running live_play.py mission/turn/deploy/end-turn/restore, drive2.sh /
 drive_final.sh, game_loop.py auto_turn, a bridge ack younger than
@@ -99,10 +106,14 @@ MAX_STEPS = 12
 # END_CONTINUE_DELAY s after the launch (never again: that run may resume on
 # the island map, where the bridge is silent as on the title screen), then
 # the bridge is given END_WAIT s to show a mission, which gets END_SETTLE s
-# before the second load's Esc.
+# before the second load's pause menu (a silent bridge: the island map,
+# map_reload).
 END_CONTINUE_DELAY = 25.0
 END_WAIT = 60.0
 END_SETTLE = 3.0
+# The second load from the island map, where the bridge is silent: a fixed
+# wait after each click (the map's gear, MAIN MENU, Continue).
+MAP_CLICK_WAIT = 5.0
 
 
 def say(msg: str = "") -> None:
@@ -171,15 +182,23 @@ def read_state(path: Path) -> tuple[dict, dict]:
     return (data.get("bridge_state") if "bridge_state" in data else d), data
 
 
-def playable(state: dict, last_turns: bool = True) -> bool:
-    """A player turn with an active mech; last_turns False: not the
-    mission's last turn (its enemy phase ends the mission, and the game goes
-    on to the reward screens or, after the final Cave, ends the run)."""
+def unplayable(state: dict, last_turns: bool = True) -> tuple | None:
+    """Why a state is no turn to fuzz, as (key, text), or None: it must be a
+    player turn with an active mech; last_turns False: not the mission's
+    last turn (its enemy phase ends the mission, and the game goes on to the
+    reward screens or, after the final Cave, ends the run)."""
     turn, total = int(state.get("turn") or 0), state.get("total_turns")
+    if state.get("phase") != "combat_player" or not state.get("in_active_mission", True) or turn < 1:
+        return "not_player_turn", f"not a player turn (phase {state.get('phase')}, turn {turn})"
     if not last_turns and isinstance(total, int) and total > 0 and turn >= total:
-        return False
-    return (state.get("phase") == "combat_player" and state.get("in_active_mission", True)
-            and turn >= 1 and bool(lp.active_mechs(state)))
+        return "last_turn", f"the mission's last turn ({turn} of {total}; --last-turns to play it)"
+    if not lp.active_mechs(state):
+        return "no_active_mech", "no active mech"
+    return None
+
+
+def playable(state: dict, last_turns: bool = True) -> bool:
+    return unplayable(state, last_turns) is None
 
 
 @dataclass
@@ -460,6 +479,7 @@ class Session:
         self.rejected: Counter = Counter()
         self.samples = 0
         self.steps = 0
+        self.pool: StartPool | None = None
         self.t0 = time.time()
 
     def write_meta(self, extra: dict | None = None) -> None:
@@ -526,14 +546,88 @@ def git_rev() -> str | None:
         return None
 
 
-def pick_starts(args, starts: list, rng: random.Random) -> list:
-    """The turn starts to fuzz, in order: the one named, else a sample."""
+class StartPool:
+    """The turn starts to fuzz: drawn without replacement (a shuffled pass
+    over all of them; once each has been drawn, a new pass, said so), a
+    rejected one (unplayable, before or after a restore) never again. With
+    --mission/--turn: that one start, every time (until rejected)."""
+
+    def __init__(self, starts: list, rng: random.Random, fixed: TurnStart | None = None):
+        self.starts = list(starts)
+        self.rng = rng
+        self.fixed = fixed
+        self.queue: list = []
+        self.passes = 0
+        self.bad: dict = {}  # key -> why
+
+    def draw(self) -> TurnStart | None:
+        """The next start, None when every one has been rejected."""
+        if self.fixed is not None:
+            return None if self.fixed.key in self.bad else self.fixed
+        while True:
+            while self.queue:
+                ts = self.queue.pop()
+                if ts.key not in self.bad:
+                    return ts
+            left = [ts for ts in self.starts if ts.key not in self.bad]
+            if not left:
+                return None
+            if self.passes:
+                say(f"  every turn start has been drawn ({len(left)} playable of {len(self.starts)}): "
+                    "drawing them again (repeats from here)")
+            self.passes += 1
+            self.queue = left
+            self.rng.shuffle(self.queue)
+
+    def reject(self, ts: TurnStart, why: str) -> None:
+        self.bad[ts.key] = why
+
+    def exhausted(self) -> str:
+        if self.fixed is not None:
+            return f"the turn start named is not playable: {self.bad.get(self.fixed.key)}"
+        return f"no playable turn start left: all {len(self.starts)} were rejected"
+
+
+def start_pool(args, starts: list, rng: random.Random) -> StartPool:
+    """The pool of turn starts to fuzz: the one named, else all of them."""
     if args.mission is not None and args.turn is not None:
         chosen = [ts for ts in starts if ts.mission == args.mission and ts.turn == args.turn]
         if not chosen:
             raise lp.Refused(f"no recorded turn start m{args.mission:02d} turn {args.turn} in {args.run}")
-        return chosen * args.samples
-    return [rng.choice(starts) for _ in range(args.samples)]
+        return StartPool(chosen, rng, chosen[0])
+    return StartPool(starts, rng)
+
+
+def offline_reason(engine, ts: TurnStart, args, rng: random.Random, grid: bool = True) -> tuple | None:
+    """Why a recorded turn start cannot be fuzzed, from the recording alone
+    (before any restore), as (key, text), or None: its states unreadable,
+    unplayable(), and with grid, no sequence of --tries keeping --min-grid
+    through the enemy phase from the recorded solve input (safe_sequence
+    with a scratch chooser: the session's novelty counts are left alone) or
+    the engine refusing it."""
+    try:
+        state, _ = read_state(ts.path)
+        read_state(ts.raw_path())
+    except (OSError, ValueError) as e:
+        return "unreadable", f"unreadable recording: {e}"
+    why = unplayable(state, args.last_turns)
+    if why or not grid:
+        return why
+    scratch = random.Random(rng.random())
+    try:
+        seq, _, _ = safe_sequence(engine, ts.path, Chooser(scratch, args.uniform), scratch, {}, unit_skills(state),
+                                  args)
+    except lp.Anomaly as e:
+        return "engine_error", f"the engine on the recorded start: {e}"
+    if seq is None:
+        return "grid_unsafe", f"no sequence of {args.tries} the engine predicts keeps {args.min_grid} grid"
+    return None
+
+
+def skip(sess, pool: StartPool, ts: TurnStart, why: tuple, when: str = "skipped") -> None:
+    pool.reject(ts, why[1])
+    sess.outcomes[f"skipped_{why[0]}"] += 1
+    say(f"[-] {ts.key}: {when}: {why[1]}")
 
 
 def budget_left(sess: Session, args) -> bool:
@@ -545,13 +639,19 @@ def budget_left(sess: Session, args) -> bool:
 def dry_run(args, engine, sess: Session, starts: list) -> int:
     rng = random.Random(args.seed)
     chooser = Chooser(rng, uniform=args.uniform)
-    for i, ts in enumerate(pick_starts(args, starts, rng)):
-        if not budget_left(sess, args):
+    pool = sess.pool = start_pool(args, starts, rng)
+    i = -1
+    while i + 1 < args.samples and budget_left(sess, args):
+        ts = pool.draw()
+        if ts is None:
+            say(pool.exhausted())
             break
-        state, _ = read_state(ts.path)
-        if not playable(state, args.last_turns):
-            sess.outcomes["not_playable"] += 1
+        why = offline_reason(engine, ts, args, rng, grid=False)
+        if why:
+            skip(sess, pool, ts, why)
             continue
+        i += 1
+        state, _ = read_state(ts.path)
         say(f"[{i + 1}] {ts.key} {state.get('mission_id')} turn {state.get('turn')}")
         try:
             seq, pred, tries = safe_sequence(engine, ts.path, chooser, rng, {}, unit_skills(state), args)
@@ -671,7 +771,7 @@ def restore_by_relaunch(ctx, sess: Session, ts: TurnStart) -> dict:
     save files in the profile (the profile's own ones copied to
     <session>/profile_backup/ the first time, after the game has exited),
     relaunches it, clicks Continue on the title screen until a fresh player
-    turn shows, then loads that save once more (Esc, Main Menu, Continue)
+    turn shows, then loads that save once more (gear or Esc, Main Menu, Continue)
     and checks the board against the recorded turn start and the Grid
     Defense base (live_play.grid_base_wrong). Returns the live state."""
     args = ctx.args
@@ -708,9 +808,8 @@ def restore_profile(ctx, backup: Path) -> list:
     run in progress), relaunches. With a run in progress, clicks Continue
     once and gives the bridge END_WAIT s: a mission that opens is loaded
     once more (the Grid Defense restart quirk) and its base checked; a
-    silent bridge (the island map, or a click before the title screen was
-    up) is left as it is, and said so. Without one, the game stays on the
-    title screen. Returns warnings."""
+    silent bridge (the island map) gets the second load blind (map_reload).
+    Without one, the game stays on the title screen. Returns warnings."""
     args, bridge = ctx.args, ctx.bridge
     has_run = (backup / "saveData.lua").exists()
     say("putting the profile's own save files back" + ("" if has_run else " (no run in progress in them)"))
@@ -734,19 +833,61 @@ def restore_profile(ctx, backup: Path) -> list:
     while time.time() < deadline and lp.fresh_mission(bridge, clicked) is None:
         time.sleep(lp.POLL)
     if lp.fresh_mission(bridge, clicked) is None:
-        msg = (f"the bridge stayed silent {END_WAIT:.0f}s after Continue: the run resumed outside a mission "
-               "(the island map; or the game is still on the title screen: click Continue). Not loaded once more: "
-               "the Grid Defense restart quirk applies until the save is loaded again (Esc, Main Menu, Continue) "
-               "before the next mission")
-        say("  " + msg)
-        return [msg]
-    time.sleep(END_SETTLE)  # the resumed mission's opening, before Esc
+        return map_reload(ctx)
+    time.sleep(END_SETTLE)  # the resumed mission's opening, before the pause menu
     state = lp.reload_save(ctx, args.timeout, player_turn=False)
     say(f"  resumed {state.get('mission_id')} turn {state.get('turn')} phase {state.get('phase')}")
     warning = lp.grid_base_wrong(state)
     if warning:
         say("  " + warning)
         return [warning]
+    return []
+
+
+def map_reload(ctx) -> list:
+    """The put-back's second load when its run resumed outside a mission
+    (the bridge stayed silent END_WAIT s after Continue: the island map,
+    where it is always silent and Esc does nothing): blind, the map's gear
+    (--map-gear-xy), the pause menu's MAIN MENU, the title's Continue,
+    MAP_CLICK_WAIT s after each click, nothing to confirm them. (Were the
+    game still on the title screen, the gear and MAIN MENU points hold
+    nothing there, and Continue loads the run.) A mission that shows after
+    all gets its Grid Defense base checked, and one more load if it is
+    wrong. Returns notes."""
+    args, bridge = ctx.args, ctx.bridge
+    gear = getattr(args, "map_gear_xy", None) or lp.MAP_GEAR
+    menu = getattr(args, "main_menu_xy", None) or lp.PAUSE_MAIN_MENU
+    cont = getattr(args, "continue_xy", None) or lp.TITLE_CONTINUE
+    silent = f"the bridge stayed silent {END_WAIT:.0f}s after Continue: the run resumed on the island map"
+    if args.no_click:
+        msg = (f"{silent}. Load it once more by hand (Grid Defense restart quirk): the gear at the top left, "
+               "MAIN MENU, Continue")
+        say("  >>> " + msg)
+        return [msg]
+    say(f"  {silent} (no heartbeat there). Loading it once more blind (Grid Defense restart quirk): the map's "
+        f"gear, MAIN MENU, Continue, waiting {MAP_CLICK_WAIT:.0f}s after each click (the bridge cannot confirm them)")
+    clicked = time.time()
+    for what, xy in (("the gear", gear), ("MAIN MENU", menu), ("Continue", cont)):
+        say(f"  clicking {what} at {xy}")
+        clicked = time.time()
+        ctx.click(xy)
+        time.sleep(MAP_CLICK_WAIT)
+    state = lp.fresh_mission(bridge, clicked)
+    if state is None:
+        msg = ("on the island map: loaded once more blind (gear, MAIN MENU, Continue; unconfirmed: the bridge is "
+               "silent there)")
+        say("  " + msg)
+        return [msg]
+    say(f"  a mission is open: {state.get('mission_id')} turn {state.get('turn')} phase {state.get('phase')}")
+    warning = lp.grid_base_wrong(state)
+    if warning:
+        say("  " + warning + ": loading once more")
+        time.sleep(END_SETTLE)
+        state = lp.reload_save(ctx, args.timeout, player_turn=False)
+        warning = lp.grid_base_wrong(state)
+        if warning:
+            say("  " + warning)
+            return [warning]
     return []
 
 
@@ -769,7 +910,9 @@ def live_turn(ctx, sess: Session, ts: TurnStart, sample: int, chooser: Chooser, 
     or "refused"."""
     args, bridge, engine, run = ctx.args, ctx.bridge, ctx.engine, ctx.run
     state = bridge.settled_state()
-    if not playable(state, args.last_turns):
+    why = unplayable(state, args.last_turns)
+    if why:
+        say(f"  not playable: {why[1]}")
         return "not_playable"
     under = run.engine_underground(state)
     known = {u["uid"] for u in lp.units(state)} | set(under)
@@ -923,9 +1066,19 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None, esc
     lock = lp.DriverLock("fuzz_play.py").acquire()
     rc = 0
     try:
-        for i, ts in enumerate(pick_starts(args, starts, rng)):
-            if not budget_left(sess, args):
+        pool = sess.pool = start_pool(args, starts, rng)
+        i = -1
+        while i + 1 < args.samples and budget_left(sess, args):
+            ts = pool.draw()
+            if ts is None:
+                say(pool.exhausted())
                 break
+            # Only a start the recording shows playable costs a restore.
+            why = offline_reason(engine, ts, args, rng)
+            if why:
+                skip(sess, pool, ts, why, "not restored")
+                continue
+            i += 1
             say(f"[{i + 1}] {ts.key}")
             run = lp.Run(sess.dir / f"s{i:03d}", {"tool": "scripts/fuzz_play.py", "source": ts.key})
             ctx.run, ctx.mission_over = run, False
@@ -949,6 +1102,8 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None, esc
                         raise LeftMission(str(e)) from e
                     outcome = "driver_error"
                 sess.outcomes[outcome] += 1
+                if t == 0 and outcome in ("not_playable", "grid_unsafe"):
+                    pool.reject(ts, f"{outcome} after the restore")  # never restored again
                 if outcome == "mission_over":
                     raise LeftMission("the mission ended (the game is past the mission's last enemy phase)")
                 if outcome not in ("matched", "resynced"):
@@ -1007,7 +1162,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dry-run", action="store_true", help="engine only: never touches the game")
     ap.add_argument("--put-back", metavar="SESSION",
                     help="put a live session's profile_backup save files back (quit, swap, relaunch, Continue "
-                         "and the second load; with --dry-run: only say what it would do)")
+                         "and the second load, from a mission or the island map; with --dry-run: only say what it "
+                         "would do)")
     ap.add_argument("--recordings", default=str(lp.LIVE_ROOT), help="live_play run directories (default %(default)s)")
     ap.add_argument("--run", action="append", help="only this run (repeatable); with --mission/--turn: that turn")
     ap.add_argument("--mission", type=int, help="mission index MM of m<MM>_turn_<TT> (with --run and --turn)")
@@ -1034,6 +1190,12 @@ def build_parser() -> argparse.ArgumentParser:
     xy = lambda s: tuple(int(v) for v in s.split(","))  # noqa: E731
     ap.add_argument("--continue-xy", type=xy, default=lp.TITLE_CONTINUE,
                     help="the title screen's Continue (default: fullscreen 1360x768)")
+    ap.add_argument("--gear-xy", type=xy, default=lp.PAUSE_GEAR,
+                    help="the pause menu's gear icon in a mission, for the second load (Esc is the fallback; "
+                         "default: fullscreen 1360x768)")
+    ap.add_argument("--map-gear-xy", type=xy, default=lp.MAP_GEAR,
+                    help="the gear icon on the island map, for the put-back's second load there (default: "
+                         "fullscreen 1360x768)")
     ap.add_argument("--main-menu-xy", type=xy, default=lp.PAUSE_MAIN_MENU,
                     help="the pause menu's MAIN MENU, for the second load (default: fullscreen 1360x768)")
     ap.add_argument("--idle-seconds", type=float, default=300.0,
@@ -1097,7 +1259,9 @@ def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int
         if sess is not None:
             sess.write_meta({"recordings": str(root), "turn_starts": len(starts), "samples": sess.samples,
                              "steps": sess.steps, "findings": sess.findings, "outcomes": dict(sess.outcomes),
-                             "mix": dict(sess.mix), "effects": dict(sess.tags), "engine_notes": dict(sess.surprise)})
+                             "mix": dict(sess.mix), "effects": dict(sess.tags), "engine_notes": dict(sess.surprise),
+                             "rejected_starts": dict(sess.pool.bad) if sess.pool else {},
+                             "passes": sess.pool.passes if sess.pool else 0})
 
 
 if __name__ == "__main__":

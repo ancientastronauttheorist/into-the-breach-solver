@@ -114,9 +114,11 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   with that turn's solve input. The game reads its save files only at
   launch (Continue after the pause menu's Main Menu resumes the run still in
   memory, whatever the profile now holds), hence the relaunch. `restore
-  --reload` then loads the save once more (Esc; once the heartbeat stalls,
-  the pause menu's MAIN MENU at (530, 438), no confirm dialog; Continue on
-  the title) and fails while the bridge still reports a wrong Grid Defense
+  --reload` then loads the save once more (the pause menu by its gear icon
+  at `--gear-xy`, default (43, 28), Esc as a fallback: Esc once did not
+  open it, live 2026-10-16; both bring the game window to the front first;
+  once the heartbeat stalls, the pause menu's MAIN MENU at (530, 438), no
+  confirm dialog; Continue on the title) and fails while the bridge still reports a wrong Grid Defense
   base (`grid_defense_base` / `grid_base_difficulty` against the save's
   difficulty). Continue resumes the run at the start of
   that turn, Vek intents and spawn points included, so the same turn can be
@@ -370,7 +372,15 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
 - **Turn starts** are the recorded `m<MM>_turn_<TT>_solve_input.json` of
   `recordings/live/<run>/` (`--recordings`, `--run`); live mode needs their
   `_saveData.lua` checkpoint. A mission's last turn is left out
-  (`--last-turns`: its enemy phase ends the mission or the run).
+  (`--last-turns`: its enemy phase ends the mission or the run). Starts
+  are drawn without replacement: a shuffled pass over all of them, then a
+  new pass, said so (`--mission/--turn`: that one every time). Live mode
+  restores only a start its recording shows playable (`offline_reason`: a
+  player turn with an active mech, not a last turn, and a sequence of
+  `--tries` the engine predicts keeps `--min-grid` from the recorded solve
+  input); one that fails, or fails the same checks after its restore, is
+  never drawn again (`skipped_<why>` in the outcomes, `rejected_starts` in
+  `session.json`).
 - **Moves** come from `itb_live actions` on the board after the prefix,
   filtered by what the UI allows (`ui_sequence_ok`: move then act;
   Shifty / Post_Move one move after acting; Double_Shot two actions
@@ -414,9 +424,10 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
   profile, relaunch (`launch_game`: `open steam://run/590380` through the
   offline Steam client, nothing else of Steam), click Continue on the title
   screen until a fresh player turn shows, then load once more against the
-  Grid Defense restart quirk (as `restore --reload`: Esc; once the
-  heartbeat stalls, i.e. the pause menu is open, its MAIN MENU at
-  `--main-menu-xy`, default (530, 438); Continue). The board is checked
+  Grid Defense restart quirk (as `restore --reload`: the gear at
+  `--gear-xy`, default (43, 28), Esc as a fallback; once the heartbeat
+  stalls, i.e. the pause menu is open, its MAIN MENU at `--main-menu-xy`,
+  default (530, 438); Continue). The board is checked
   against the recorded turn start and the Grid Defense base against the
   save's difficulty; either one wrong stops the session. Title-screen
   clicks go out only right after a launch or a Main Menu, and a retry only
@@ -426,9 +437,11 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
   and put back at every end (done, a mission that ended, a silent bridge,
   a failed restore): quit, swap, relaunch; with a run in them, one Continue
   (after `END_CONTINUE_DELAY`, 25 s), then the bridge gets `END_WAIT` (60 s):
-  a mission that opens is loaded once more and its base checked, a silent
-  bridge (the island map) is left as it is and said so (the restart quirk
-  then holds until the next load: Esc, Main Menu, Continue by hand). A
+  a mission that opens is loaded once more and its base checked; a silent
+  bridge (the island map, where Esc does nothing) gets the second load
+  blind: the map's gear at `--map-gear-xy`, default (38, 27), MAIN MENU,
+  Continue, with a fixed `MAP_CLICK_WAIT` (5 s) after each click, since
+  nothing can confirm them (said so in the output). A
   backup without `saveData.lua` (no run in progress) is put back as it is
   and the game left on the title screen. If the put-back itself fails,
   `--put-back <session>` does it again (`--dry-run`: only says what).

@@ -68,8 +68,8 @@ units). Continue resumes the run at the
 start of that turn. The game reads its saves only at launch (Continue after
 the pause menu's Main Menu resumes the run in memory), hence the relaunch.
 --reload then loads the save once more against the Grid Defense restart
-quirk (Esc, the pause menu's Main Menu, Continue on the title screen) and
-fails if the bridge still reports a wrong Grid Defense base.
+quirk (the gear icon at the top left, Esc as a fallback; the pause menu's
+Main Menu; Continue on the title screen) and fails if the bridge still reports a wrong Grid Defense base.
 
 deploy: places the mechs on the bridge's exported drop zone (tiles the deploy
 UI refuses are not in it, and DEPLOY refuses them anyway) with a simple
@@ -130,10 +130,15 @@ STEAM_RUN = "steam://run/590380"
 TITLE_CONTINUE = (140, 233)
 CONTINUE_DELAY = 15.0
 CONTINUE_RETRY = 30.0
-# The pause menu (Esc in a mission), fullscreen 1360x768: CONTINUE (530, 246),
-# MAIN MENU (530, 438), SAVE and QUIT (530, 502); Main Menu has no confirm
-# dialog. The heartbeat stalls while it is open (PAUSE_STALL s, looked for
-# PAUSE_WAIT s after Esc); MENU_TO_TITLE s after Main Menu the title is up.
+# The pause menu, fullscreen 1360x768: opened by the gear icon at the top
+# left (PAUSE_GEAR in a mission, MAP_GEAR on the island map, where Esc does
+# nothing) or Esc in a mission (which did not open it once, live
+# 2026-10-16); CONTINUE (530, 246), MAIN MENU (530, 438), SAVE and QUIT
+# (530, 502); Main Menu has no confirm dialog. The heartbeat stalls while it
+# is open (PAUSE_STALL s, looked for PAUSE_WAIT s after the click or Esc);
+# MENU_TO_TITLE s after Main Menu the title is up.
+PAUSE_GEAR = (43, 28)
+MAP_GEAR = (38, 27)
 PAUSE_MAIN_MENU = (530, 438)
 PAUSE_STALL = 2.0
 PAUSE_WAIT = 5.0
@@ -1980,15 +1985,22 @@ def play_turn(ctx) -> list:
 
 # ------------------------------------------------------------------ end turn
 
+def focus_game() -> None:
+    """Brings the game window to the front (a click or key goes to the
+    focused window)."""
+    subprocess.run(["osascript", "-e", f'tell application "{GAME_PROCESS}" to activate'],
+                   capture_output=True, check=False)
+    time.sleep(0.4)
+
+
 def click_end_turn(xy: tuple) -> bool:
-    """Clicks End Turn at screen point xy (fullscreen 1360x768 default).
-    False if no clicking tool is available."""
+    """Clicks screen point xy (End Turn and the rest; fullscreen 1360x768
+    defaults) with the game focused first. False if no clicking tool is
+    available."""
     cliclick = shutil.which("cliclick") or "/opt/homebrew/bin/cliclick"
     if not os.path.exists(cliclick):
         return False
-    subprocess.run(["osascript", "-e", 'tell application "Into the Breach" to activate'],
-                   capture_output=True, check=False)
-    time.sleep(0.4)
+    focus_game()
     x, y = xy
     subprocess.run([cliclick, f"m:{x},{y}", "w:150", f"c:{x},{y}"], capture_output=True, check=False)
     return True
@@ -2509,13 +2521,12 @@ def launch_game() -> None:
 
 
 def press_escape() -> bool:
-    """Presses Esc in the game. False if no key tool is available."""
+    """Presses Esc in the game, focused first. False if no key tool is
+    available."""
     cliclick = shutil.which("cliclick") or "/opt/homebrew/bin/cliclick"
     if not os.path.exists(cliclick):
         return False
-    subprocess.run(["osascript", "-e", 'tell application "Into the Breach" to activate'],
-                   capture_output=True, check=False)
-    time.sleep(0.4)
+    focus_game()
     subprocess.run([cliclick, "kp:esc"], capture_output=True, check=False)
     return True
 
@@ -2683,13 +2694,35 @@ def wait_stall(bridge, timeout: float) -> bool:
     return False
 
 
+def open_pause_menu(ctx, gear_xy: tuple) -> str:
+    """Opens an open mission's pause menu: a click on the gear icon at the
+    top left (gear_xy), then, if the heartbeat has not stalled within
+    PAUSE_WAIT s, Esc (it did not open the menu once, live 2026-10-16). Both
+    bring the game window to the front first (click_end_turn,
+    press_escape). Returns which one opened it; raises when neither did
+    (nothing more is clicked)."""
+    tools = 0
+    for name, act in (("the gear", lambda: ctx.click(gear_xy)), ("Esc", ctx.escape)):
+        if not act():
+            continue
+        tools += 1
+        if wait_stall(ctx.bridge, PAUSE_WAIT):
+            return name
+        say(f"  {name} did not open the pause menu (the heartbeat did not stall)")
+    if not tools:
+        raise Refused("no cliclick: cannot open the pause menu for the second load")
+    raise Anomaly("second load: neither the gear nor Esc opened the pause menu (the heartbeat did not stall): "
+                  "nothing more clicked")
+
+
 def reload_save(ctx, timeout: float, player_turn: bool = True) -> dict:
     """The second load after a restart (engine/README.md "Live play": a save
     continued right after the game starts gets the Grid Defense base of the
     settings file's difficulty; loading it once more builds the power bar
-    under the save's). From an open mission: Esc; once the heartbeat stalls
-    (the pause menu is open; never a click on the board) the pause menu's
-    MAIN MENU (--main-menu-xy, no confirm dialog); MENU_TO_TITLE s later,
+    under the save's). From an open mission: the pause menu (open_pause_menu:
+    the gear at --gear-xy, Esc as a fallback; each confirmed by the
+    heartbeat stalling; never a click on the board), then its MAIN MENU
+    (--main-menu-xy, no confirm dialog); MENU_TO_TITLE s later,
     with the bridge still silent, Continue on the title screen (again only
     while the bridge stays silent since the click), until a fresh player
     turn (player_turn False: until the bridge ticks with a fresh state).
@@ -2697,25 +2730,19 @@ def reload_save(ctx, timeout: float, player_turn: bool = True) -> dict:
     turn)."""
     args, bridge = ctx.args, ctx.bridge
     menu_xy = getattr(args, "main_menu_xy", None) or PAUSE_MAIN_MENU
+    gear_xy = getattr(args, "gear_xy", None) or PAUSE_GEAR
     continue_xy = getattr(args, "continue_xy", None) or TITLE_CONTINUE
     deadline = time.time() + timeout
     if not bridge_alive_since(bridge, time.time() - PAUSE_STALL):
         raise Anomaly("second load: no mission is open (the bridge is silent): nothing pressed")
-    say("  loading the save once more (Grid Defense restart quirk): Esc, Main Menu, Continue")
+    say("  loading the save once more (Grid Defense restart quirk): pause menu, Main Menu, Continue")
     if getattr(args, "no_click", False):
-        say("  >>> press Esc and click MAIN MENU")
+        say("  >>> click the gear at the top left (or press Esc) and click MAIN MENU")
         if not wait_stall(bridge, timeout):
             raise Anomaly("second load: the mission did not close")
     else:
-        for _ in range(2):
-            if not ctx.escape():
-                raise Refused("no cliclick: cannot press Esc for the second load")
-            if wait_stall(bridge, PAUSE_WAIT):
-                break
-        else:
-            raise Anomaly("second load: Esc did not open the pause menu (the heartbeat did not stall): "
-                          "nothing clicked")
-        say("  clicking Main Menu")
+        how = open_pause_menu(ctx, gear_xy)
+        say(f"  pause menu open ({how}); clicking Main Menu")
         menu = time.time()
         ctx.click(menu_xy)
         time.sleep(MENU_TO_TITLE)
@@ -2852,8 +2879,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--continue-xy", type=lambda s: tuple(int(v) for v in s.split(",")),
                    default=TITLE_CONTINUE, help="title screen Continue point (default: fullscreen 1360x768)")
     p.add_argument("--reload", action="store_true",
-                   help="then load the save once more (Esc, the pause menu's Main Menu, Continue: the Grid Defense "
-                        "restart quirk) and check the Grid Defense base")
+                   help="then load the save once more (the pause menu by its gear, Esc as a fallback; Main Menu; "
+                        "Continue: the Grid Defense restart quirk) and check the Grid Defense base")
+    p.add_argument("--gear-xy", type=lambda s: tuple(int(v) for v in s.split(",")), default=PAUSE_GEAR,
+                   help="with --reload: the pause menu's gear icon in a mission (default: fullscreen 1360x768)")
     p.add_argument("--main-menu-xy", type=lambda s: tuple(int(v) for v in s.split(",")), default=PAUSE_MAIN_MENU,
                    help="with --reload: the pause menu's MAIN MENU point (default: fullscreen 1360x768)")
     return ap
