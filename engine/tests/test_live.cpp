@@ -216,6 +216,85 @@ TEST_CASE("live: a moved flag in the state keeps the unit from moving again") {
   fs::remove(path);
 }
 
+// The fuzzer's move list (scripts/fuzz_play.py): every sub-action listed
+// replays through predict to the board a one-step prefix gives, and a unit
+// that moved and fired is offered nothing more.
+TEST_CASE("live: actions lists the sub-actions predict accepts") {
+  NEED_SESSION();
+  const json r = S.handle({{"cmd", "actions"}, {"state", kCaveT2.string()}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  CHECK(r["refused"] == -1);
+  CHECK(r["board"] == S.handle({{"cmd", "board"}, {"state", kCaveT2.string()}})["board"]);
+  REQUIRE(r["units"].size() >= 3);
+  const json& acts = r["actions"];
+  REQUIRE_FALSE(acts.empty());
+  std::set<std::string> subs;
+  json first_move, first_weapon;
+  for (const json& a : acts) {
+    subs.insert(a["sub"].get<std::string>());
+    for (const char* key : {"uid", "weapon", "slot", "target", "target2", "target_kind", "end", "effect"}) {
+      CHECK_MESSAGE(a.contains(key), key);
+    }
+    CHECK(a["effect"].contains("hp"));
+    if (a["sub"] == "move" && first_move.is_null()) first_move = a;
+    if (a["sub"] == "weapon" && first_weapon.is_null()) first_weapon = a;
+  }
+  CHECK(subs.count("move"));
+  CHECK(subs.count("weapon"));
+  REQUIRE_FALSE(first_move.is_null());
+  REQUIRE_FALSE(first_weapon.is_null());
+
+  auto as_plan = [](const json& a) {
+    if (a["sub"] == "move") return json{{"uid", a["uid"]}, {"move", a["target"]}, {"kind", "none"}};
+    return json{{"uid", a["uid"]}, {"move", nullptr}, {"kind", a["sub"]}, {"weapon", a["weapon"]},
+                {"target", a["target"]}, {"target2", a["target2"]}};
+  };
+  for (const json& a : {first_move, first_weapon}) {
+    const json plan = json::array({as_plan(a)});
+    const json p = S.handle({{"cmd", "predict"}, {"state", kCaveT2.string()}, {"plan", plan}});
+    REQUIRE_MESSAGE(p["ok"].get<bool>(), p.dump());
+    CHECK(p["refused"] == -1);
+    REQUIRE(p["steps"].size() == 1);
+    const json next = S.handle({{"cmd", "actions"}, {"state", kCaveT2.string()}, {"plan", plan}, {"effects", false}});
+    REQUIRE(next["ok"].get<bool>());
+    CHECK(next["board"] == p["steps"][0]["board"]);
+    for (const json& b : next["actions"]) CHECK_FALSE(b.contains("effect"));
+  }
+
+  // The weapon's unit moved first, then fired: nothing more for it.
+  const int uid = first_weapon["uid"];
+  json mover;
+  for (const json& a : acts) {
+    if (a["sub"] == "move" && a["uid"] == uid) {
+      mover = a;
+      break;
+    }
+  }
+  if (!mover.is_null()) {
+    const json plan = json::array({as_plan(mover)});
+    const json after_move = S.handle({{"cmd", "actions"}, {"state", kCaveT2.string()}, {"plan", plan}});
+    json shot;
+    for (const json& a : after_move["actions"]) {
+      CHECK_FALSE((a["uid"] == uid && a["sub"] == "move"));
+      if (a["uid"] == uid && a["sub"] == "weapon" && shot.is_null()) shot = a;
+    }
+    if (!shot.is_null()) {
+      json both = plan;
+      both.push_back(as_plan(shot));
+      const json done = S.handle({{"cmd", "actions"}, {"state", kCaveT2.string()}, {"plan", both}});
+      for (const json& a : done["actions"]) CHECK(a["uid"] != uid);
+    }
+  }
+
+  // A prefix the engine refuses says so.
+  json bad = json::array({json{{"uid", 9999}, {"move", nullptr}, {"kind", "weapon"}, {"weapon", "Prime_Punchmech"},
+                               {"target", json::array({0, 0})}}});
+  const json refused = S.handle({{"cmd", "actions"}, {"state", kCaveT2.string()}, {"plan", bad}});
+  REQUIRE(refused["ok"].get<bool>());
+  CHECK(refused["refused"] == 0);
+  CHECK(refused["actions"].empty());
+}
+
 namespace {
 
 const json* board_unit(const json& board, int uid) {

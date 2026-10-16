@@ -35,6 +35,19 @@
 //       ("threat_tier" ... "lookahead", "lookahead_samples", ...) rank the
 //       search's turn-1 solves as the turns will be ranked (absent: plain
 //       tiers); the scores then carry those tiers
+//   {"cmd": "actions", "state": "...", "plan": [actions], "effects": true}
+//       the fuzzer's move list (scripts/fuzz_play.py): the plan prefix played
+//       as predict plays it, then "board" (the compact board there), "units"
+//       (each controllable unit's active / moved / bonus_shift / can_move /
+//       can_act) and "actions": every sub-action the engine accepts from that
+//       board (the solver's Action model: moves, weapon targets incl. second
+//       clicks, Repair), each {"sub", "uid", "weapon", "slot", "target",
+//       "target2", "target_kind", "end"} and, with "effects", the "effect" of
+//       running it once on a copy (HP and kills by team, pushes, bumps, falls,
+//       units created, building / grid / mountain loss, tiles changed, chance
+//       nodes, timing flags, Lua errors, unmodelled writes). Refused or empty
+//       ones are counted in "rejected" by status. "refused" >= 0: the prefix
+//       itself was refused at that step ("refused_reason")
 //   {"cmd": "ping"}
 //
 // The state is a bridge dump (bare, or a recording wrapper with

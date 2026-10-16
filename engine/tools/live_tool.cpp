@@ -5,6 +5,7 @@
 //            [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] [--out FILE] [--pretty]
 //   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--threat-tier] [--out FILE] [--pretty]
 //   itb_live [--game DIR] board <state.json> [--pretty]
+//   itb_live [--game DIR] actions <state.json> [--plan JSON|@FILE] [--no-effects] [--out FILE] [--pretty]
 //   itb_live [--game DIR] deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N]
 //            [--screen-samples N] [--solve-time S] [--solve-nodes N] [--seed N]
 //            [--threat-tier ... --lookahead ...: the turn-1 solves' ranking, as for solve]
@@ -34,8 +35,12 @@
 #include "itb/deploy.hpp"
 #include "itb/engine.hpp"
 #include "itb/environment.hpp"
+#include "itb/format.hpp"
 #include "itb/game_data.hpp"
+#include "itb/lua_host.hpp"
+#include "itb/movement.hpp"
 #include "itb/recording.hpp"
+#include "itb/tile_rules.hpp"
 #include "itb/score.hpp"
 #include "itb/threat.hpp"
 #include "itb/solver.hpp"
@@ -475,6 +480,324 @@ json candidate_json(const DeployCandidate& c, const std::vector<int32_t>& mechs,
               {"all_proven", c.all_proven}};
 }
 
+// ---- "actions": the legal sub-actions after a plan prefix (the fuzzer) ----
+
+// One sub-action a unit may try: the solver's Action model (solver.hpp),
+// enumerated the way its search does (solver.cpp unit_actions): moves to
+// every tile of the Move skill's target area but the unit's own, every
+// non-passive weapon slot at every tile of its target area (two-click
+// weapons at every tile of the second area unless the first click is an
+// exception), and Repair (mechs; the pilot's repair skill) at its area or
+// the unit's tile. Only can_move / can_act units; the engine's legality
+// check then accepts or refuses each when it runs.
+struct Candidate {
+  enum Kind : uint8_t { Move, Weapon, Repair };
+  Kind kind = Move;
+  int32_t uid = -1;
+  int slot = -1;
+  std::string skill;
+  Point target = kInvalidPoint;
+  Point target2 = kInvalidPoint;
+};
+
+void valid_unique(std::vector<Point>& pts) {
+  std::vector<Point> out;
+  for (Point p : pts) {
+    if (p.valid() && std::find(out.begin(), out.end(), p) == out.end()) out.push_back(p);
+  }
+  pts = std::move(out);
+}
+
+bool passive_skill(LuaHost& lua, const std::string& name) {
+  const std::optional<std::string> p = lua.lua_string(name, "Passive");
+  return (p && !p->empty()) || !lua.lua_string(name, "Name");
+}
+
+std::vector<Candidate> unit_candidates(Engine& engine, const Board& b, const Pawn& p, const std::string& repair) {
+  LuaHost& lua = engine.lua();
+  std::vector<Candidate> out;
+  if (can_act(b, p) && !p.frozen) {
+    for (int slot = 0; slot < kMaxWeapons; ++slot) {
+      const Symbol w = p.weapons[static_cast<size_t>(slot)];
+      if (w == kNoSymbol) continue;
+      const std::string name(symbol_name(w));
+      if (passive_skill(lua, name)) continue;
+      std::vector<Point> targets = lua.target_area(b, p, name, p.pos);
+      valid_unique(targets);
+      const bool two = lua.is_two_click(name);
+      for (Point t : targets) {
+        Candidate c;
+        c.kind = Candidate::Weapon;
+        c.uid = p.uid;
+        c.slot = slot;
+        c.skill = name;
+        c.target = t;
+        if (two && !lua.two_click_exception(b, p, name, p.pos, t)) {
+          const Point first = lua.translate_first_click(b, p, name, p.pos, t);
+          std::vector<Point> second = lua.second_target_area(b, p, name, p.pos, first);
+          valid_unique(second);
+          for (Point t2 : second) {
+            c.target2 = t2;
+            out.push_back(c);
+          }
+        } else {
+          out.push_back(c);
+        }
+      }
+    }
+    if (p.mech) {
+      std::vector<Point> targets = lua.target_area(b, p, repair, p.pos);
+      valid_unique(targets);
+      if (targets.empty()) targets.push_back(p.pos);
+      for (Point t : targets) {
+        Candidate c;
+        c.kind = Candidate::Repair;
+        c.uid = p.uid;
+        c.skill = repair;
+        c.target = t;
+        out.push_back(c);
+      }
+    }
+  }
+  if (can_move(p)) {
+    std::vector<Point> dests = lua.target_area(b, p, "Move", p.pos);
+    valid_unique(dests);
+    for (Point d : dests) {
+      if (d == p.pos) continue;
+      Candidate c;
+      c.kind = Candidate::Move;
+      c.uid = p.uid;
+      c.skill = "Move";
+      c.target = d;
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+ActionResult run_candidate(Engine& engine, Board& b, const Candidate& c, const ActionOptions& o) {
+  engine.lua().seed(kLuaSeed);
+  switch (c.kind) {
+    case Candidate::Move:
+      return engine.move(b, c.uid, c.target, o);
+    case Candidate::Weapon:
+      return engine.fire_weapon(b, c.uid, c.slot, c.target,
+                                c.target2.valid() ? std::optional<Point>(c.target2) : std::nullopt, o);
+    case Candidate::Repair:
+      return engine.repair(b, c.uid, c.target, c.skill, o);
+  }
+  return {};
+}
+
+const char* candidate_kind(Candidate::Kind k) {
+  switch (k) {
+    case Candidate::Weapon: return "weapon";
+    case Candidate::Repair: return "repair";
+    default: return "move";
+  }
+}
+
+const char* team_key(Team t) {
+  switch (t) {
+    case Team::Player: return "player";
+    case Team::Enemy: return "enemy";
+    default: return "neutral";
+  }
+}
+
+// What is on tile p before the action: the target's kind, for the fuzzer's
+// weighting ("building", "mountain", "unit_player", "water", ...).
+std::string tile_kind(const Board& b, Point p) {
+  if (!p.valid()) return "none";
+  if (const Pawn* q = b.pawn_at(p); q && q->alive()) return std::string("unit_") + team_key(q->team);
+  const Tile& t = b.tile(p);
+  if (t.is_building()) return t.hp > 0 ? "building" : "rubble";
+  if (t.lava) return "lava";
+  return terrain_name(t.terrain);
+}
+
+// The sub-action's effect, before -> after, as counts the fuzzer weights:
+// HP lost and deaths by team, the actor's own HP, pushes and bumps (the
+// resolution log), falls and drownings, units created, status changes,
+// building / mountain HP and grid lost, tiles changed, and the engine's
+// own uncertainty (chance nodes, timing flags, Lua errors, unmodelled
+// writes, mission hooks).
+json effect_json(const Board& before, const Board& after, const Candidate& c, const ActionResult& r,
+                 const std::vector<ResolveEvent>& log) {
+  json hp = {{"player", 0}, {"enemy", 0}, {"neutral", 0}};
+  json kills = {{"player", 0}, {"enemy", 0}, {"neutral", 0}};
+  int self_hp = 0, moved = 0, statuses = 0, fell = 0, drowned = 0;
+  for (const Pawn& p : before.pawns()) {
+    if (!p.alive() || !p.pos.valid()) continue;
+    const Pawn* q = after.find_pawn(p.uid);
+    const int lost = q ? std::max(0, p.hp - std::max<int>(0, q->hp)) : p.hp;
+    if (p.uid == c.uid) {
+      self_hp += lost;
+    } else {
+      hp[team_key(p.team)] = hp[team_key(p.team)].get<int>() + lost;
+    }
+    const bool dead = !q || !q->alive();
+    if (dead) kills[team_key(p.team)] = kills[team_key(p.team)].get<int>() + 1;
+    if (q && q->fallen && !p.fallen) ++fell;
+    if (q && dead && q->pos.valid()) {
+      const Tile& t = after.tile(q->pos);
+      if (t.is_liquid() || t.is_chasm()) ++drowned;
+    }
+    if (q && p.uid != c.uid && q->pos != p.pos) ++moved;
+    if (q) {
+      statuses += (p.fire != q->fire) + (p.acid != q->acid) + (p.frozen != q->frozen) + (p.shield != q->shield) +
+                  (p.webbed != q->webbed);
+    }
+  }
+  json created = json::array();
+  for (const Pawn& q : after.pawns()) {
+    if (!before.find_pawn(q.uid) && q.alive()) created.push_back(std::string(symbol_name(q.type)));
+  }
+  int building_hp = 0, buildings_destroyed = 0, mountain_hp = 0, tiles = 0, terrain = 0, fire = 0, smoke = 0,
+      acid = 0;
+  for (int i = 0; i < kTileCount; ++i) {
+    const Point p = Point::from_index(i);
+    const Tile& a = before.tile(p);
+    const Tile& z = after.tile(p);
+    if (a == z) continue;
+    ++tiles;
+    if (a.terrain != z.terrain) ++terrain;
+    if (a.is_building()) {
+      const int now = z.is_building() ? z.hp : 0;
+      building_hp += std::max(0, a.hp - now);
+      if (a.hp > 0 && now <= 0) ++buildings_destroyed;
+    }
+    if (a.is_mountain()) mountain_hp += std::max(0, a.hp - (z.is_mountain() ? z.hp : 0));
+    fire += a.on_fire() != z.on_fire();
+    smoke += a.smoke != z.smoke;
+    acid += a.acid != z.acid;
+  }
+  int pushes = 0, bumps = 0;
+  for (const ResolveEvent& e : log) {
+    if (e.type == ResolveEventType::PushStarted) ++pushes;
+    if (e.type == ResolveEventType::PushBlocked) ++bumps;
+  }
+  const bool same = before.pawns() == after.pawns() && tiles == 0;
+  return json{{"hp", hp},
+              {"kills", kills},
+              {"self_hp", self_hp},
+              {"moved_units", moved},
+              {"pushes", pushes},
+              {"bumps", bumps},
+              {"fell", fell},
+              {"drowned", drowned},
+              {"created", created},
+              {"statuses", statuses},
+              {"building_hp", building_hp},
+              {"buildings_destroyed", buildings_destroyed},
+              {"grid", before.grid_power - after.grid_power},
+              {"mountain_hp", mountain_hp},
+              {"tiles", tiles},
+              {"terrain", terrain},
+              {"fire_tiles", fire},
+              {"smoke_tiles", smoke},
+              {"acid_tiles", acid},
+              {"chance_nodes", r.resolve.chances.size()},
+              {"timing_sensitive", r.resolve.timing_sensitive()},
+              {"lua_errors", r.lua_errors.size()},
+              {"unapplied_lua_writes", r.unapplied.size()},
+              {"mission_hooks", r.mission_events.size()},
+              {"unchanged", same}};
+}
+
+// The "actions" request: plays the plan prefix exactly as simulate() does
+// (the same options and Lua seeding, so the board is predict's board after
+// those steps), then lists every sub-action the engine accepts from there,
+// each run once on a copy of the board (with "effects", the default: its
+// effect_json). Sub-actions the engine refuses or that do nothing are only
+// counted ("rejected", by status).
+void list_actions(Engine& engine, const Loaded& l, const json& request, json& out) {
+  const std::vector<PlayerAction> plan =
+      request.contains("plan") ? parse_plan(request["plan"]) : std::vector<PlayerAction>{};
+  const bool effects = request.value("effects", true);
+  Board b = l.board;
+  ActionOptions opts = action_options(l.ctx);
+  opts.check_legal = true;
+  int refused_at = -1;
+  std::string why;
+  int step = 0;
+  for (size_t i = 0; i < plan.size() && refused_at < 0; ++i) {
+    const PlayerAction& a = plan[i];
+    const Pawn* p = b.find_pawn(a.uid);
+    if (a.move.valid() && p && a.move != p->pos) {
+      engine.lua().seed(kLuaSeed);
+      const ActionResult r = engine.move(b, a.uid, a.move, opts);
+      if (refused(r)) {
+        refused_at = step;
+        why = "move: " + std::string(to_string(r.status));
+        break;
+      }
+      ++step;
+    }
+    if (a.kind == PlayerAction::Kind::None) continue;
+    const bool weapon = a.kind == PlayerAction::Kind::Weapon;
+    const std::string skill = weapon ? a.weapon : (a.weapon.empty() ? std::string("Skill_Repair") : a.weapon);
+    engine.lua().seed(kLuaSeed);
+    const ActionResult r = weapon ? engine.fire_weapon(b, a.uid, a.weapon, a.target, a.target2, opts)
+                                  : engine.repair(b, a.uid, a.target, skill, opts);
+    if (refused(r)) {
+      refused_at = step;
+      why = skill + ": " + to_string(r.status);
+      break;
+    }
+    ++step;
+  }
+  out["refused"] = refused_at;
+  if (refused_at >= 0) {
+    out["refused_reason"] = why;
+    out["actions"] = json::array();
+    return;
+  }
+  out["board"] = live_board_json(b);
+  std::vector<const Pawn*> units;
+  for (const Pawn& p : b.pawns()) {
+    if (p.controlled() && p.alive() && p.pos.valid()) units.push_back(&p);
+  }
+  std::sort(units.begin(), units.end(), [](const Pawn* a, const Pawn* c) { return a->uid < c->uid; });
+  json list = json::array();
+  json rejected = json::object();
+  json unit_info = json::array();
+  for (const Pawn* p : units) {
+    std::string repair = "Skill_Repair";
+    for (const auto& [uid, skill] : l.repair_skills) {
+      if (uid == p->uid) repair = skill;
+    }
+    unit_info.push_back(json{{"uid", p->uid}, {"type", std::string(symbol_name(p->type))}, {"active", p->active},
+                             {"moved", p->moved}, {"bonus_shift", p->movement.bonus_shift},
+                             {"can_move", can_move(*p)}, {"can_act", can_act(b, *p) && !p->frozen}});
+    for (const Candidate& c : unit_candidates(engine, b, *p, repair)) {
+      Board next = b;
+      std::vector<ResolveEvent> log;
+      ActionOptions o = opts;
+      o.log = &log;
+      const ActionResult r = run_candidate(engine, next, c, o);
+      if (!r.ok()) {
+        const std::string k = to_string(r.status);
+        rejected[k] = rejected.value(k, 0) + 1;
+        continue;
+      }
+      json a{{"sub", candidate_kind(c.kind)},
+             {"uid", c.uid},
+             {"weapon", c.skill},
+             {"slot", c.slot},
+             {"target", point_json(c.target)},
+             {"target2", c.target2.valid() ? point_json(c.target2) : json(nullptr)},
+             {"target_kind", tile_kind(b, c.target)},
+             {"end", point_json(r.end)}};
+      if (effects) a["effect"] = effect_json(b, next, c, r, log);
+      list.push_back(std::move(a));
+    }
+  }
+  out["units"] = unit_info;
+  out["actions"] = list;
+  out["rejected"] = rejected;
+}
+
 }  // namespace
 
 json live_board_json(const Board& b) {
@@ -587,8 +910,8 @@ json LiveSession::handle(const json& request) {
     if (!request.is_object()) throw std::invalid_argument("a request must be a JSON object");
     const std::string cmd = request.value("cmd", std::string());
     if (cmd == "ping") return json{{"ok", true}, {"format", kLiveFormat}, {"cmd", cmd}, {"threads", threads()}};
-    if (cmd != "board" && cmd != "solve" && cmd != "predict" && cmd != "deploy") {
-      throw std::invalid_argument("unknown cmd '" + cmd + "' (board, solve, predict, deploy, ping)");
+    if (cmd != "board" && cmd != "solve" && cmd != "predict" && cmd != "deploy" && cmd != "actions") {
+      throw std::invalid_argument("unknown cmd '" + cmd + "' (board, solve, predict, deploy, actions, ping)");
     }
     if (!request.contains("state") || !request["state"].is_string()) {
       throw std::invalid_argument("'state' must be the path of a bridge state file");
@@ -598,6 +921,10 @@ json LiveSession::handle(const json& request) {
     json out = header(l, cmd, state);
     if (cmd == "board") {
       out["board"] = live_board_json(l.board);
+      return out;
+    }
+    if (cmd == "actions") {
+      list_actions(*main_, l, request, out);
       return out;
     }
     if (cmd == "deploy") {
@@ -750,6 +1077,7 @@ int usage() {
                "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] "
                "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] [--grid-survival [--survival-cap] [--survival-cap-share F] [--survival-cap-strict]] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | "
+               "actions <state.json> [--plan JSON|@FILE] [--no-effects] | "
                "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
                "[--solve-time S] [--solve-nodes N] [--seed N] [--placements JSON|@FILE] [--always JSON|@FILE] "
                "[ranking options as for solve] | "
@@ -800,7 +1128,7 @@ int run_live(int argc, char** argv) {
   bool pretty = false;
   fs::path out_path;
   size_t i = 1;
-  if (cmd == "solve" || cmd == "predict" || cmd == "board" || cmd == "deploy") {
+  if (cmd == "solve" || cmd == "predict" || cmd == "board" || cmd == "deploy" || cmd == "actions") {
     if (args.size() < 2) return usage();
     request["state"] = args[1];
     i = 2;
@@ -871,8 +1199,10 @@ int run_live(int argc, char** argv) {
       } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve" || cmd == "deploy")) {
         threads = std::max(1, std::stoi(args[++i]));
         request["threads"] = threads;
-      } else if (args[i] == "--plan" && more && cmd == "predict") {
+      } else if (args[i] == "--plan" && more && (cmd == "predict" || cmd == "actions")) {
         request["plan"] = json::parse(read_text_arg(args[++i]));
+      } else if (args[i] == "--no-effects" && cmd == "actions") {
+        request["effects"] = false;
       } else if (args[i] == "--out" && more && cmd != "serve") {
         out_path = args[++i];
       } else if (args[i] == "--pretty" && cmd != "serve") {
@@ -887,7 +1217,7 @@ int run_live(int argc, char** argv) {
   }
   std::unique_ptr<LiveSession> session;
   try {
-    session = std::make_unique<LiveSession>(game, cmd == "board" || cmd == "predict" ? 1 : threads);
+    session = std::make_unique<LiveSession>(game, cmd == "board" || cmd == "predict" || cmd == "actions" ? 1 : threads);
   } catch (const std::exception& e) {
     std::cout << json{{"ok", false}, {"format", kLiveFormat}, {"error", e.what()}}.dump() << std::endl;
     return 1;
