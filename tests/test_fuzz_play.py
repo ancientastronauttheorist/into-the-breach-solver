@@ -603,9 +603,11 @@ class FuzzTest(unittest.TestCase):
 
     # ------------------------------------------------------------ live turns (fake bridge)
 
-    def live_session(self, eng, extra=(), next_turn=None):
-        self.record()
-        self.fb = tlp.FakeBridge(tlp.base_state())
+    def live_session(self, eng, extra=(), next_turn=None, state=None, checkpoint=None):
+        self.record(state=copy.deepcopy(state) if state else None)
+        if checkpoint is not None:
+            (lp.LIVE_ROOT / "20261016_000000" / "m00_turn_01_saveData.lua").write_text(checkpoint)
+        self.fb = tlp.FakeBridge(copy.deepcopy(state) if state else tlp.base_state())
         if next_turn:
             self.fb.next_turn = next_turn
         args = args_for(["--samples", "1", *extra])
@@ -734,6 +736,35 @@ class FuzzTest(unittest.TestCase):
         self.assertEqual(self.fb.state["grid_power"], 6)
         self.assertEqual(eng.predict_states[-1]["grid_power"], 6)  # the end-of-turn prediction's input
         self.assertEqual(sess.outcomes["matched"], 1)
+
+    def test_teleporter_pads_come_from_the_checkpoint_the_game_loaded(self):
+        # Fuzz 20261017_053501 s007 (run 20261016_130634 m36 t03): the restored
+        # game's bridge had no pads, the profile's saveData.lua gave none,
+        # and the bridge log's latest capture was another mission's; the
+        # Sidestep move onto the real pad E6 was predicted to stay there.
+        # Every solver input of the sample (each step, End Turn) takes the
+        # checkpoint's pads.
+        st = dict(tlp.base_state(), mission_id="Mission_Teleporter")
+        save = ('["map_data"] = {["teleports"] = {Point( 1, 6 ), Point( 6, 1 ), Point( 0, 7 ), Point( 7, 0 ), },\n'
+                '["tele_history"] = {-1, -1, -1, -1, },\n')
+        lp.PROFILE.mkdir(parents=True, exist_ok=True)
+        (lp.PROFILE / "saveData.lua").write_text("-- the game's own rewrite, no pads")
+        orig = lp.logged_teleporter_pairs
+        lp.logged_teleporter_pairs = lambda path=None: [[3, 6, 5, 4]]
+        try:
+            eng = FuzzEngine([c for c in CANDIDATES if c["sub"] == "move"])
+            rc, sess, findings = self.live_session(eng, state=st, checkpoint=save)
+        finally:
+            lp.logged_teleporter_pairs = orig
+        self.assertEqual(findings, [])
+        self.assertEqual(sess.outcomes["matched"], 1)
+        sample = sess.dir / "s000"
+        # The solver's inputs: the turn start and End Turn's (the step files are the bridge's own dumps).
+        inputs = [sample / "m00_turn_01_solve_input.json", *sorted(sample.glob("m00_turn_01_end_turn_[0-9][0-9].json"))]
+        self.assertEqual(len(inputs), 2)
+        for p in inputs:
+            self.assertEqual(json.loads(p.read_text())["data"]["bridge_state"].get("teleporter_pairs"),
+                             [[1, 6, 6, 1], [0, 7, 7, 0]], p.name)
 
     def test_an_enemy_phase_difference_is_a_finding(self):
         def next_turn(st):

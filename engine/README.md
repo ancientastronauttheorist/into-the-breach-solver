@@ -433,10 +433,14 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
   one when a turn begins), so it estimates no grid lost during the turn:
   the driver records the turn start's grid buildings (`grid_start` in the
   manifest) and `patch_state` takes the grid from them. Teleporter pads
-  come from the save when the bridge has none (the log's latest capture
-  can be another mission's). A step after a chance node whose only
-  difference is a building the game kept (a Grid Defense resist) is no
-  finding (`step_resisted`); the rest is re-predicted.
+  come from the checkpoint save the sample loaded when the bridge has none
+  (`mission_save` in the manifest; right after a restore the profile's
+  saveData.lua can hold none); live play reads the profile's saveData.lua,
+  then undoSave.lua, then the bridge log's capture, only one made since the
+  bridge last started (an older one can be another mission's). A step
+  after a chance node whose only difference is a building the game kept
+  (a Grid Defense resist) is no finding (`step_resisted`); the rest is
+  re-predicted.
 - **Findings** go to `recordings/fuzz/<session>/findings.jsonl` (git-ignored):
   `step`, `chance` (a step whose prediction drew a chance node, e.g. a Grid
   Defense roll: the rest is re-predicted from the live board and played

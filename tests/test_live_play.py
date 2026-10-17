@@ -2472,6 +2472,68 @@ class TeleporterPairsTest(unittest.TestCase):
         finally:
             lp.logged_teleporter_pairs = orig
 
+    # Fuzz 20261017_053501 s007 (run 20261016_130634 m36 t03, restored): the
+    # profile's save gave no pads, and the log's latest capture, from the
+    # evening before (an earlier game process), put a pad on D3 (5,4). The
+    # Sidestep move onto the real pad E6 (2,3) went to C3 (5,5) in the game.
+    def test_the_log_capture_counts_only_since_the_bridge_started(self):
+        before = ("x | TELEPORT PAD pair captured: (2,1) <-> (5,2)\n"
+                  "x | TELEPORT PAD pair captured: (3,6) <-> (5,4)\n"
+                  "x | TELEPORT PAD: StartMission complete, 2 pair(s) captured\n"
+                  "x | TELEPORT PAD: clearing stale pairs for Mission_AcidStorm\n")
+        start = "x | === ITB Bot Bridge started (load #1) ===\n"
+        self.assertEqual(lp.logged_teleporter_pairs(self.write(before + start + "x | CMD: #1 SNAPSHOT\n", ".log")),
+                         [])
+        self.assertEqual(lp.logged_teleporter_pairs(self.write(start + before, ".log")),
+                         [[2, 1, 5, 2], [3, 6, 5, 4]])
+
+    def test_mission_pads_from_the_loaded_save_else_the_profiles_saves(self):
+        import tempfile
+        prof = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, prof)
+        orig = lp.PROFILE
+        lp.PROFILE = prof
+        try:
+            self.assertEqual(lp.mission_teleporter_pairs(), [])
+            (prof / "undoSave.lua").write_text(self.SAVE)
+            (prof / "saveData.lua").write_text('["map_data"] = {}')
+            # saveData.lua without pads: undoSave.lua's.
+            self.assertEqual(lp.mission_teleporter_pairs(), [[4, 6, 6, 3], [3, 2, 3, 5]])
+            loaded = self.write(self.SAVE.replace("Point( 4, 6 )", "Point( 2, 3 )"), ".lua")
+            self.assertEqual(lp.mission_teleporter_pairs(loaded), [[2, 3, 6, 3], [3, 2, 3, 5]])
+            self.assertEqual(lp.mission_teleporter_pairs(False), [])
+        finally:
+            lp.PROFILE = orig
+
+    def test_patch_state_notes_a_teleporter_mission_without_pads(self):
+        state = base_state()
+        state["mission_id"] = "Mission_Teleporter"
+        orig = lp.logged_teleporter_pairs
+        lp.logged_teleporter_pairs = lambda path=None: []
+        try:
+            notes: list = []
+            fixed, patches = lp.patch_state(state, {}, set(), notes=notes, teleporter_save=False)
+        finally:
+            lp.logged_teleporter_pairs = orig
+        self.assertNotIn("teleporter_pairs", fixed)
+        self.assertNotIn("teleporter_pairs", patches)
+        self.assertTrue(any("no pads" in n for n in notes), notes)
+
+    def test_run_keeps_the_save_its_mission_was_loaded_from(self):
+        import tempfile
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d)
+        run = lp.Run(d / "run", {})
+        state = dict(base_state(), mission_id="Mission_Teleporter", turn=3)
+        self.assertIsNone(run.mission_save(state))
+        run.save_mission_save(state, d / "m36_turn_03_saveData.lua")
+        self.assertEqual(run.mission_save(dict(state, turn=4)), d / "m36_turn_03_saveData.lua")
+        # Kept in the manifest across commands.
+        self.assertEqual(lp.Run(d / "run", lp.Run._read_meta(d / "run")).mission_save(dict(state, turn=4)),
+                         d / "m36_turn_03_saveData.lua")
+        # Another mission: the profile's saves again.
+        self.assertIsNone(run.mission_save(dict(state, mission_id="Mission_Survive", turn=1)))
+
 
 class DiffBoardsTest(unittest.TestCase):
     """The enemy-phase comparison's handling of AI planning moves."""

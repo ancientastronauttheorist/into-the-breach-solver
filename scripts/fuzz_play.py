@@ -947,7 +947,7 @@ def live_turn(ctx, sess: Session, ts: TurnStart, sample: int, chooser: Chooser, 
     def solver_input(st: dict, label: str) -> Path:
         notes: list = []
         inp, patches = lp.patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react, shields,
-                                      grid_start)
+                                      grid_start, teleporter_save=run.mission_save(st))
         path = run.save_state(inp, label, {"patches": patches} if patches else None)
         if patches:
             run.save_state(st, label + "_raw")
@@ -1079,10 +1079,16 @@ def last_event(run, kind: str) -> dict | None:
     return None
 
 
-def seed_run(run, state: dict, carry: Carry) -> None:
+def seed_run(run, state: dict, carry: Carry, save: Path | None = None) -> None:
     """A sample's run directory starts with what live play carried into the
-    recorded turn start (Burrowers underground, shields, the visible list)."""
+    recorded turn start (Burrowers underground, shields, the visible list),
+    and `save`, the checkpoint the game loaded: the mission's Teleporter
+    pads come from it, not from the profile's saves (fuzz 2026-10-17: right
+    after the restore the profile's saveData.lua gave none) or the bridge
+    log (whose latest capture was another mission's)."""
     run.mission_index(state)
+    if save is not None:
+        run.save_mission_save(state, save)
     if carry.underground:
         run.save_engine_underground(state, carry.underground)
     if carry.shields:
@@ -1124,7 +1130,7 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None, esc
                 raise LeftMission(f"restore failed: {e}") from e
             ctx.native_checked = False  # EXEC_MODE native again after each load
             rec_state, rec_data = read_state(ts.path)
-            seed_run(run, state, recorded_carry(rec_state, rec_data))
+            seed_run(run, state, recorded_carry(rec_state, rec_data), ts.save)
             sess.samples += 1
             for t in range(args.turns):
                 try:

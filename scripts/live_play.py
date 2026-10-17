@@ -757,6 +757,19 @@ class Run:
                                    "grid": state.get("grid_power"), "buildings": grid_buildings(state)}
         self.save_meta()
 
+    def mission_save(self, state: dict) -> Path | None:
+        """The save file this state's mission was loaded from, when a driver
+        restored it (save_mission_save); None otherwise (the profile's own
+        saves are read)."""
+        rec = self.meta.get("mission_save") or {}
+        if rec.get("mission") != self.mission_index(state) or not rec.get("path"):
+            return None
+        return Path(rec["path"])
+
+    def save_mission_save(self, state: dict, path: Path) -> None:
+        self.meta["mission_save"] = {"mission": self.mission_index(state), "path": str(path)}
+        self.save_meta()
+
     def engine_underground(self, state: dict) -> dict:
         """The Burrowers underground by the engine's predictions (see
         track_underground), kept across commands and turns of this state's
@@ -1102,6 +1115,8 @@ def load_loadout(path: str | None) -> dict:
 
 
 TELEPORT_PAIR_RE = re.compile(r"TELEPORT PAD pair captured: \((\d+),(\d+)\) <-> \((\d+),(\d+)\)")
+# The bridge's first log line in each game process (src/bridge/modloader.lua).
+BRIDGE_START_MARK = "=== ITB Bot Bridge started"
 
 
 def logged_teleporter_pairs(log_path: Path = Path("/tmp/itb_bridge.log")) -> list:
@@ -1109,13 +1124,19 @@ def logged_teleporter_pairs(log_path: Path = Path("/tmp/itb_bridge.log")) -> lis
     StartMission, from its log. The bridge clears its own copy whenever a
     BaseUpdate runs for another mission object (live 2026-10-10: the region's
     Mission_Civilians wiped the pairs one second after the capture), so its
-    state can lack "teleporter_pairs" for the whole mission."""
+    state can lack "teleporter_pairs" for the whole mission. Only a capture
+    since the bridge last started (BRIDGE_START_MARK) counts: one from an
+    earlier game process can be any mission's, and a game restored mid
+    mission never runs StartMission (fuzz 2026-10-17: a restored
+    Mission_Teleporter got the pads of the mission played the evening
+    before, and a mech the game sent through a pad was predicted to stay)."""
     try:
         lines = log_path.read_text(errors="replace").splitlines()
     except OSError:
         return []
     end = max((i for i, ln in enumerate(lines) if "TELEPORT PAD: StartMission complete" in ln), default=None)
-    if end is None:
+    started = max((i for i, ln in enumerate(lines) if BRIDGE_START_MARK in ln), default=-1)
+    if end is None or end < started:
         return []
     pairs = []
     for ln in reversed(lines[:end]):
@@ -1148,6 +1169,20 @@ def save_teleporter_pairs(path: Path | None = None) -> list:
     if len(pts) < 2 or len(pts) % 2:
         return []
     return [[*pts[i], *pts[i + 1]] for i in range(0, len(pts), 2)]
+
+
+def mission_teleporter_pairs(save=None) -> list:
+    """The pads of the mission being played, from a save: `save` (a path:
+    the save the game loaded the mission from, which a restoring driver
+    knows; the pads never change during a mission), False for none, None
+    for the profile's saveData.lua, then its undoSave.lua (fuzz
+    2026-10-17: right after a restore the profile's saveData.lua gave no
+    pads while the game had them)."""
+    if save is False:
+        return []
+    if save is not None:
+        return save_teleporter_pairs(Path(save))
+    return save_teleporter_pairs(PROFILE / "saveData.lua") or save_teleporter_pairs(PROFILE / "undoSave.lua")
 
 
 def pads_fit(state: dict, pair: list) -> bool:
@@ -1303,9 +1338,11 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
     without the bridge's estimate, from `grid_start`, the turn start's
     buildings the driver recorded: the bridge takes its snapshot when the
     turn begins, which a restored game never does, see grid_since_turn_start),
-    plus Mission_Teleporter's pads when the bridge has none (the save's,
-    `teleporter_save` its path, False not to read it; else the bridge log's
-    latest capture; pads on a tile no pad can be are dropped),
+    plus Mission_Teleporter's pads when the bridge has none (the save's, see
+    mission_teleporter_pairs: `teleporter_save` the save the mission was
+    loaded from, False not to read one, None the profile's; else the bridge
+    log's latest capture in this game process; pads on a tile no pad can be
+    are dropped; no pads at all is a note),
     plus the Burrowers underground (`underground`, see track_underground)
     that the bridge omits, as units with "underground": true at the tile they
     dove from, plus the pilot bonus of a unit that acted this turn and is
@@ -1332,13 +1369,15 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
         # The save's pads first: the log's latest capture can be another
         # mission's (fuzz 2026-10-16: a restored game, whose StartMission
         # never ran, got an older mission's pads, one on a building).
-        pairs = [p for p in (save_teleporter_pairs(teleporter_save) if teleporter_save is not False else [])
-                 if pads_fit(out, p)]
+        pairs = [p for p in mission_teleporter_pairs(teleporter_save) if pads_fit(out, p)]
         if not pairs:
             pairs = [p for p in logged_teleporter_pairs() if pads_fit(out, p)]
         if pairs:
             out["teleporter_pairs"] = pairs
             patches["teleporter_pairs"] = pairs
+        elif notes is not None:
+            notes.append("Mission_Teleporter: no pads in the bridge state, the save or this game's bridge log "
+                         "(the engine plays without them)")
     est, grid = out.get("grid_power_estimate"), out.get("grid_power")
     if not isinstance(est, int):
         est = grid_since_turn_start(out, grid_start)
@@ -2041,7 +2080,7 @@ def play_turn(ctx) -> list:
     def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
         solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react,
-                                            shields, grid_start)
+                                            shields, grid_start, teleporter_save=run.mission_save(st))
         # --grid-survival needs the game's Grid Defense chance: an older
         # bridge does not export it, the save has its overpower bonus.
         if getattr(args, "grid_survival", False) and "grid_overflow" not in solver_input \
@@ -2257,7 +2296,7 @@ def end_turn(ctx) -> list:
     react = run.reactivation_list(state)
     solver_input, patches = patch_state(state, ctx.loadout, set(), run.engine_queued(state), queued_notes,
                                         under, reactivation=react, shields=run.engine_shields(state),
-                                        grid_start=run.grid_start(state))
+                                        grid_start=run.grid_start(state), teleporter_save=run.mission_save(state))
     for n in queued_notes:
         say(f"  note: {n}")
     path = run.save_state(solver_input, "end_turn", {"patches": patches} if patches else None)

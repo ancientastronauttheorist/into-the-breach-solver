@@ -994,3 +994,37 @@ TEST_CASE("live: predict lists the enemy phase's hidden choices and their other 
   CHECK(few["enemy_branches"].size() == 3);
   CHECK(few["enemy_branches_complete"] == false);
 }
+
+TEST_CASE("live: a Sidestep move onto a teleporter pad ends on the partner pad (fuzz 20261017_053501 s007)") {
+  NEED_SESSION();
+  // Mission_Teleporter turn 3 (run 20261016_130634 m36 t03, pads E6 (2,3)
+  // <-> C3 (5,5) and B5 (3,6) <-> G3 (5,1), as the save holds them).
+  // SupermanMech#2 (Pilot_Leader, Sidestep) fires its Control Shot, then
+  // takes its free 1-tile move D6 -> E6 onto a pad: the game put it on C3.
+  // The fuzzer had given the engine another mission's pads (a stale bridge
+  // log capture), so it predicted E6; with the mission's own pads it agrees.
+  const std::string start = std::string(ITB_FIXTURE_DIR) + "/live_teleporter_t3_solve_input.json";
+  const json plan = json::array({{{"uid", 1}, {"kind", "weapon"}, {"weapon", "Ranged_Ignite"}, {"target", {6, 2}}},
+                                 {{"uid", 2}, {"kind", "weapon"}, {"weapon", "Science_TC_Control_A"},
+                                  {"target", {2, 5}}, {"target2", {0, 4}}},
+                                 {{"uid", 2}, {"move", {2, 3}}}});
+  const json r = S.handle({{"cmd", "predict"}, {"state", start}, {"plan", plan}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  REQUIRE(r["refused"] == -1);
+  REQUIRE(r["steps"].size() == 3);
+  CHECK(r["steps"][2]["end"] == json::array({5, 5}));
+  const json& want = r["steps"][2]["board"];
+  // The game's board after the move: same units, places and HP.
+  const json live =
+      S.handle({{"cmd", "board"}, {"state", std::string(ITB_FIXTURE_DIR) + "/live_teleporter_t3_step3.json"}});
+  REQUIRE_MESSAGE(live["ok"].get<bool>(), live.dump());
+  CHECK(uids(want) == uids(live["board"]));
+  for (const json& u : live["board"]["units"]) {
+    const json* p = board_unit(want, u["uid"].get<int>());
+    REQUIRE(p);
+    INFO(u.dump());
+    CHECK((*p)["x"] == u["x"]);
+    CHECK((*p)["y"] == u["y"]);
+    CHECK((*p)["hp"] == u["hp"]);
+  }
+}
