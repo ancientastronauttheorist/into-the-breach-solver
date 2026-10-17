@@ -1,0 +1,379 @@
+{
+ "mission_id": "Mission_Shields",
+ "phase": "combat_player",
+ "turn": 2,
+ "units": [
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 4,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": false,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 6,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 6,
+   "mech": true,
+   "minor": false,
+   "move": 4,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Miner",
+    "level": 2,
+    "skill1": 5,
+    "skill2": 0,
+    "xp": 50
+   },
+   "pilot_id": "Pilot_Miner",
+   "pilot_level": 2,
+   "pilot_skills": [
+    "skill1=5"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 1,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": false,
+    "health": 4,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 4,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "BottlecapMech",
+   "uid": 0,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Prime_TC_Punt",
+     "damaged": false,
+     "id": "Prime_TC_Punt",
+     "limited": 0,
+     "mod1": [
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    },
+    {
+     "base": "Prime_KO_Crack",
+     "damaged": false,
+     "id": "Prime_KO_Crack",
+     "limited": 1,
+     "mod1": [
+      0,
+      0
+     ],
+     "mod2": [
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 1,
+     "uses": 0,
+     "uses_basis": "calibrated",
+     "uses_saved": 0
+    }
+   ],
+   "weapons": [
+    "Prime_TC_Punt"
+   ],
+   "weapons_exact": [
+    "Prime_TC_Punt",
+    "Prime_KO_Crack"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 4,
+   "y": 3
+  },
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 5,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": true,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 4,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 4,
+   "mech": true,
+   "minor": false,
+   "move": 5,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Detritus",
+    "level": 1,
+    "skill1": 3,
+    "skill2": 10,
+    "xp": 47
+   },
+   "pilot_id": "Pilot_Detritus",
+   "pilot_level": 1,
+   "pilot_skills": [
+    "skill1=3",
+    "skill2=10"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 1,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": true,
+    "health": 2,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 4,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "JetMech",
+   "uid": 1,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Brute_Jetmech",
+     "damaged": false,
+     "id": "Brute_Jetmech",
+     "limited": 0,
+     "mod1": [
+      0,
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    },
+    {
+     "base": "Support_Missiles",
+     "damaged": false,
+     "id": "Support_Missiles",
+     "limited": 1,
+     "mod1": [
+      0,
+      0
+     ],
+     "mod2": [
+      0
+     ],
+     "passive": false,
+     "power": [
+      1
+     ],
+     "power_cost": 1,
+     "powered": true,
+     "slot": 1,
+     "uses": 0,
+     "uses_basis": "calibrated",
+     "uses_saved": 0
+    }
+   ],
+   "weapons": [
+    "Brute_Jetmech"
+   ],
+   "weapons_exact": [
+    "Brute_Jetmech",
+    "Support_Missiles"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 4,
+   "y": 4
+  },
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 4,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": true,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 4,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 4,
+   "mech": true,
+   "minor": false,
+   "move": 4,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Archive",
+    "level": 1,
+    "skill1": 10,
+    "skill2": 6,
+    "xp": 41
+   },
+   "pilot_id": "Pilot_Archive",
+   "pilot_level": 1,
+   "pilot_skills": [
+    "skill1=10",
+    "skill2=6"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 2,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": true,
+    "health": 2,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 4,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "SupermanMech",
+   "uid": 2,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Science_TC_Control",
+     "damaged": false,
+     "id": "Science_TC_Control",
+     "limited": 0,
+     "mod1": [
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    },
+    {
+     "base": "Science_Placer",
+     "damaged": false,
+     "id": "Science_Placer",
+     "limited": 0,
+     "mod1": [
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 1,
+     "uses_saved": 1
+    }
+   ],
+   "weapons": [
+    "Science_TC_Control"
+   ],
+   "weapons_exact": [
+    "Science_TC_Control",
+    "Science_Placer"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 3,
+   "y": 6
+  }
+ ]
+}

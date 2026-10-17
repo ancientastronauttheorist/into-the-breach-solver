@@ -21,6 +21,7 @@ import unittest
 from pathlib import Path
 
 from tests import test_live_play as tlp  # sets ITB_BRIDGE_DIR to a temp dir first
+from tests import test_loadout as tl  # the save fragment and fake game scripts
 
 import fuzz_play as fz  # noqa: E402  (scripts/ is on sys.path via test_live_play)
 
@@ -621,7 +622,7 @@ class FuzzTest(unittest.TestCase):
             return True
 
         orig = fz.restore_by_relaunch
-        fz.restore_by_relaunch = lambda ctx, s, ts: ctx.bridge.settled_state()
+        fz.restore_by_relaunch = lambda ctx, s, ts, ls=None: ctx.bridge.settled_state()
         try:
             rc = fz.live(args, eng, sess, starts, click=click)
         finally:
@@ -776,6 +777,153 @@ class FuzzTest(unittest.TestCase):
         rc, sess, findings = self.live_session(eng, next_turn=next_turn)
         self.assertEqual([f["kind"] for f in findings], ["enemy_phase"])
         self.assertTrue(any("PunchMech#0 hp" in d for d in findings[0]["diffs"]))
+
+    # ------------------------------------------------------------ loadout injection
+
+    SPEC = "0:Prime_Lasermech_A,Passive_FlameImmune;pilot=Pilot_Rock"
+
+    def loadout_setup(self) -> Path:
+        """A recorded start whose checkpoint is the recorded save fragment
+        of tests/fixtures; fake game scripts (test_loadout). Returns the
+        --game root."""
+        root = tl.write_tree(self.tmp / "game" / "scripts", tl.SCRIPTS).parent
+        self.record()
+        d = lp.LIVE_ROOT / "20261016_000000"
+        text = tl.SAVE.read_text()
+        (d / "m00_turn_01_saveData.lua").write_text(text)
+        (d / "m00_turn_01_undoSave.lua").write_text(text)
+        return root
+
+    def dry(self, game: Path, extra: list, eng=None) -> tuple:
+        eng = eng or FuzzEngine(CANDIDATES)
+        out = self.tmp / "fuzz"
+        rc = fz.main(["--dry-run", "--recordings", str(lp.LIVE_ROOT), "--seed", "1", "--out", str(out),
+                      "--game", str(game), *extra], engine=eng)
+        sess = next(out.iterdir())
+        samples = [json.loads(line) for line in (sess / "samples.jsonl").read_text().splitlines()]
+        return rc, sess, samples, json.loads((sess / "session.json").read_text()), eng
+
+    def test_dry_run_injects_a_loadout_and_the_engine_sees_it(self):
+        game = self.loadout_setup()
+        rc, sess, samples, meta, eng = self.dry(game, ["--samples", "2", "--loadout", self.SPEC])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(samples), 2)
+        self.assertEqual(samples[0]["loadout"]["spec"], self.SPEC)
+        self.assertEqual({k: v["status"] for k, v in samples[0]["acceptance"].items()},
+                         {"weapon:Prime_Lasermech_A": "supported", "passive:Passive_FlameImmune": "supported",
+                          "pilot:Pilot_Rock": "supported"})
+        # The engine generated and predicted from the start with the loadout.
+        u = tlp.unit(eng.predict_states[-1], 0)
+        self.assertEqual((u["weapons_exact"], u["pilot_id"]), (["Prime_Lasermech_A", "Passive_FlameImmune"], "Pilot_Rock"))
+        s0 = sess / "s000"
+        self.assertIn('["primary"] = "Prime_Lasermech"', (s0 / "loadout_saveData.lua").read_text())
+        self.assertEqual((s0 / "loadout_undoSave.lua").read_text(), (s0 / "loadout_saveData.lua").read_text())
+        self.assertEqual(json.loads((s0 / "loadout.json").read_text())["mechs"][0]["pilot"], "Pilot_Rock")
+        self.assertEqual(meta["loadout_items"]["pilot:Pilot_Rock"]["samples"], [0, 1])
+        self.assertEqual(meta["outcomes"], {"consistent": 2})
+        self.assertFalse(lv.CMD.exists())
+
+    def test_an_item_the_engine_does_not_model_is_not_played(self):
+        game = self.loadout_setup()
+        rc, sess, samples, meta, eng = self.dry(game, ["--samples", "1", "--loadout", "2:*,Passive_Strange"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(meta["outcomes"], {"unsupported": 1})
+        self.assertEqual(eng.predicts, [])
+        self.assertEqual(samples[0]["outcome"], "unsupported")
+        self.assertEqual(meta["loadout_items"]["passive:Passive_Strange"]["status"], "unsupported")
+
+    def test_an_illegal_loadout_is_a_finding_and_a_bad_spec_is_refused(self):
+        game = self.loadout_setup()
+        rc, sess, samples, meta, eng = self.dry(game, ["--samples", "1", "--loadout", "0:Brute_Jetmech"])
+        self.assertEqual(meta["outcomes"], {"loadout_illegal": 1})
+        finding = json.loads((sess / "findings.jsonl").read_text().splitlines()[0])
+        self.assertIn("twice in the squad", finding["problem"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fz.main(["--dry-run", "--recordings", str(lp.LIVE_ROOT), "--loadout", "0:A,B,C"]), 2)
+            self.assertEqual(fz.main(["--dry-run", "--recordings", str(lp.LIVE_ROOT), "--loadout", "0:A",
+                                      "--coverage"]), 2)
+
+    def test_coverage_hands_out_unseen_items_once(self):
+        game = self.loadout_setup()
+        rc, sess, samples, meta, eng = self.dry(game, ["--samples", "3", "--coverage"])
+        self.assertEqual(rc, 0)
+        given = [it for s in samples if s.get("loadout") for m in s["loadout"]["mechs"] for it in m["weapons"]]
+        self.assertTrue(given)
+        status = meta["loadout_items"]
+        # Known unsupported up front: never injected.
+        self.assertEqual(status["passive:Passive_Strange"]["status"], "unsupported")
+        self.assertEqual(status["pilot:Pilot_Odd"]["samples"], [])
+        self.assertNotIn("Passive_Strange", given)
+        # Seen in the recordings (the start carries it): not handed out.
+        self.assertNotIn("Prime_Lasermech_A", given)
+        self.assertNotIn("Passive_Leech", given)  # in the squad's storage
+        for s in samples:
+            for m in (s.get("loadout") or {}).get("mechs", []):
+                self.assertNotIn(m["pilot"], ("Pilot_BeetleMech",))
+        # An item supported once is used up: not handed out again.
+        supported = [k.split(":", 1)[1] for k, v in status.items() if v["status"] == "supported"]
+        for wid in supported:
+            if not wid.startswith("Pilot_"):
+                self.assertEqual(given.count(wid), 1, wid)
+        self.assertIn("coverage_left", meta)
+
+    def loadout_game(self, loaded_matches: bool) -> tuple:
+        """The game for a live sample with SPEC: the profile holds the
+        player's run; the rewritten checkpoint resumes at the recorded start
+        with the loadout (as the bridge reads it from that save), or, with
+        loaded_matches False, at the recorded start without it."""
+        game_root = self.loadout_setup()
+        lp.PROFILE.mkdir(parents=True)
+        (lp.PROFILE / "saveData.lua").write_text("-- the player's own run")
+        (lp.PROFILE / "undoSave.lua").write_text("-- the player's own undo")
+        items = tl.lo.Items(game_root / "scripts")
+        text = tl.SAVE.read_text()
+        inj = tl.lo.inject(items, {"saveData.lua": text, "undoSave.lua": text}, tl.lo.parse_spec(self.SPEC))
+        start = dict(tlp.base_state(), turn=1)
+        own = dict(tlp.base_state(), mission_id="Mission_Own", turn=3)
+        boards = {inj.texts["saveData.lua"]: tl.lo.patch_state(start, inj, items) if loaded_matches else start,
+                  "-- the player's own run": own}
+        game = tlp.FakeGame(boards, "-- the player's own run")
+        self.game = game
+        self.undo = game.install()
+        args = args_for(["--samples", "1", "--recordings", str(lp.LIVE_ROOT), "--game", str(game_root),
+                         "--loadout", self.SPEC])
+        sess = fz.Session(args, self.tmp / "fuzz")
+        sess.loadouts = fz.Loadouts(args, random.Random(1))
+        return game, args, sess, inj
+
+    def test_a_live_sample_restores_the_rewritten_checkpoint_and_checks_the_loadout(self):
+        game, args, sess, inj = self.loadout_game(loaded_matches=True)
+        starts = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+        loaded = []
+        launch = game.launch
+
+        def spy():
+            loaded.append((lp.PROFILE / "saveData.lua").read_text())
+            launch()
+        lp.launch_game = spy
+        rc = fz.live(args, FuzzEngine(CANDIDATES), sess, starts, click=game.click, escape=game.escape)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sess.outcomes["matched"], 1)
+        self.assertEqual(loaded[0], inj.texts["saveData.lua"])  # the sample's load
+        self.assertIn("END_TURN", game.fb.commands)
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
+        samples = [json.loads(line) for line in (sess.dir / "samples.jsonl").read_text().splitlines()]
+        self.assertEqual((samples[0]["outcome"], samples[0]["loadout"]["spec"]), ("matched", self.SPEC))
+        self.assertEqual(game.misclicks(), [])
+
+    def test_a_loadout_the_game_does_not_show_is_rejected(self):
+        game, args, sess, inj = self.loadout_game(loaded_matches=False)
+        starts = fz.find_turn_starts(lp.LIVE_ROOT, need_save=True)
+        rc = fz.live(args, FuzzEngine(CANDIDATES), sess, starts, click=game.click, escape=game.escape)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sess.outcomes["loadout_rejected"], 1)
+        self.assertNotIn("END_TURN", game.fb.commands)
+        finding = json.loads((sess.dir / "findings.jsonl").read_text().splitlines()[0])
+        self.assertEqual(finding["kind"], "loadout_rejected")
+        self.assertIn("weapons_exact", finding["problem"])
+        self.assertEqual(finding["loadout"]["spec"], self.SPEC)
+        self.assertEqual((lp.PROFILE / "saveData.lua").read_text(), "-- the player's own run")
 
 
 if __name__ == "__main__":

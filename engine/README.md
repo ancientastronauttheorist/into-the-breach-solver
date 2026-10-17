@@ -388,6 +388,9 @@ python3 scripts/fuzz_play.py --dry-run --run 20261016_130634 --mission 2 --turn 
 python3 scripts/fuzz_play.py --samples 20 --minutes 60               # live: quits and relaunches the game per sample
 python3 scripts/fuzz_play.py --put-back recordings/fuzz/<session> [--dry-run]  # the profile's own saves back
 python3 scripts/coverage_report.py [--unseen]                        # what the recordings never exercised
+python3 scripts/fuzz_play.py --dry-run --coverage --samples 60       # inject what they never exercised
+python3 scripts/fuzz_play.py --loadout '0:Prime_Lasermech_A,Passive_FlameImmune;pilot=Pilot_Rock' --samples 5
+python3 scripts/loadout.py --check                                   # the save model vs every recorded checkpoint
 ```
 
 - **Turn starts** are the recorded `m<MM>_turn_<TT>_solve_input.json` of
@@ -497,11 +500,60 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
   prefix gave, no refusal), writing `samples.jsonl` and the summary: the
   action mix, weapons, target kinds, effects, and the engine's own notes
   (chance nodes, inexact enemy phases, Lua errors, timing flags).
+- **Loadouts** (`--loadout SPEC`, repeatable, one per sample in turn;
+  `--coverage`). Before a start is played its checkpoint is rewritten
+  (`scripts/loadout.py`) so the mechs carry other weapons, upgrades,
+  passives and pilots. SPEC: `<mech>:<primary>[,<secondary>][;pilot=<id>]`
+  groups, `;`-separated; mech = squad index (the bridge uid); exact ids
+  (`_A`/`_B`/`_AB`); `*` keeps a slot, one weapon drops the secondary,
+  `<mech>:pilot=<id>` changes only the pilot. In a mission the mechs are
+  the battle region's `map_data` pawns (SquadData has `skip_pawns`):
+  `primary`/`secondary` (base id), `_power` (PowerCost, +1 off class:
+  `Skill::IsClassPenalty`, a TechnoVek mech pays for every other weapon,
+  any other mech for another class but "", Unique, Death, Enemy),
+  `_power_class`, `_mod1`/`_mod2` (`GetUpgradeCost` cells; an upgrade is on
+  with its first cell), `_uses` (a new limited weapon: Limited, +1
+  Conservative, +1 Ammo), `pilot` (id, name, skills, `power`), `reactor`
+  (free/used normal, bonus and undo cores; cells 1/2/3), `health` /
+  `max_health` (must be `Pawn::ComputeHealthTotal`, else the game resets
+  it and heals to full: Zoltan 1, else type Health + Health/Skilled 2 each
+  + 2 healthPower + 3 Rock + Networked Armor 1/2 squad-wide + 1 health
+  psion; damage taken is kept), `bForceField` (Zoltan's turn-start shield),
+  `iMutation` (Psionic Receiver: the board's psion). GameData.current
+  repeats weapons and pilots. Both saveData.lua and undoSave.lua are
+  rewritten; `loadout.py --check` recomputes all of it on every recorded
+  checkpoint (8175 mechs in 2725: all match). Legal loadouts only: what a
+  run can hold (drops.lua shop/pod lists, the squads' starting weapons,
+  upgrades the weapon has, CreatePilot pilots), no weapon base twice in the
+  squad or its storage, no named pilot twice, Vek pilots stay in their
+  TechnoVek mech, the old pilot's XP and skills (blacklisted ones become
+  Move / Popular / Invulnerable), missing cores bought. The engine is asked
+  first, on the recorded start with the loadout (`loadout_solve_input.json`):
+  a new weapon needs targets in `itb_live actions` without Lua errors or
+  unapplied Lua writes (none from that start: `inconclusive`, tried
+  elsewhere); passives and pilots by name (`passive_of`, the engine's own
+  strings, the game's `IsPassiveSkill` tests; Networked Armor and Ammo via
+  the bridge's HP and uses); `no_effect`: not modelled, but outside a
+  fuzzed turn (Pilot_Medic's extra Reset Turn, ...); `unsupported`: not
+  played. Live, after the load the bridge must show the loadout
+  (`weapons_exact`, `weapon_slots` power, pilot, HP, a powered pilot's
+  `skill_active`, Zoltan's shield), else `loadout_rejected` (a finding; the
+  next sample restores anew). The bridge reads weapons and pilots from the
+  save, so the game's own word is HP (a wrong max_health is reset), the
+  live IsAbility and shields, and every step. Each sample keeps
+  `s<NNN>/loadout.json` and the rewritten saves; samples, findings and
+  `session.json` (`loadout_items`: each item's status; `coverage_left`)
+  carry the loadout. `--coverage` gives each living mech an unseen weapon
+  of its class first (else off class), a passive as secondary while one is
+  left, and an unseen pilot; an item goes once (unplayed or inconclusive
+  ones come back, 3 times at most).
 - `scripts/coverage_report.py` lists the player weapons (upgrades apart),
   passives, pilots, level-up skills, missions and enemy types the recorded
   turn starts hold (and the weapons the executed plans fired) against the
   game's scripts (`ITB_GAME_DIR`; enemies via `itb_inspect --pawns`):
-  names only.
+  names only. Live runs and live fuzz sessions (`--fuzz`, default
+  `recordings/fuzz`; dry runs left out) are separate columns; weapon totals
+  count what a run can hold, the rest listed apart.
 
 ## Python bindings
 

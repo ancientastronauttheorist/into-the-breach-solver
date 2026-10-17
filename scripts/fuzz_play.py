@@ -70,6 +70,13 @@ recorded turn starts, predicts them, and checks the engine against itself
 (every enumerated sub-action must replay through `predict` to the same
 board; refusals, Lua errors, unmodelled Lua writes and frame-timing flags
 are counted), writing samples.jsonl and the same summary.
+
+--loadout SPEC / --coverage rewrite each start's checkpoint first so the
+mechs carry other weapons, upgrades, passives and pilots
+(scripts/loadout.py; --coverage: what the recordings never exercised). The
+engine is asked on the recorded start with that loadout; an item it does
+not model is an "unsupported" outcome, not played. Live, the bridge must
+show the loadout after the load, else "loadout_rejected".
 """
 
 from __future__ import annotations
@@ -91,8 +98,15 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import live_play as lp  # noqa: E402
 import live_validate as lv  # noqa: E402
+import loadout as lo  # noqa: E402
 
 FUZZ_ROOT = REPO / "recordings" / "fuzz"
+# --coverage: a picked item that goes unplayed this often (its sample
+# skipped for another reason) is given up.
+COVERAGE_TRIES = 3
+# Live: loadouts tried in a row without one restored (illegal, unsupported,
+# grid-unsafe for the start drawn) before the session stops.
+LOADOUT_ATTEMPTS = 40
 
 # Other drivers of the game (command lines; a --dry-run one is harmless).
 OTHER_DRIVERS = (r"live_play\.py\s+(mission|turn|deploy|end-turn|restore)\b", r"drive2\.sh", r"drive_final\.sh",
@@ -495,6 +509,8 @@ class Session:
         self.steps = 0
         self.pool: StartPool | None = None
         self.t0 = time.time()
+        self.loadouts: Loadouts | None = None
+        self.loadout: dict | None = None  # the current sample's injected loadout (findings carry it)
 
     def write_meta(self, extra: dict | None = None) -> None:
         meta = {"tool": "scripts/fuzz_play.py", "argv": sys.argv[1:], "created": lp.now_iso(),
@@ -507,6 +523,8 @@ class Session:
         rec = {"t": lp.now_iso(), "kind": kind, "sample": sample,
                "source": {"run": ts.run, "mission": ts.mission, "turn": ts.turn, "solve_input": str(ts.path),
                           "saveData": str(ts.save) if ts.save else None}}
+        if self.loadout:
+            rec["loadout"] = self.loadout
         rec.update(detail)
         with open(self.dir / "findings.jsonl", "a") as f:
             f.write(json.dumps(rec) + "\n")
@@ -549,6 +567,8 @@ class Session:
         if self.rejected:
             lines.append("  enumerated but refused by the engine: "
                          + ", ".join(f"{k} {v}" for k, v in sorted(self.rejected.items())))
+        if self.loadouts is not None:
+            lines += self.loadouts.summary_lines()
         return "\n".join(lines)
 
 
@@ -612,15 +632,17 @@ def start_pool(args, starts: list, rng: random.Random) -> StartPool:
     return StartPool(starts, rng)
 
 
-def offline_reason(engine, ts: TurnStart, args, rng: random.Random, grid: bool = True) -> tuple | None:
+def offline_reason(engine, ts: TurnStart, args, rng: random.Random, grid: bool = True,
+                   path: Path | None = None) -> tuple | None:
     """Why a recorded turn start cannot be fuzzed, from the recording alone
     (before any restore), as (key, text), or None: its states unreadable,
     unplayable(), and with grid, no sequence of --tries keeping --min-grid
-    and a mech through the enemy phase from the recorded solve input
-    (safe_sequence with a scratch chooser: the session's novelty counts are
-    left alone) or the engine refusing it."""
+    and a mech through the enemy phase from the recorded solve input (or
+    `path`, the start with an injected loadout; safe_sequence with a
+    scratch chooser: the session's novelty counts are left alone) or the
+    engine refusing it."""
     try:
-        state, _ = read_state(ts.path)
+        state, _ = read_state(path or ts.path)
         read_state(ts.raw_path())
     except (OSError, ValueError) as e:
         return "unreadable", f"unreadable recording: {e}"
@@ -629,8 +651,8 @@ def offline_reason(engine, ts: TurnStart, args, rng: random.Random, grid: bool =
         return why
     scratch = random.Random(rng.random())
     try:
-        seq, _, _ = safe_sequence(engine, ts.path, Chooser(scratch, args.uniform), scratch, {}, unit_skills(state),
-                                  args)
+        seq, _, _ = safe_sequence(engine, path or ts.path, Chooser(scratch, args.uniform), scratch, {},
+                                  unit_skills(state), args)
     except lp.Anomaly as e:
         return "engine_error", f"the engine on the recorded start: {e}"
     if seq is None:
@@ -647,6 +669,333 @@ def skip(sess, pool: StartPool, ts: TurnStart, why: tuple, when: str = "skipped"
 
 def budget_left(sess: Session, args) -> bool:
     return not (args.minutes and time.time() - sess.t0 > args.minutes * 60)
+
+
+# ------------------------------------------------------------------ loadout injection (--loadout, --coverage)
+#
+# Before a turn start is played, its checkpoint is rewritten so the mechs
+# carry other weapons, upgrades, passives and pilots (scripts/loadout.py:
+# the save fields, legality, reactor power and HP). The engine is asked
+# first, on the recorded start with the same loadout (patch_state): an item
+# it does not model is an "unsupported" outcome and the sample is not
+# played. Live, the rewritten saves are restored as any checkpoint, and the
+# bridge's view after the load must match the injection (verify_state:
+# weapons_exact, weapon_slots, the pilot, HP), else "loadout_rejected".
+
+@dataclass
+class LoadoutSample:
+    inj: lo.Injection
+    start: Path  # the recorded solve input with the loadout
+    raw: dict  # the recorded raw turn start with the loadout (the board after the load)
+    files: dict  # {"saveData.lua": path, "undoSave.lua": path or None}
+    acceptance: dict  # "<kind>:<id>" -> {"status": supported | unsupported | inconclusive, "why": ...}
+
+    @property
+    def unsupported(self) -> dict:
+        return {k: v["why"] for k, v in self.acceptance.items() if v["status"] == "unsupported"}
+
+    def record(self) -> dict:
+        return dict(self.inj.summary(), acceptance=self.acceptance)
+
+
+def item_key(kind: str, iid: str) -> str:
+    return f"{kind}:{iid}"
+
+
+class CoveragePicker:
+    """--coverage: hands out the items the recordings never exercised
+    (scripts/coverage_report.py over recordings/live and live fuzz
+    sessions; only items a run can hold), a weapon of the mech's own class
+    first, every living mech a new primary and secondary (a passive when
+    one is left) and pilot. An item is used up once a sample played it
+    (or the engine reported it unsupported); one whose sample was skipped
+    for another reason goes back, at most COVERAGE_TRIES times."""
+
+    def __init__(self, items: lo.Items, support: lo.Support, seen: dict, rng: random.Random):
+        self.items = items
+        weapons = set(seen.get("weapons") or ())
+        pilots = set(seen.get("pilots") or ())
+        actives, passives = [], []
+        for wid in items.all_weapon_ids():
+            if wid in weapons:
+                continue
+            (passives if items.weapon(wid).passive else actives).append(wid)
+        self.actives, self.passives = actives, passives
+        self.pilots = [p for p in sorted(items.pilots) if p not in pilots]
+        for q in (self.actives, self.passives, self.pilots):
+            rng.shuffle(q)
+        self.static: dict = {}  # known unsupported before any sample (passives, pilots)
+        for wid in list(self.passives):
+            status, why = support.passive(wid)
+            if status == "unsupported":
+                self.static[item_key("passive", wid)] = why
+                self.passives.remove(wid)
+        for pid in list(self.pilots):
+            status, why = support.pilot(pid)
+            if status == "unsupported":
+                self.static[item_key("pilot", pid)] = why
+                self.pilots.remove(pid)
+            elif items.pilot(pid).skill == lo.VEK_PILOT_SKILL:
+                self.pilots.remove(pid)  # only in its own TechnoVek mech: seen with it or never
+        self.tries: Counter = Counter()
+        self.unplaced: list = []
+        self.total = len(self.actives) + len(self.passives) + len(self.pilots) + len(self.static)
+
+    def left(self) -> int:
+        return len(self.actives) + len(self.passives) + len(self.pilots)
+
+    def pick(self, doc: dict) -> list:
+        """MechSpecs for the checkpoint's squad (its living mechs). A weapon
+        base may not be twice in the squad: what storage, dead mechs and
+        the other mechs hold now is not picked (a mech may get an upgrade
+        of its own weapon)."""
+        squad = lo.squad(doc)
+        st_weapons, st_pilots = lo.storage_items(doc)
+        current = {m.index: {s.base for s in m.slots if s} for m in squad}
+        taken = set(st_weapons)
+        pilots = set(st_pilots)
+        for m in squad:
+            if m.health <= 0:  # a dead mech keeps its weapons and pilot
+                taken |= current[m.index]
+                if m.pilot and m.pilot.get("id"):
+                    pilots.add(m.pilot["id"])
+        specs = []
+        for m in (m for m in squad if m.health > 0):
+            others = set().union(*(b for k, b in current.items() if k != m.index))
+            cls = self.items.mech_class(m.type)
+            chosen = []
+            for queue in (self.actives, self.passives if self.passives else self.actives):
+                wid = self._take(queue, taken | others, cls, m.type)
+                if wid:
+                    chosen.append(wid)
+                    taken.add(self.items.weapon(wid).base)
+            vek = lo.pilot_skill(self.items, m.pilot) == lo.VEK_PILOT_SKILL
+            pid = None if vek else next((p for p in self.pilots if p not in pilots or p in lo.GENERIC_PILOTS), None)
+            if pid:
+                self.pilots.remove(pid)
+                pilots.add(pid)
+            if not chosen and not pid:
+                taken |= current[m.index]
+                continue
+            weapons = chosen or None
+            if len(chosen) == 1:
+                kept = m.slots[1]
+                if kept and kept.base in taken:
+                    weapons = chosen  # its secondary's base was picked: one weapon
+                else:
+                    weapons = chosen + ["*"]
+                    if kept:
+                        taken.add(kept.base)
+            elif not chosen:
+                taken |= current[m.index]
+            specs.append(lo.MechSpec(m.index, weapons, pid))
+        return specs
+
+    def _take(self, queue: list, bases: set, cls: str, mech_type: str) -> str | None:
+        best = None
+        for wid in queue:
+            w = self.items.weapon(wid)
+            if w.base in bases:
+                continue
+            if not self.items.class_penalty(mech_type, w):
+                best = wid
+                break
+            if best is None:
+                best = wid
+        if best:
+            queue.remove(best)
+        return best
+
+    def give_back(self, inj_items: list) -> None:
+        for kind, iid in inj_items:
+            self.tries[iid] += 1
+            if self.tries[iid] >= COVERAGE_TRIES:
+                self.unplaced.append(item_key(kind, iid))
+                continue
+            queue = self.pilots if kind == "pilot" else self.passives if kind == "passive" else self.actives
+            queue.insert(0, iid)
+
+
+class Loadouts:
+    """The session's loadout injection: --loadout specs (cycled, one per
+    sample) or the coverage picker; the outcome of every item injected."""
+
+    def __init__(self, args, rng: random.Random, seen: dict | None = None):
+        self.items = lo.Items(lo.game_scripts(args.game))
+        self.support = lo.Support(self.items)
+        self.fixed = [lo.parse_spec(s) for s in (args.loadout_specs or [])]
+        self.picker = None
+        if args.coverage:
+            if seen is None:
+                seen = coverage_seen(args)
+            self.picker = CoveragePicker(self.items, self.support, seen, rng)
+        self.n = 0
+        self.status: dict = {}  # item key -> {"status", "why", "samples": [...]}
+        if self.picker:
+            for k, why in self.picker.static.items():
+                self.status[k] = {"status": "unsupported", "why": why, "samples": []}
+        self.records: list = []
+
+    def specs_for(self, doc: dict) -> list | None:
+        """The next sample's specs (None: nothing left to inject)."""
+        if self.picker is not None:
+            specs = self.picker.pick(doc)
+            return specs or None
+        if not self.fixed:
+            return None
+        specs = self.fixed[self.n % len(self.fixed)]
+        self.n += 1
+        return specs
+
+    def give_back(self, ls: LoadoutSample | None, only_inconclusive: bool = False) -> None:
+        """The sample's items back to the coverage picker (all of them, or
+        those the engine could not check from this start)."""
+        if ls is None or self.picker is None:
+            return
+        items = ls.inj.items()
+        if only_inconclusive:
+            items = [it for it in items if ls.acceptance.get(item_key(*it), {}).get("status") == "inconclusive"]
+        self.picker.give_back(items)
+
+    def note(self, sample: int, ls: LoadoutSample, outcome: str) -> None:
+        for k, v in ls.acceptance.items():
+            st = self.status.setdefault(k, {"status": v["status"], "why": v.get("why"), "samples": []})
+            if v["status"] == "unsupported" or st["status"] == "inconclusive":
+                st.update(status=v["status"], why=v.get("why"))
+            st["samples"].append(sample)
+        self.records.append({"sample": sample, "outcome": outcome, **ls.record()})
+
+    def counts(self) -> Counter:
+        return Counter(v["status"] for v in self.status.values())
+
+    def summary_lines(self) -> list:
+        c = self.counts()
+        lines = ["  loadouts: " + (", ".join(f"{k} {v}" for k, v in sorted(c.items())) or "none injected")]
+        if self.picker is not None:
+            lines[0] += (f" (coverage: {self.picker.total} unseen items a run can hold, {self.picker.left()} not "
+                         "yet injected" + (f", {len(self.picker.unplaced)} given up" if self.picker.unplaced else "")
+                         + ")")
+        bad = sorted((k, v["why"]) for k, v in self.status.items() if v["status"] == "unsupported")
+        if bad:
+            lines.append(f"  unsupported ({len(bad)}):")
+            lines += [f"    {k}: {why}" for k, why in bad]
+        moot = sorted((k, v["why"]) for k, v in self.status.items() if v["status"] == "no_effect")
+        if moot:
+            lines.append(f"  not modelled, no effect in a fuzzed turn (played) ({len(moot)}): "
+                         + "; ".join(f"{k} ({why})" for k, why in moot))
+        unsure = sorted((k, v["why"]) for k, v in self.status.items() if v["status"] == "inconclusive")
+        if unsure:
+            lines.append(f"  inconclusive ({len(unsure)}): " + "; ".join(f"{k} ({why})" for k, why in unsure))
+        return lines
+
+    def meta(self) -> dict:
+        out = {"loadout_items": self.status, "loadout_samples": self.records}
+        if self.picker is not None:
+            out["coverage_left"] = {"weapons": self.picker.actives, "passives": self.picker.passives,
+                                    "pilots": self.picker.pilots, "given_up": self.picker.unplaced}
+        return out
+
+    # -- one sample
+
+    def prepare(self, engine, ts: TurnStart, sample: int, out_dir: Path) -> tuple:
+        """Rewrites the start's checkpoint for the next loadout and asks the
+        engine. Returns (LoadoutSample, None), or (None or LoadoutSample,
+        (outcome key, text)) when the sample cannot be played with it."""
+        if ts.save is None:
+            return None, ("no_save", "no saveData.lua checkpoint to rewrite")
+        texts = {"saveData.lua": ts.save.read_text(errors="replace"),
+                 "undoSave.lua": ts.undo.read_text(errors="replace") if ts.undo else None}
+        specs = []
+        try:
+            doc = lo.parse_save(texts["saveData.lua"])
+            specs = self.specs_for(doc) or []
+            if not specs:
+                return None, ("loadout_none", "no loadout left to inject" if self.picker else "no loadout")
+            inj = lo.inject(self.items, texts, specs)
+        except (ValueError, lo.LoadoutError) as e:
+            if self.picker is not None:  # the picked items go back
+                self.picker.give_back([("pilot", sp.pilot) for sp in specs if sp.pilot] + [
+                    ("passive" if self.items.weapon(w).passive else "weapon", w)
+                    for sp in specs for w in (sp.weapons or []) if w != "*"])
+            return None, ("loadout_illegal", str(e))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for name in lp.SAVE_FILES:
+            if name in inj.texts:
+                files[name] = out_dir / f"loadout_{name}"
+                files[name].write_text(inj.texts[name])
+            else:
+                files[name] = None
+        state, data = read_state(ts.path)
+        raw, _ = read_state(ts.raw_path())
+        start = out_dir / "loadout_solve_input.json"
+        start.write_text(json.dumps({"run_id": ts.run, "label": "solve_input",
+                                     "data": dict(data, bridge_state=lo.patch_state(state, inj, self.items),
+                                                  loadout=inj.summary())}))
+        ls = LoadoutSample(inj, start, lo.patch_state(raw, inj, self.items), files, {})
+        ls.acceptance = self.accept(engine, ls)
+        (out_dir / "loadout.json").write_text(json.dumps(ls.record(), indent=1))
+        if ls.unsupported:
+            return ls, ("unsupported", "; ".join(f"{k}: {why}" for k, why in ls.unsupported.items()))
+        return ls, None
+
+    def accept(self, engine, ls: LoadoutSample) -> dict:
+        """Whether the engine models each injected item: passives and pilots
+        by name (lo.Support); an active weapon on the board: itb_live
+        "actions" from the start must list it at some target with no Lua
+        error and no Lua write it does not apply (none listed while the mech
+        can act: inconclusive)."""
+        out = {}
+        try:
+            reply = engine.actions(ls.start, [], effects=True)
+        except lp.Anomaly as e:
+            reply = {"refused": 0, "refused_reason": str(e)}
+        refused = reply.get("refused", -1) >= 0 or "actions" not in reply
+        can_act = {u["uid"]: u.get("can_act") for u in reply.get("units") or []}
+        for kind, iid, uid in ls.inj.injected():
+            key = item_key(kind, iid)
+            if kind in ("passive", "pilot"):
+                status, why = self.support.passive(iid) if kind == "passive" else self.support.pilot(iid)
+                out[key] = {"status": status, "why": why}
+                continue
+            if refused:
+                out[key] = {"status": "unsupported", "why": f"the engine refused the start: {reply.get('refused_reason')}"}
+                continue
+            cands = [a for a in reply["actions"] if a.get("uid") == uid and a.get("sub") == "weapon"
+                     and a.get("weapon") == iid]
+            lua = [a for a in cands if (a.get("effect") or {}).get("lua_errors")
+                   or (a.get("effect") or {}).get("unapplied_lua_writes")]
+            if lua:
+                out[key] = {"status": "unsupported",
+                            "why": f"Lua errors or unapplied Lua writes at {len(lua)} of {len(cands)} targets"}
+            elif cands:
+                out[key] = {"status": "supported", "why": f"{len(cands)} target(s)"}
+            elif can_act.get(uid):
+                out[key] = {"status": "inconclusive", "why": "no target from its tile"}
+            else:
+                out[key] = {"status": "inconclusive", "why": "the mech cannot act here"}
+        return out
+
+
+def coverage_seen(args) -> dict:
+    """What live play and live fuzz sessions exercised (coverage_report)."""
+    import coverage_report as cr
+    seen = cr.seen(Path(args.recordings))
+    fuzz = cr.seen_fuzz(Path(args.out) if args.out else FUZZ_ROOT)
+    return {k: set(seen.get(k) or ()) | set(fuzz.get(k) or ()) for k in ("weapons", "pilots")}
+
+
+def loadout_sample(sess: Session, engine, ts: TurnStart, i: int, args) -> tuple:
+    """prepare() for sample i, logged: (LoadoutSample or None, skip reason
+    or None)."""
+    lds = sess.loadouts
+    ls, why = lds.prepare(engine, ts, i, sess.dir / f"s{i:03d}")
+    if ls is not None:
+        sess.loadout = ls.inj.summary()
+        say(f"  loadout: {ls.inj.summary()['spec']}")
+        for k, v in ls.acceptance.items():
+            say(f"    {k}: {v['status']}" + (f" ({v['why']})" if v.get("why") else ""))
+    return ls, why
 
 
 # ------------------------------------------------------------------ dry run
@@ -668,15 +1017,26 @@ def dry_run(args, engine, sess: Session, starts: list) -> int:
         i += 1
         state, _ = read_state(ts.path)
         say(f"[{i + 1}] {ts.key} {state.get('mission_id')} turn {state.get('turn')}")
+        start, ls = ts.path, None
+        sess.loadout = None
+        if sess.loadouts is not None:
+            ls, why = loadout_sample(sess, engine, ts, i, args)
+            if why:
+                if loadout_skipped(sess, i, ts, ls, why):
+                    break
+                continue
+            start = ls.start
         try:
-            seq, pred, tries = safe_sequence(engine, ts.path, chooser, rng, {}, unit_skills(state), args)
+            seq, pred, tries = safe_sequence(engine, start, chooser, rng, {}, unit_skills(state), args)
         except lp.Anomaly as e:
             sess.finding("engine_error", ts, i, {"problem": str(e)})
             sess.outcomes["engine_error"] += 1
+            loadout_done(sess, i, ls, "engine_error")
             continue
         if seq is None:
             say(f"  no sequence of {args.tries} keeps {args.min_grid} grid and a mech: skipped")
             sess.outcomes["grid_unsafe"] += 1
+            loadout_done(sess, i, ls, "grid_unsafe", played=False)
             continue
         sess.samples += 1
         sess.count(seq)
@@ -687,18 +1047,51 @@ def dry_run(args, engine, sess: Session, starts: list) -> int:
                "picks": [describe(a) for a in seq.picks], "candidates": seq.candidates,
                "warnings": pred.get("warnings"), "problems": problems,
                "after_enemy_grid": (pred.get("after_enemy") or {}).get("grid_power")}
+        if ls is not None:
+            rec.update(loadout=ls.inj.summary(), acceptance=ls.acceptance, start=str(start))
         sess.sample_log(rec)
         if problems:
             sess.outcomes["engine_inconsistent"] += 1
             plan_path = sess.dir / f"s{i:03d}_plan.json"
             plan_path.write_text(json.dumps(seq.plan, indent=1))
             sess.finding("engine_inconsistent", ts, i, {"diffs": problems, "plan": seq.plan,
-                                                       "files": {"start": str(ts.path), "plan": str(plan_path)},
-                                                       "replay": f"itb_live predict {ts.path} --plan @{plan_path}"})
+                                                       "files": {"start": str(start), "plan": str(plan_path)},
+                                                       "replay": f"itb_live predict {start} --plan @{plan_path}"})
+            loadout_done(sess, i, ls, "engine_inconsistent")
         else:
             sess.outcomes["consistent"] += 1
+            loadout_done(sess, i, ls, "consistent")
     say(sess.summary())
     return 0
+
+
+def loadout_skipped(sess: Session, i: int, ts: TurnStart, ls: LoadoutSample | None, why: tuple) -> bool:
+    """A sample whose loadout cannot be played (illegal, unsupported, none
+    left): counted and logged; the items the engine did not refuse go back
+    to the coverage picker. True when nothing is left to inject."""
+    sess.outcomes[why[0]] += 1
+    say(f"  {why[0]}: {why[1]}")
+    rec = {"sample": i, "source": ts.key, "outcome": why[0], "problem": why[1]}
+    if ls is not None:
+        sess.loadouts.note(i, ls, why[0])
+        bad = set(ls.unsupported)
+        if sess.loadouts.picker is not None:
+            sess.loadouts.picker.give_back([it for it in ls.inj.items() if item_key(*it) not in bad])
+        rec.update(loadout=ls.inj.summary(), acceptance=ls.acceptance)
+    elif why[0] == "loadout_illegal":
+        sess.finding("loadout_illegal", ts, i, {"problem": why[1]})
+    sess.sample_log(rec)
+    return why[0] == "loadout_none"
+
+
+def loadout_done(sess: Session, i: int, ls: LoadoutSample | None, outcome: str, played: bool = True) -> None:
+    """The end of a sample with a loadout: its items' outcome; unplayed
+    ones go back to the coverage picker, and so do those the engine could
+    not check from this start (inconclusive)."""
+    if ls is None:
+        return
+    sess.loadouts.note(i, ls, outcome)
+    sess.loadouts.give_back(ls, only_inconclusive=played)
 
 
 # ------------------------------------------------------------------ live safety
@@ -781,23 +1174,31 @@ def check_safe(args) -> None:
 # then loads once more (live_play.reload_save) against the Grid Defense
 # restart quirk.
 
-def restore_by_relaunch(ctx, sess: Session, ts: TurnStart) -> dict:
+class LoadoutRejected(lp.Anomaly):
+    """The game, after loading a checkpoint with an injected loadout, does
+    not show that loadout (lo.verify_state)."""
+
+
+def restore_by_relaunch(ctx, sess: Session, ts: TurnStart, ls: LoadoutSample | None = None) -> dict:
     """Loads a recorded turn start: quits the game, puts the checkpoint's
     save files in the profile (the profile's own ones copied to
     <session>/profile_backup/ the first time, after the game has exited),
     relaunches it, clicks Continue on the title screen until a fresh player
     turn shows, then loads that save once more (gear or Esc, Main Menu, Continue)
     and checks the board against the recorded turn start and the Grid
-    Defense base (live_play.grid_base_wrong). Returns the live state."""
+    Defense base (live_play.grid_base_wrong). With `ls`, the checkpoint
+    rewritten for its loadout, and the board checked against the recorded
+    start with that loadout: the mechs' weapons, pilots and HP not as
+    injected raise LoadoutRejected. Returns the live state."""
     args = ctx.args
-    say(f"  restoring {ts.key}")
+    say(f"  restoring {ts.key}" + (" with the loadout" if ls else ""))
     if lp.game_running():
         say("  quitting the game")
         lp.quit_game()
     backup = None
     if sess.backup is None:
         backup = sess.backup = sess.dir / "profile_backup"
-    lp.swap_saves({"saveData.lua": ts.save, "undoSave.lua": ts.undo}, backup)
+    lp.swap_saves(ls.files if ls else {"saveData.lua": ts.save, "undoSave.lua": ts.undo}, backup)
     if backup is not None:
         say(f"  the profile's own save files are in {backup} (put back at the end)")
     t0 = lp.relaunch(args.timeout)
@@ -805,13 +1206,22 @@ def restore_by_relaunch(ctx, sess: Session, ts: TurnStart) -> dict:
     say(f"  loaded {first.get('mission_id')} turn {first.get('turn')} (Grid Defense base "
         f"{first.get('grid_defense_base')}, built under difficulty {first.get('grid_base_difficulty')})")
     state = lp.reload_save(ctx, args.timeout)
-    want, _ = read_state(ts.raw_path())
+    want = ls.raw if ls else read_state(ts.raw_path())[0]
     diffs = lp.checkpoint_diffs(want, state)
+    if ls:
+        # The injected mechs' HP is the loadout's own check (verify_state).
+        injected = {lp.describe_unit(u) for u in lp.units(want) if u.get("loadout_injected")}
+        diffs = [d for d in diffs if not (d.split(":", 1)[0] in injected and d.split(": ", 1)[-1].startswith("hp"))]
     if diffs:
         raise lp.Anomaly(f"the loaded board differs from {ts.raw_path().name}: " + "; ".join(diffs))
     warning = lp.grid_base_wrong(state)
     if warning:
         raise lp.Anomaly(f"after the second load: {warning}")
+    if ls:
+        problems = lo.verify_state(state, ls.inj)
+        if problems:
+            raise LoadoutRejected("the game does not show the injected loadout: " + "; ".join(problems))
+        say("  the bridge shows the injected loadout (weapons, pilots, HP)")
     say(f"  loaded again: board as recorded, Grid Defense base {state.get('grid_defense_base')} "
         f"(difficulty {state.get('grid_base_difficulty')})")
     return state
@@ -1106,23 +1516,59 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None, esc
     rc = 0
     try:
         pool = sess.pool = start_pool(args, starts, rng)
-        i = -1
-        while i + 1 < args.samples and budget_left(sess, args):
+        i = -1  # the sample directory s<NNN>: each restore, and each loadout tried
+        played = 0
+        unplayed = 0  # loadouts tried since the last restore
+        while played < args.samples and budget_left(sess, args):
             ts = pool.draw()
             if ts is None:
                 say(pool.exhausted())
                 break
+            sess.loadout, ls = None, None
             # Only a start the recording shows playable costs a restore.
-            why = offline_reason(engine, ts, args, rng)
+            why = offline_reason(engine, ts, args, rng, grid=sess.loadouts is None)
             if why:
                 skip(sess, pool, ts, why, "not restored")
                 continue
             i += 1
             say(f"[{i + 1}] {ts.key}")
-            run = lp.Run(sess.dir / f"s{i:03d}", {"tool": "scripts/fuzz_play.py", "source": ts.key})
+            if sess.loadouts is not None:
+                # The loadout first (the engine must model it), then the
+                # grid check with it.
+                ls, why = loadout_sample(sess, engine, ts, i, args)
+                unplayed += 1
+                if unplayed > LOADOUT_ATTEMPTS:
+                    say(f"no loadout could be played in {LOADOUT_ATTEMPTS} attempts in a row: stopping")
+                    break
+                if why:
+                    if loadout_skipped(sess, i, ts, ls, why):
+                        break
+                    continue
+                why = offline_reason(engine, ts, args, rng, path=ls.start)
+                if why:
+                    say(f"  not restored with this loadout: {why[1]}")
+                    sess.outcomes[f"skipped_{why[0]}"] += 1
+                    loadout_done(sess, i, ls, f"skipped_{why[0]}", played=False)
+                    sess.sample_log({"sample": i, "source": ts.key, "outcome": f"skipped_{why[0]}",
+                                     "loadout": ls.inj.summary()})
+                    continue
+            played, unplayed = played + 1, 0
+            run = lp.Run(sess.dir / f"s{i:03d}", {"tool": "scripts/fuzz_play.py", "source": ts.key,
+                                                   **({"loadout": ls.inj.summary()} if ls else {})})
             ctx.run, ctx.mission_over = run, False
             try:
-                state = restore_by_relaunch(ctx, sess, ts)
+                state = restore_by_relaunch(ctx, sess, ts, ls)
+            except LoadoutRejected as e:
+                # The game holds another loadout than the one written: not
+                # fuzzed; the next sample restores anew.
+                say(f"  LOADOUT REJECTED: {e}")
+                sess.outcomes["loadout_rejected"] += 1
+                sess.finding("loadout_rejected", ts, i, {"problem": str(e), "files": {
+                    name: str(path) for name, path in ls.files.items() if path}})
+                loadout_done(sess, i, ls, "loadout_rejected")
+                sess.sample_log({"sample": i, "source": ts.key, "dir": str(run.path), "outcome": "loadout_rejected",
+                                 "loadout": ls.inj.summary()})
+                continue
             except lp.Anomaly as e:
                 # Never fuzz on (or restore again from) a board that is not
                 # the checkpoint's: stop.
@@ -1130,8 +1576,9 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None, esc
                 raise LeftMission(f"restore failed: {e}") from e
             ctx.native_checked = False  # EXEC_MODE native again after each load
             rec_state, rec_data = read_state(ts.path)
-            seed_run(run, state, recorded_carry(rec_state, rec_data), ts.save)
+            seed_run(run, state, recorded_carry(rec_state, rec_data), ls.files["saveData.lua"] if ls else ts.save)
             sess.samples += 1
+            outcome = "not_played"
             for t in range(args.turns):
                 try:
                     outcome = live_turn(ctx, sess, ts, i, chooser, rng)
@@ -1141,13 +1588,16 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None, esc
                         raise LeftMission(str(e)) from e
                     outcome = "driver_error"
                 sess.outcomes[outcome] += 1
-                if t == 0 and outcome in ("not_playable", "grid_unsafe"):
+                if t == 0 and outcome in ("not_playable", "grid_unsafe") and ls is None:
                     pool.reject(ts, f"{outcome} after the restore")  # never restored again
                 if outcome == "mission_over":
+                    loadout_done(sess, i, ls, outcome)
                     raise LeftMission("the mission ended (the game is past the mission's last enemy phase)")
                 if outcome not in ("matched", "resynced"):
                     break
-            sess.sample_log({"sample": i, "source": ts.key, "dir": str(run.path)})
+            loadout_done(sess, i, ls, outcome, played=outcome not in ("not_playable", "grid_unsafe"))
+            sess.sample_log({"sample": i, "source": ts.key, "dir": str(run.path), "outcome": outcome,
+                             **({"loadout": ls.inj.summary()} if ls else {})})
         say(sess.summary())
     except LeftMission as e:
         say(sess.summary())
@@ -1209,6 +1659,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--turn", type=int, help="turn TT (with --run and --mission)")
     ap.add_argument("--samples", type=int, default=10, help="turn starts to fuzz (default %(default)s)")
     ap.add_argument("--minutes", type=float, default=0, help="stop after this long (0: no limit)")
+    ap.add_argument("--loadout", dest="loadout_specs", action="append", metavar="SPEC",
+                    help="inject this loadout into each start's checkpoint: '<mech>:<primary>[,<secondary>]"
+                         "[;pilot=<id>]...' (mech = squad index 0-2, the uid; exact weapon ids, _A/_B/_AB upgrades; "
+                         "'*' keeps a slot; '<mech>:pilot=<id>' only the pilot); repeatable: one per sample, cycled")
+    ap.add_argument("--coverage", action="store_true",
+                    help="inject what the recordings never exercised (coverage_report: live runs and live fuzz "
+                         "sessions), a new primary, secondary and pilot for each living mech")
     ap.add_argument("--seed", type=int, default=None, help="random seed (default: from the clock; logged)")
     ap.add_argument("--max-steps", type=int, default=MAX_STEPS, help="sub-actions per turn at most")
     ap.add_argument("--stop-prob", type=float, default=STOP_PROB, help="chance to end the turn after each step")
@@ -1266,10 +1723,21 @@ def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int
         return 2
     if args.itb_live:
         lp.ITB_LIVE = Path(args.itb_live)
+    inject = bool(args.loadout_specs or args.coverage)
+    if args.loadout_specs and args.coverage:
+        say("REFUSED: --loadout or --coverage, not both")
+        return 2
+    try:
+        for spec in args.loadout_specs or []:
+            lo.parse_spec(spec)
+    except lo.LoadoutError as e:
+        say(f"REFUSED: --loadout: {e}")
+        return 2
     root = Path(args.recordings)
-    starts = find_turn_starts(root, args.run, need_save=not args.dry_run)
+    starts = find_turn_starts(root, args.run, need_save=not args.dry_run or inject)
     if not starts:
-        say(f"REFUSED: no recorded turn starts under {root}" + ("" if args.dry_run else " with save checkpoints"))
+        say(f"REFUSED: no recorded turn starts under {root}"
+            + ("" if args.dry_run and not inject else " with save checkpoints"))
         return 2
     sess = None
     own_engine = engine is None
@@ -1280,6 +1748,16 @@ def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int
         sess.write_meta({"recordings": str(root), "turn_starts": len(starts)})
         say(f"fuzz session {sess.dir} (seed {args.seed}, {len(starts)} turn starts"
             + (", dry run)" if args.dry_run else ")"))
+        if inject:
+            scripts = lo.game_scripts(args.game)
+            if not (scripts / "weapons_prime.lua").exists():
+                raise lp.Refused(f"no game scripts at {scripts} for the loadouts (set ITB_GAME_DIR or --game)")
+            sess.loadouts = Loadouts(args, random.Random(args.seed + 1))
+            if sess.loadouts.picker is not None:
+                pk = sess.loadouts.picker
+                say(f"coverage: {pk.total} items never exercised that a run can hold: {len(pk.actives)} weapons, "
+                    f"{len(pk.passives)} passives, {len(pk.pilots)} pilots to inject, {len(pk.static)} the engine "
+                    "does not model")
         if engine is None:
             engine = lp.Engine(args.threads, args.game, sess.dir / "itb_live.log")
         if args.dry_run:
@@ -1301,7 +1779,8 @@ def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int
                              "steps": sess.steps, "findings": sess.findings, "outcomes": dict(sess.outcomes),
                              "mix": dict(sess.mix), "effects": dict(sess.tags), "engine_notes": dict(sess.surprise),
                              "rejected_starts": dict(sess.pool.bad) if sess.pool else {},
-                             "passes": sess.pool.passes if sess.pool else 0})
+                             "passes": sess.pool.passes if sess.pool else 0,
+                             **(sess.loadouts.meta() if sess.loadouts is not None else {})})
 
 
 if __name__ == "__main__":
