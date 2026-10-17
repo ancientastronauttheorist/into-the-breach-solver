@@ -904,3 +904,43 @@ TEST_CASE("live: Rosie Rivets' move heals the mech next to where she stops (live
     CHECK((*p)["hp"] == u["hp"]);
   }
 }
+
+TEST_CASE("live: an Arrogant pilot's boost ends when the mech is hit (fuzz 20261016_191716 s009)") {
+  NEED_SESSION();
+  // Mission_SnowStorm turn 2 (run 20261015_202706 m26 t02). NeedleMech#0
+  // (Pilot_Arrogant, 3/3 HP) is reported boosted: Pawn:IsBoosted is true
+  // for an Arrogant pilot at full health, and that is no status. The
+  // TrimissileMech's second shell hits it at G6 (3 -> 2 HP, pushed to H6);
+  // its Kickback to H5 then deals 1 self damage, unboosted. The engine used
+  // to keep the boost as a status and killed the mech (2 self damage).
+  const std::string start = std::string(ITB_FIXTURE_DIR) + "/live_arrogant_t2_solve_input.json";
+  const json plan = json::array({{{"uid", 1}, {"kind", "weapon"}, {"weapon", "Ranged_TC_DoubleArt"},
+                                  {"target", {5, 3}}, {"target2", {2, 1}}},
+                                 {{"uid", 0}, {"kind", "weapon"}, {"weapon", "Brute_KickBack"}, {"target", {3, 0}}}});
+  const json r = S.handle({{"cmd", "predict"}, {"state", start}, {"plan", plan}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  REQUIRE(r["refused"] == -1);
+  REQUIRE(r["steps"].size() == 2);
+  const json* hit = board_unit(r["steps"][0]["board"], 0);
+  REQUIRE(hit);
+  CHECK((*hit)["hp"] == 2);
+  const json& want = r["steps"][1]["board"];
+  const json* needle = board_unit(want, 0);
+  REQUIRE(needle);
+  CHECK((*needle)["x"] == 3);
+  CHECK((*needle)["y"] == 0);
+  CHECK((*needle)["hp"] == 1);
+  // The game's board after the Kickback: same units, places and HP.
+  const json live =
+      S.handle({{"cmd", "board"}, {"state", std::string(ITB_FIXTURE_DIR) + "/live_arrogant_t2_step2.json"}});
+  REQUIRE_MESSAGE(live["ok"].get<bool>(), live.dump());
+  CHECK(uids(want) == uids(live["board"]));
+  for (const json& u : live["board"]["units"]) {
+    const json* p = board_unit(want, u["uid"].get<int>());
+    REQUIRE(p);
+    INFO(u.dump());
+    CHECK((*p)["x"] == u["x"]);
+    CHECK((*p)["y"] == u["y"]);
+    CHECK((*p)["hp"] == u["hp"]);
+  }
+}

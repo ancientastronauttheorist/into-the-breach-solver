@@ -916,8 +916,14 @@ std::optional<Recording> load_recording(const std::filesystem::path& path,
   }
   // The bridge's `boosted` is Pawn:IsBoosted(), which includes the Boost
   // psion: only a boost the psion does not explain is the pawn's status.
+  // The same holds for an Arrogant_Boost pilot at full health: IsBoosted is
+  // true while the mech is undamaged and false again as soon as it is hit,
+  // so that boost is not a status the pawn keeps (live fuzz 2026-10-16: a
+  // Kickback after a friendly hit took 1 self damage, not 2). A Boosted
+  // status on such a mech is indistinguishable here and is dropped too.
   for (Pawn& p : b.pawns()) {
     if (p.boosted && mutation_affects(b, p, Leader::Boosted)) p.boosted = false;
+    if (p.boosted && p.has_pilot(kPilotArrogantBoost) && p.hp >= p.max_hp) p.boosted = false;
   }
   rec.difficulty = get_or<int>(s, "difficulty", -1);
   if (auto it = s.find("spawning_tiles"); it != s.end() && it->is_array()) {
