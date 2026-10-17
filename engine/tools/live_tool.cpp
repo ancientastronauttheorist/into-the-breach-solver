@@ -3,7 +3,7 @@
 //
 //   itb_live [--game DIR] solve <state.json> [--time S] [--nodes N] [--threads N]
 //            [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] [--out FILE] [--pretty]
-//   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--threat-tier] [--out FILE] [--pretty]
+//   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--branches N] [--threat-tier] [--out FILE] [--pretty]
 //   itb_live [--game DIR] board <state.json> [--pretty]
 //   itb_live [--game DIR] actions <state.json> [--plan JSON|@FILE] [--no-effects] [--out FILE] [--pretty]
 //   itb_live [--game DIR] deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N]
@@ -171,6 +171,24 @@ json header(const Loaded& l, const std::string& cmd, const fs::path& state) {
               {"load_warnings", l.rec.warnings}};
 }
 
+// The chance nodes TurnContext::choose decides (a branch index each).
+bool hidden_choice(ChanceKind k) {
+  return k == ChanceKind::EnvOrder || k == ChanceKind::EnvChoice || k == ChanceKind::MissionRandom;
+}
+
+const char* chance_kind_name(ChanceKind k) {
+  switch (k) {
+    case ChanceKind::GridDefense: return "GridDefense";
+    case ChanceKind::SpiderEgg: return "SpiderEgg";
+    case ChanceKind::LuaRandom: return "LuaRandom";
+    case ChanceKind::EnvOrder: return "EnvOrder";
+    case ChanceKind::EnvChoice: return "EnvChoice";
+    case ChanceKind::MissionRandom: return "MissionRandom";
+    case ChanceKind::XpSplit: return "XpSplit";
+  }
+  return "?";
+}
+
 json phase_json(const Board& start, const Board& end, const PhaseResult& pr) {
   json events = json::array();
   for (const PhaseEvent& e : pr.events) {
@@ -199,9 +217,19 @@ json phase_json(const Board& start, const Board& end, const PhaseResult& pr) {
       xp_split.push_back(json{{"point", point_json(c.point)}, {"amount", c.amount}, {"options", c.options}});
     }
   }
+  // Hidden choices (environment order / choice, a mission hook's random
+  // pick such as the Final Cave's bomb drop), in the order taken: the
+  // prediction takes branch 0 of each; "enemy_branches" has the others.
+  json hidden = json::array();
+  for (const ChanceRecord& c : pr.chances) {
+    if (!hidden_choice(c.kind)) continue;
+    hidden.push_back(json{{"kind", chance_kind_name(c.kind)}, {"point", point_json(c.point)},
+                          {"pick", c.outcome}, {"options", c.options}});
+  }
   return json{{"environment", pr.environment},
               {"exact", pr.exact},
               {"xp_split", xp_split},
+              {"hidden_choices", hidden},
               {"quiescent", pr.quiescent},
               {"mission_ended", pr.mission_ended},
               {"chance_nodes", pr.chances.size()},
@@ -227,10 +255,11 @@ int weapon_index(const Pawn* p, const std::string& weapon) {
 // chance node (no Grid Defense resist, first branch, the default death
 // seed), the outcome the solver's plan follows, then the enemy phase.
 // Fills out["plan"], ["steps"], ["refused"], the boards and the predicted
-// score, and appends to `warnings`.
+// score, and appends to `warnings`. `branches` > 0: also the enemy phase's
+// other hidden-choice outcomes (enemy_branches below), at most that many.
 void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& plan, json& out,
               std::vector<std::string>& warnings, const ScoreOptions& score_options,
-              const LookaheadOptions* lookahead = nullptr) {
+              const LookaheadOptions* lookahead = nullptr, int branches = 0) {
   Board b = l.board;
   ActionOptions opts = action_options(l.ctx);  // the mission's per-frame hooks
   opts.check_legal = true;
@@ -308,10 +337,59 @@ void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
   }
   out["after_player"] = live_board_json(b);
   TurnContext ctx = l.ctx;
+  const Board after_player = b;
   engine.lua().seed(kLuaSeed);
   const PhaseResult pr = engine.end_turn(b, ctx);
   out["after_enemy"] = live_board_json(b);
   out["enemy_phase"] = phase_json(l.board, b, pr);
+  if (branches > 0) {
+    // The other outcomes of the enemy phase's hidden choices (a random
+    // mission pick such as the Final Cave's bomb drop, an environment
+    // order): each forces a prefix of picks, then branch 0 for the nodes
+    // after it, depth first (a later node's alternatives before an earlier
+    // one's). The driver compares the game with them when the default
+    // outcome differs.
+    std::vector<int> taken;
+    for (const ChanceRecord& c : pr.chances) {
+      if (hidden_choice(c.kind)) taken.push_back(c.options);
+    }
+    std::vector<std::vector<int>> todo;
+    auto expand = [&todo](const std::vector<int>& prefix, const std::vector<int>& options) {
+      for (size_t j = options.size(); j-- > prefix.size();) {
+        for (int k = options[j] - 1; k >= 1; --k) {
+          std::vector<int> next = prefix;
+          next.resize(j, 0);
+          next.push_back(k);
+          todo.push_back(std::move(next));
+        }
+      }
+    };
+    expand({}, taken);
+    json list = json::array();
+    while (!todo.empty() && static_cast<int>(list.size()) < branches) {
+      const std::vector<int> prefix = std::move(todo.back());
+      todo.pop_back();
+      std::vector<int> options;
+      json choices = json::array();
+      TurnContext bctx = l.ctx;
+      bctx.choose = [&](const ChanceRecord& node) {
+        const int pick = options.size() < prefix.size() ? prefix[options.size()] : 0;
+        options.push_back(node.options);
+        choices.push_back(json{{"kind", chance_kind_name(node.kind)}, {"point", point_json(node.point)},
+                               {"pick", pick}, {"options", node.options}});
+        return pick;
+      };
+      Board bb = after_player;
+      engine.lua().seed(kLuaSeed);
+      const PhaseResult bpr = engine.end_turn(bb, bctx);
+      expand(prefix, options);
+      list.push_back(json{{"choices", choices},
+                          {"after_enemy", live_board_json(bb)},
+                          {"enemy_phase", phase_json(l.board, bb, bpr)}});
+    }
+    out["enemy_branches"] = list;
+    out["enemy_branches_complete"] = todo.empty();
+  }
   Score predicted = score_turn(l.board, b, &ctx, &pr, score_options);
   if (lookahead) {
     // The next-turn estimate of the board left (lookahead.hpp), per AI sample.
@@ -1058,7 +1136,7 @@ json LiveSession::handle(const json& request) {
       }
     }
     simulate(*main_, l, plan, out, warnings, tiers.score_options(),
-             tiers.lookahead ? &tiers.lookahead_options : nullptr);
+             tiers.lookahead ? &tiers.lookahead_options : nullptr, std::max(0, request.value("branches", 0)));
     std::vector<std::string> unique;
     for (const std::string& w : warnings) {
       if (std::find(unique.begin(), unique.end(), w) == unique.end()) unique.push_back(w);
@@ -1199,6 +1277,8 @@ int run_live(int argc, char** argv) {
       } else if (args[i] == "--threads" && more && (cmd == "solve" || cmd == "serve" || cmd == "deploy")) {
         threads = std::max(1, std::stoi(args[++i]));
         request["threads"] = threads;
+      } else if (args[i] == "--branches" && more && cmd == "predict") {
+        request["branches"] = std::stoi(args[++i]);
       } else if (args[i] == "--plan" && more && (cmd == "predict" || cmd == "actions")) {
         request["plan"] = json::parse(read_text_arg(args[++i]));
       } else if (args[i] == "--no-effects" && cmd == "actions") {

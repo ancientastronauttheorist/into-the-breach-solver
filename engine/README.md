@@ -206,7 +206,16 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   with more HP, at most its HP before the phase and on a tile with a roll,
   with the grid higher by exactly the HP kept); a Soldier Psion or Psion
   Abomination emerging from a hidden spawn (every Vek of its team +1 HP at
-  once). Anything else stops `mission`.
+  once); another outcome of a hidden choice (the prediction's
+  `hidden_choices`: an environment order or choice, a mission hook's
+  random pick such as the Final Cave's bomb drop; it takes branch 0 of
+  each): on a difference the driver predicts again with `"branches": 64`
+  (`itb_live predict --branches N`: `enemy_branches`, each other outcome's
+  `choices`, `after_enemy` and `enemy_phase`, saved as
+  `..._prediction_branches.json`) and takes the first that matches,
+  carrying its boards on as the prediction (fuzz 20261017_000242 sample 4,
+  Mission_Final_Cave turn 3: the new bomb fell on the Scorpion at C6, the
+  prediction's on the rock at E6). Anything else stops `mission`.
 - **Queued shots** come from the engine where the bridge's are stale. The
   bridge reads them from the save (written at turn start) and only shifts
   them with the pawn; no Lua API exposes a pawn's live queued shot, so a

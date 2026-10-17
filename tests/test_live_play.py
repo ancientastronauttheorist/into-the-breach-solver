@@ -156,8 +156,12 @@ PLAN = [
 
 class FakeEngine:
     def __init__(self, plan=PLAN, after_enemy=None, enemy_phase=None, clears=None, shields=None,
-                 enemy_shields=()):
+                 enemy_shields=(), enemy_branches=()):
         self.plan = plan
+        # [(choices, after_enemy(board) -> compact, enemy_phase)]: the
+        # "enemy_branches" a predict with "branches" returns.
+        self.enemy_branches = list(enemy_branches)
+        self.branch_requests = []
         # (k, tiles): from plan step k on, the boards' "shield_tiles" (the
         # structures the plan shielded); after the enemy phase, enemy_shields.
         # None: boards without "shield_tiles" (an itb_live from before it).
@@ -230,11 +234,20 @@ class FakeEngine:
         out.update(searched=True, proven_optimal=True, worst_case={"grid": 0}, stats={"time_s": 0.1})
         return out
 
-    def predict(self, path, plan):
+    def predict(self, path, plan, branches=0):
         self.predicts.append(plan)
         self.predict_states.append(self._state(path))
         # A given plan (`turn --plan`) plays out as this engine's own plan.
-        return self._simulate(self._state(path), self.plan if plan else [])
+        out = self._simulate(self._state(path), self.plan if plan else [])
+        if branches:
+            self.branch_requests.append(branches)
+            b = copy.deepcopy(self._state(path))
+            for s in (self.plan if plan else []):
+                apply(b, s)
+            out["enemy_branches"] = [{"choices": c, "after_enemy": f(copy.deepcopy(b)), "enemy_phase": ph}
+                                     for c, f, ph in self.enemy_branches[:branches]]
+            out["enemy_branches_complete"] = len(self.enemy_branches) <= branches
+        return out
 
     def board(self, path):
         return compact(self._state(path))
@@ -1661,6 +1674,65 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual(code, 0, text)
         self.assertIn("Grid Defense resisted at F6", text)
         self.assertIn("enemy phase: MATCH", text)
+
+    @staticmethod
+    def scorpion_crushed(st):
+        """A hidden choice's first outcome: a mission hook's drop kills the Scorpion."""
+        b = compact(st)
+        b["units"] = [u for u in b["units"] if u["uid"] != 100]
+        return b
+
+    HIDDEN = [{"kind": "MissionRandom", "point": None, "pick": 0, "options": 3}]
+
+    def say_end_turn(self, eng) -> tuple:
+        out = []
+        orig = lp.say
+        lp.say = lambda m="": out.append(m)
+        try:
+            code = self.run_cmd(["end-turn"], eng)
+        finally:
+            lp.say = orig
+        return code, "\n".join(out)
+
+    def test_end_turn_takes_the_hidden_choice_outcome_the_game_took(self):
+        # Fuzz 20261017_000242 sample 4 (Mission_Final_Cave turn 3): the new
+        # bomb drops on a random tile; the prediction took the first one (a
+        # rock), the game another (a Scorpion). The enemy phase matched that
+        # outcome: a note, not a difference.
+        self.bridge()
+        hook = lambda xy: {"mission_ended": False, "chance_nodes": 1, "hidden_choices": self.HIDDEN,
+                           "events": [{"type": "mission hook", "point": xy,
+                                       "detail": "bomb destroyed: a new bomb drops"}]}
+        other = [dict(self.HIDDEN[0], pick=1)]
+        last = [dict(self.HIDDEN[0], pick=2)]
+        eng = FakeEngine(after_enemy=self.scorpion_crushed, enemy_phase=hook([3, 3]),
+                         enemy_branches=[(other, self.scorpion_crushed, hook([3, 3])),
+                                         (last, compact, hook([2, 3]))])
+        code, text = self.say_end_turn(eng)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng.branch_requests, [lp.ENEMY_BRANCHES])
+        self.assertIn("hidden choice: the game took MissionRandom 3/3 (bomb destroyed: a new bomb drops at E6); "
+                      "the prediction took MissionRandom 1/3 (bomb destroyed: a new bomb drops at E5)", text)
+        self.assertIn("enemy phase: MATCH", text)
+        self.assertTrue(list(self.run_dir().glob("*_prediction_branches.json")))
+
+    def test_end_turn_without_a_matching_hidden_choice_outcome_still_stops(self):
+        self.bridge()
+        phase = {"mission_ended": False, "chance_nodes": 1, "hidden_choices": self.HIDDEN}
+        other = [dict(self.HIDDEN[0], pick=1)]
+        eng = FakeEngine(after_enemy=self.scorpion_crushed, enemy_phase=phase,
+                         enemy_branches=[(other, self.scorpion_crushed, phase)])
+        code, text = self.say_end_turn(eng)
+        self.assertEqual(code, 1, text)
+        self.assertIn("Scorpion1#100: engine dead", text)
+        self.assertIn("no other outcome of the hidden choices matches either (1 compared)", text)
+
+    def test_end_turn_asks_for_branches_only_with_hidden_choices(self):
+        # A difference with no hidden choice in the prediction: no second predict.
+        self.bridge()
+        eng = FakeEngine(after_enemy=self.scorpion_crushed)
+        self.assertEqual(self.say_end_turn(eng)[0], 1)
+        self.assertEqual(eng.branch_requests, [])
 
     def test_end_turn_unexplained_building_hp_still_stops(self):
         self.bridge()

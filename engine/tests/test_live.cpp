@@ -944,3 +944,53 @@ TEST_CASE("live: an Arrogant pilot's boost ends when the mech is hit (fuzz 20261
     CHECK((*p)["hp"] == u["hp"]);
   }
 }
+
+TEST_CASE("live: predict lists the enemy phase's hidden choices and their other outcomes (fuzz 20261017_000242 s4)") {
+  NEED_SESSION();
+  // Mission_Final_Cave turn 3, End Turn: the destroyed bomb's replacement
+  // drops on one of 13 tiles (MissionRandom). The prediction takes the
+  // first, (2,3), killing the rock there; the game's fell on the Scorpion
+  // at (2,5), one of the "enemy_branches" scripts/live_play.py compares.
+  const std::string state = std::string(ITB_FIXTURE_DIR) + "/fuzz_cavebomb_t3_end_turn.json";
+  const json plain = S.handle({{"cmd", "predict"}, {"state", state}, {"plan", json::array()}});
+  REQUIRE_MESSAGE(plain["ok"].get<bool>(), plain.dump());
+  CHECK_FALSE(plain.contains("enemy_branches"));
+  const json& hidden = plain["enemy_phase"]["hidden_choices"];
+  REQUIRE(hidden.size() == 1);
+  CHECK(hidden[0]["kind"] == "MissionRandom");
+  CHECK(hidden[0]["options"] == 13);
+  CHECK(hidden[0]["pick"] == 0);
+  CHECK(board_unit(plain["after_enemy"], 16076) == nullptr);
+  CHECK(board_unit(plain["after_enemy"], 16028) != nullptr);
+
+  const json r = S.handle({{"cmd", "predict"}, {"state", state}, {"plan", json::array()}, {"branches", 64}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  CHECK(r["after_enemy"] == plain["after_enemy"]);
+  CHECK(r["enemy_branches_complete"] == true);
+  const json& branches = r["enemy_branches"];
+  REQUIRE(branches.size() == 12);
+  std::set<int> picks;
+  int game = 0;
+  for (const json& br : branches) {
+    REQUIRE(br["choices"].size() == 1);
+    picks.insert(br["choices"][0]["pick"].get<int>());
+    Point drop = kInvalidPoint;
+    for (const json& e : br["enemy_phase"]["events"]) {
+      if (e["type"] == "mission hook") drop = {e["point"][0].get<int>(), e["point"][1].get<int>()};
+    }
+    CHECK(drop != Point{2, 3});
+    if (drop == Point{2, 5}) {
+      ++game;
+      CHECK(board_unit(br["after_enemy"], 16028) == nullptr);
+      CHECK(board_unit(br["after_enemy"], 16076) != nullptr);
+    }
+  }
+  CHECK(game == 1);
+  CHECK(picks.size() == 12);
+  CHECK(picks.count(0) == 0);
+
+  const json few = S.handle({{"cmd", "predict"}, {"state", state}, {"plan", json::array()}, {"branches", 3}});
+  REQUIRE_MESSAGE(few["ok"].get<bool>(), few.dump());
+  CHECK(few["enemy_branches"].size() == 3);
+  CHECK(few["enemy_branches_complete"] == false);
+}

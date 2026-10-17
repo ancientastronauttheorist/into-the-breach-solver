@@ -22,8 +22,13 @@
 //       sub-action with the default chance outcome (the outcome the plan
 //       follows): the predicted board after every move, weapon and repair,
 //       after the player's turn and after the enemy phase
-//   {"cmd": "predict", "state": "...", "plan": [actions]}
-//       the same simulation for a given plan
+//   {"cmd": "predict", "state": "...", "plan": [actions], "branches": 0}
+//       the same simulation for a given plan. The enemy phase's
+//       "hidden_choices" list its environment orders / choices and mission
+//       random picks (e.g. the Final Cave's bomb drop) with the branch the
+//       prediction took (0); "branches" N > 0 adds "enemy_branches": up to
+//       N other outcomes of them, each {"choices", "after_enemy",
+//       "enemy_phase"}, and "enemy_branches_complete" (all were run)
 //   {"cmd": "deploy", "state": "...", "time_limit": 45, "threads": N,
 //    "screen_samples": 3, "finalists": 3, "samples": 12, "solve_time": 0.5,
 //    "solve_nodes": 0, "seed": 1, "placements": [[[x,y], ...], ...],

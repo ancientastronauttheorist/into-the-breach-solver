@@ -1609,6 +1609,72 @@ TEST_CASE("final cave: a bomb the Tyrant kills drops again after the environment
   CHECK(fresh->hp == 4);
 }
 
+TEST_CASE("fuzz: the final cave's new bomb falls on a random tile and kills who stands there (20261017_000242 s4)") {
+  NEED_ENGINE();
+  // Mission_Final_Cave turn 3, End Turn: Firefly2 #16050 kills BigBomb
+  // #16032 (1 HP) at (4,3); the hook drops a new bomb on a random inner
+  // tile without a player pawn or building. The game's fell on (2,5) and
+  // the Scorpion2 #16028 there was gone; RockThrown #16076 at (2,3) stood.
+  // The prediction's first outcome is (2,3) (the rock dies instead): a
+  // chance outcome, which live_play takes from the prediction's branches.
+  const Recording before = live_fixture("fuzz_cavebomb_t3_end_turn.json");
+  const Recording after = live_fixture("fuzz_cavebomb_t4_after_enemy.json");
+  const int32_t scorpion = 16028, rock = 16076, old_bomb = 16032;
+  REQUIRE(after.board.find_pawn(scorpion) == nullptr);
+  REQUIRE(after.board.find_pawn(rock) != nullptr);
+  auto run = [&](int pick, int* options, Point* drop) {
+    Board b = before.board;
+    TurnContext ctx = turn_context(before, Visibility::Full);
+    ctx.choose = [&](const ChanceRecord& c) {
+      if (c.kind != ChanceKind::MissionRandom) return 0;
+      *options = c.options;
+      return pick;
+    };
+    const PhaseResult r = E.end_turn(b, ctx);
+    for (const PhaseEvent& e : r.events) {
+      if (e.type == PhaseEventType::MissionHook) *drop = e.point;
+    }
+    return b;
+  };
+  int options = 0;
+  Point drop = kInvalidPoint;
+  const Board first = run(0, &options, &drop);
+  // The 4x4 centre less LeapMech (2,2), TeleMech (5,4) and the building (4,5).
+  CHECK(options == 13);
+  CHECK(drop == Point{2, 3});
+  CHECK(dead(first, old_bomb));
+  CHECK(dead(first, rock));
+  CHECK_FALSE(dead(first, scorpion));
+  int game_pick = -1;
+  for (int k = 0; k < options; ++k) {
+    int n = 0;
+    Point at = kInvalidPoint;
+    const Board b = run(k, &n, &at);
+    if (at != Point{2, 5}) continue;
+    game_pick = k;
+    CHECK(dead(b, scorpion));
+    CHECK_FALSE(dead(b, rock));
+    // Every unit of the turn start as the game left it (alive, HP).
+    for (const Pawn& p : before.board.pawns()) {
+      if (!p.alive()) continue;
+      CAPTURE(p.uid);
+      const Pawn* g = after.board.find_pawn(p.uid);
+      const Pawn* e = b.find_pawn(p.uid);
+      const bool engine_alive = e && e->alive() && !e->fallen;
+      CHECK(engine_alive == (g != nullptr));
+      if (g && e) CHECK(e->hp == g->hp);
+    }
+    const Pawn* fresh = nullptr;
+    for (const Pawn& p : b.pawns()) {
+      if (symbol_name(p.type) == "BigBomb" && p.alive()) fresh = &p;
+    }
+    REQUIRE(fresh != nullptr);
+    CHECK(fresh->pos == Point{2, 5});
+    CHECK(fresh->hp == 4);
+  }
+  CHECK(game_pick > 0);
+}
+
 // ---- Environment coverage on recorded boards ---------------------------------------------
 
 namespace {

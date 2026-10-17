@@ -166,6 +166,9 @@ CLICK_WAIT = 8
 # game leaves the mission (the Victory screen after the final Cave turn).
 SILENT_AFTER = 15.0
 FINAL_MISSION = "Mission_Final_Cave"
+# The enemy phase's other hidden-choice outcomes compared when the default
+# one differs from the game (itb_live predict "branches").
+ENEMY_BRANCHES = 64
 REACTIVATION = "Mission_Reactivation"
 ACTION_TIMEOUT = 60.0
 
@@ -567,8 +570,13 @@ class Engine:
                     req["survival_cap_strict"] = True
         return self.request(req)
 
-    def predict(self, path: Path, plan: list) -> dict:
-        return self.request({"cmd": "predict", "state": str(path), "plan": plan})
+    def predict(self, path: Path, plan: list, branches: int = 0) -> dict:
+        """branches > 0: also up to that many other outcomes of the enemy
+        phase's hidden choices ("enemy_branches", itb_live predict)."""
+        req = {"cmd": "predict", "state": str(path), "plan": plan}
+        if branches > 0:
+            req["branches"] = branches
+        return self.request(req)
 
     def board(self, path: Path) -> dict:
         return self.request({"cmd": "board", "state": str(path)})["board"]
@@ -2184,6 +2192,34 @@ def resist_info(pred: dict) -> dict | None:
     return {"before": pred.get("after_player") or pred.get("start") or {}, "tiles": tiles}
 
 
+def branch_text(branch: dict) -> str:
+    """One enemy_branches entry in words: its picks and the mission hooks it ran."""
+    picks = ", ".join(f"{c.get('kind')} {c.get('pick', 0) + 1}/{c.get('options')}" for c in branch.get("choices", []))
+    hooks = [f"{e.get('detail')} at {visual(*e['point'])}" if e.get("point") else str(e.get("detail"))
+             for e in (branch.get("enemy_phase") or {}).get("events", []) if e.get("type") == "mission hook"]
+    return picks + (f" ({'; '.join(hooks)})" if hooks else "")
+
+
+def matching_branch(pred: dict, branched: dict, compare) -> tuple | None:
+    """The first of `branched`'s enemy_branches (itb_live predict with
+    "branches": the enemy phase's other hidden-choice outcomes, each with the
+    same player turn as `pred`) whose board `compare` finds no difference
+    in: (the prediction with that branch's after_enemy and enemy_phase,
+    [], its notes plus one naming the outcome). None if none matches. The
+    prediction took the first outcome of each choice (a random pick the
+    solver weighs evenly, an order it takes worst case), so another one
+    the game took is a chance outcome, not a finding."""
+    for branch in branched.get("enemy_branches") or []:
+        alt = dict(pred, after_enemy=branch["after_enemy"], enemy_phase=branch["enemy_phase"])
+        diffs, notes = compare(alt)
+        if not diffs:
+            dflt = branch_text({"choices": (pred.get("enemy_phase") or {}).get("hidden_choices", []),
+                                "enemy_phase": pred.get("enemy_phase")})
+            return alt, [], notes + [f"hidden choice: the game took {branch_text(branch)}; the prediction "
+                                     f"took {dflt} (a chance outcome)"]
+    return None
+
+
 def end_turn(ctx) -> list:
     """End Turn, wait for the next player turn, compare with the engine."""
     bridge, engine, run, args = ctx.bridge, ctx.engine, ctx.run, ctx.args
@@ -2207,6 +2243,7 @@ def end_turn(ctx) -> list:
         run.save_state(state, "end_turn_raw")
     if queued_notes:
         run.event("queued", {"state": path.name, "notes": queued_notes})
+    pred_path = path
     pred = engine.predict(path, [])
     run.save_json(prediction_path(path).name, pred)
     if args.dry_run:
@@ -2279,30 +2316,49 @@ def end_turn(ctx) -> list:
     after = bridge.settled_state()
     path = run.save_state(after, "after_enemy")
     live = engine.board(path)
-    # Acid pools a Vek could pick up moving during AI planning: those before
-    # the enemy phase and those the engine predicts it made (live 2026-10-10:
-    # Centipedes walked onto the pools their own attacks had left).
-    pools = frozenset((t["x"], t["y"]) for t in state.get("tiles", []) if t.get("acid")) | \
-        frozenset(tuple(xy) for xy in pred["after_enemy"].get("acid_tiles", []))
     mines = lambda s, item="Item_Mine": {(t["x"], t["y"]) for t in s.get("tiles", []) if t.get("item") == item}
     # Smoke laid during AI planning (a Mosquito smokes its target as it
     # queues): smoked in the game, not in the prediction (an itb_live without
     # "smoke_tiles": not smoked before the phase either).
     smoked = lambda s: {(t["x"], t["y"]) for t in s.get("tiles", []) if t.get("smoke")}
-    engine_smoke = ({tuple(xy) for xy in pred["after_enemy"]["smoke_tiles"]}
-                    if "smoke_tiles" in pred["after_enemy"] else smoked(state))
-    diffs, notes = diff_boards(pred["after_enemy"], live, known, enemy_phase=True, acid_pools=pools,
-                               smoke_new=frozenset(smoked(after) - engine_smoke),
-                               mines_gone=frozenset(mines(state) - mines(after)),
-                               freeze_mines_gone=frozenset((mines(state, "Freeze_Mine")
-                                                            | freeze_mines_laid(pred["after_enemy"], live))
-                                                           - mines(after, "Freeze_Mine")),
-                               repair_mines_gone=frozenset(mines(state, "Item_Repair_Mine")
-                                                           - mines(after, "Item_Repair_Mine")),
-                               random_thaw=any(e.get("type") == "thawed"
-                                               for e in (pred.get("enemy_phase") or {}).get("events", [])),
-                               resist=resist_info(pred),
-                               xp_split=bool((pred.get("enemy_phase") or {}).get("xp_split")))
+
+    def compare(p: dict) -> tuple:
+        """diff_boards of the prediction `p` (or one of its enemy_branches)."""
+        e = p["after_enemy"]
+        # Acid pools a Vek could pick up moving during AI planning: those
+        # before the enemy phase and those the engine predicts it made (live
+        # 2026-10-10: Centipedes walked onto the pools their own attacks had
+        # left).
+        pools = frozenset((t["x"], t["y"]) for t in state.get("tiles", []) if t.get("acid")) | \
+            frozenset(tuple(xy) for xy in e.get("acid_tiles", []))
+        engine_smoke = {tuple(xy) for xy in e["smoke_tiles"]} if "smoke_tiles" in e else smoked(state)
+        phase = p.get("enemy_phase") or {}
+        return diff_boards(e, live, known, enemy_phase=True, acid_pools=pools,
+                           smoke_new=frozenset(smoked(after) - engine_smoke),
+                           mines_gone=frozenset(mines(state) - mines(after)),
+                           freeze_mines_gone=frozenset((mines(state, "Freeze_Mine") | freeze_mines_laid(e, live))
+                                                       - mines(after, "Freeze_Mine")),
+                           repair_mines_gone=frozenset(mines(state, "Item_Repair_Mine")
+                                                       - mines(after, "Item_Repair_Mine")),
+                           random_thaw=any(ev.get("type") == "thawed" for ev in phase.get("events", [])),
+                           resist=resist_info(p),
+                           xp_split=bool(phase.get("xp_split")))
+
+    diffs, notes = compare(pred)
+    if diffs and (pred.get("enemy_phase") or {}).get("hidden_choices"):
+        # The prediction took the first outcome of each hidden choice (the
+        # Final Cave's bomb drop tile, an environment order); the game may
+        # have taken another (fuzz 20261017_000242 sample 4: the new bomb
+        # fell on the Scorpion at C6, the prediction's on the rock at E6).
+        branched = engine.predict(pred_path, [], branches=ENEMY_BRANCHES)
+        run.save_json(prediction_path(pred_path).stem + "_branches.json", branched)
+        found = matching_branch(pred, branched, compare)
+        if found is not None:
+            pred, diffs, notes = found
+        else:
+            notes.append(f"no other outcome of the hidden choices matches either "
+                         f"({len(branched.get('enemy_branches') or [])} compared"
+                         f"{'' if branched.get('enemy_branches_complete', True) else ', not all'})")
     run.event("enemy_phase", {"state": path.name, "diffs": diffs, "notes": notes})
     # Still underground (the engine has it so, the game does not list it) or
     # resurfaced (listed again: dropped).
