@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "itb/movement.hpp"
+#include "itb/tile_rules.hpp"
 
 using namespace itb;
 
@@ -792,6 +793,30 @@ TEST_CASE("A4 burrowing puts out fire") {
   p.fire = true;
   CHECK(ai_move(b, p.uid, {3, 5}) == Point{3, 5});
   CHECK_FALSE(p.fire);
+}
+
+TEST_CASE("A4b the AI's move picks fire up where it ends, and a burrow puts it out first") {
+  // Live run 41 m41 (Mission_Final_Cave turn 3): a Scorpion2 walked from D1
+  // onto the burning F2 while the AI planned and burned there. Live run 43
+  // m38 (Mission_JellyBoss turn 1): a Burrower2 set alight by the
+  // BurnbugBoss burrowed away from its flames and came up unlit.
+  Board b;
+  RulesContext ctx;
+  b.tile({6, 2}).fire = FireState::Burning;
+  b.tile({3, 4}).fire = FireState::Burning;
+  const int32_t walker = vek(b, {7, 4}).uid;
+  const int32_t digger = vek(b, {3, 4}).uid;
+  const int32_t to_fire = vek(b, {0, 0}).uid;
+  pawn(b, digger).burrows = pawn(b, to_fire).burrows = true;
+  pawn(b, digger).fire = true;
+  CHECK(ai_move(b, walker, {6, 2}, &ctx) == Point{6, 2});
+  CHECK(pawn(b, walker).fire);
+  CHECK(ai_move(b, digger, {1, 2}, &ctx) == Point{1, 2});
+  CHECK_FALSE(pawn(b, digger).fire);
+  CHECK(b.tile({3, 4}).on_fire());  // the tile it left keeps burning
+  // Burrowing onto a burning tile: put out on the dive, lit again on arrival.
+  CHECK(ai_move(b, to_fire, {3, 4}, &ctx) == Point{3, 4});
+  CHECK(pawn(b, to_fire).fire);
 }
 
 TEST_CASE("A5 a non-Pushable pawn ignores others' move effects") {

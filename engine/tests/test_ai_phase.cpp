@@ -299,6 +299,46 @@ TEST_CASE("AI phase: a Mosquito's planning smoke puts out the burning mech it ta
   CHECK(m.hp == 1);
 }
 
+TEST_CASE("AI phase: a burning Burrower burrows its fire out (live Mission_JellyBoss)") {
+  NEED_ENGINE();
+  // Live 20261017_003813 m38 turn 1 -> 2 (run 43): the BurnbugBoss at D3
+  // (bridge (3,5)) fires with its flames on the four tiles around it, which
+  // sets Burrower2#485 alight on D5 (3,4). That is where end_turn stops, and
+  // the driver compared the game's next board with it ("fire: engine True,
+  // game False"). The AI then moves the Burrower, and its move is a burrow,
+  // which puts the fire out: the game shows it unlit at F7 (1,2), aiming at
+  // E7 (1,3), with D5 still burning.
+  const Recording rec = fixture("live_jellyboss_burrow_t1_end_turn.json");
+  Board b = rec.board;
+  const TurnContext ctx = turn_context(rec, Visibility::Full);
+  constexpr int32_t kBurrower = 485;
+  constexpr Point kFrom{3, 4};
+  const PhaseResult phase = E.end_turn(b, ctx);
+  REQUIRE_FALSE(phase.mission_ended);
+  {
+    const Pawn* p = b.find_pawn(kBurrower);
+    REQUIRE(p != nullptr);
+    CHECK(p->pos == kFrom);
+    CHECK(p->fire);
+    CHECK(p->hp == 6);
+    CHECK(b.tile(kFrom).on_fire());
+  }
+  AiPhaseOptions o;
+  o.seed = 239398908;  // the save's aiSeed at the start of turn 1
+  o.last_target = {{0, {3, 5}}, {1, {7, 0}}, {2, {4, 2}}, {485, {2, 4}}, {486, {2, 3}},
+                   {487, {2, 5}}, {488, {1, 2}}, {503, {1, 3}}};
+  o.actions = action_options(ctx);
+  const AiPhaseResult r = E.ai_phase(b, o);
+  CHECK(r.lua_errors.empty());
+  const Pawn* p = b.find_pawn(kBurrower);
+  REQUIRE(p != nullptr);
+  CHECK(p->pos == Point{1, 2});
+  CHECK(p->queued.target == Point{1, 3});
+  CHECK_FALSE(p->fire);
+  CHECK(p->hp == 6);
+  CHECK(b.tile(kFrom).on_fire());
+}
+
 TEST_CASE("deployment: outcome boards and a small search on a recorded drop zone") {
   NEED_ENGINE();
   const Recording rec = fixture("live_volatile_t0_deployed.json");
