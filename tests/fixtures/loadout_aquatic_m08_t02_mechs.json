@@ -1,0 +1,338 @@
+{
+ "mission_id": "Mission_ShamanBoss",
+ "phase": "combat_player",
+ "turn": 2,
+ "units": [
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 3,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": false,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 3,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 3,
+   "mech": true,
+   "minor": false,
+   "move": 3,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Aquatic",
+    "level": 2,
+    "skill1": 13,
+    "skill2": 4,
+    "xp": 50
+   },
+   "pilot_id": "Pilot_Aquatic",
+   "pilot_level": 2,
+   "pilot_skills": [
+    "skill1=13",
+    "skill2=4"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 1,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": false,
+    "health": 3,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 3,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "LaserMech",
+   "uid": 0,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Prime_Lasermech",
+     "damaged": false,
+     "id": "Prime_Lasermech",
+     "limited": 0,
+     "mod1": [
+      0
+     ],
+     "mod2": [
+      0,
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    }
+   ],
+   "weapons": [
+    "Prime_Lasermech"
+   ],
+   "weapons_exact": [
+    "Prime_Lasermech"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 1,
+   "y": 3
+  },
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 5,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": false,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 5,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 5,
+   "mech": true,
+   "minor": false,
+   "move": 5,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Pinnacle",
+    "level": 1,
+    "skill1": 8,
+    "skill2": 5,
+    "xp": 0
+   },
+   "pilot_id": "Pilot_Pinnacle",
+   "pilot_level": 1,
+   "pilot_skills": [
+    "skill1=8",
+    "skill2=5"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 1,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": false,
+    "health": 3,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 4,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "PierceMech",
+   "uid": 1,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Brute_PierceShot",
+     "damaged": false,
+     "id": "Brute_PierceShot",
+     "limited": 0,
+     "mod1": [
+      0,
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    }
+   ],
+   "weapons": [
+    "Brute_PierceShot"
+   ],
+   "weapons_exact": [
+    "Brute_PierceShot"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 4,
+   "y": 3
+  },
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 4,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": true,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 1,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 2,
+   "mech": true,
+   "minor": false,
+   "move": 4,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Detritus",
+    "level": 0,
+    "skill1": 13,
+    "skill2": 8,
+    "xp": 21
+   },
+   "pilot_id": "Pilot_Detritus",
+   "pilot_level": 0,
+   "pilot_skills": [
+    "skill1=13",
+    "skill2=8"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 3,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": true,
+    "health": 2,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 4,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "ScienceMech",
+   "uid": 2,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Science_Pullmech",
+     "damaged": false,
+     "id": "Science_Pullmech",
+     "limited": 0,
+     "mod1": [
+      0
+     ],
+     "mod2": [
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    },
+    {
+     "base": "Science_Shield",
+     "damaged": false,
+     "id": "Science_Shield",
+     "limited": 2,
+     "mod1": [
+      0,
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 1,
+     "uses": 2,
+     "uses_basis": "calibrated",
+     "uses_saved": 2
+    }
+   ],
+   "weapons": [
+    "Science_Pullmech",
+    "Science_Shield"
+   ],
+   "weapons_exact": [
+    "Science_Pullmech",
+    "Science_Shield"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 5,
+   "y": 2
+  }
+ ]
+}

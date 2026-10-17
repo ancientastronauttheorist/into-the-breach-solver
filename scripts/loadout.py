@@ -24,7 +24,9 @@ region's map_data, `pawn<N>` tables; in a mission SquadData has
   movePower / healthPower        the mech's own upgrades (left alone here)
   pilot                          id, name, name_id, skill1/skill2 (learned at
                                  level 1 / 2), exp, level, power (cells of a
-                                 pilot Skill with a PowerCost)
+                                 pilot Skill with a PowerCost: Pilot::IsAbility
+                                 grants that Skill only while the first is
+                                 set, the learned skills always)
   reactor                        iNormalPower / iUsedPower (free / used
                                  cores; cell value 1), iBonusPower /
                                  iUsedBonus (pilot Reactor skill and Zoltan;
@@ -32,7 +34,9 @@ region's map_data, `pawn<N>` tables; in a mission SquadData has
   health / max_health            max_health must equal what
                                  Pawn::ComputeHealthTotal gives, else
                                  Pawn::GetHealthTotal resets it and heals the
-                                 mech to full: Zoltan_Skill 1; otherwise the
+                                 mech to full: Zoltan_Skill 1 (always: it has
+                                 no PowerCost, so Pilot::IsAbility grants it
+                                 while the pilot is in the mech); otherwise the
                                  type's Health + the learned skills' health
                                  (Health, Skilled: +2) + 2 for healthPower +
                                  3 for Rock_Skill + Networked Armor (+1, +2
@@ -829,12 +833,18 @@ def pilot_skill(items: Items, pilot: dict | None) -> str:
 
 
 def pilot_powered(items: Items, pilot: dict | None) -> bool:
-    """Pilot::IsAbility for a Skill with a PowerCost: its first cell set."""
+    """Pilot::IsAbility for the pilot's own Skill: always for one without a
+    PowerCost, else while its first power cell is set (PowerState::IsPowered;
+    a pilot the player never powered in the mech bay has {0} / {0, 0})."""
     if not pilot or pilot.get("id") not in items.pilots:
         return False
     if items.pilots[pilot["id"]].power_cost <= 0:
         return True
-    cells = pilot.get("power")
+    return cells_on(pilot.get("power"))
+
+
+def cells_on(cells) -> bool:
+    """PowerState::IsPowered: the first cell set."""
     return isinstance(cells, list) and bool(cells) and cells[0] != 0
 
 
@@ -878,9 +888,11 @@ def slot_dict(items: Items, mech_type: str, s: SlotState) -> dict:
             "power_cost": w.power_cost if w else 0, "damaged": s.damaged, "starting": s.starting, "changed": False}
 
 
-def plan_loadout(items: Items, doc: dict, specs: list) -> list:
+def plan_loadout(items: Items, doc: dict, specs: list, rewrite_all: bool = False) -> list:
     """The squad after the specs, as MechPlans (every mech, changed or not);
-    LoadoutError if a spec is illegal."""
+    LoadoutError if a spec is illegal. rewrite_all: every mech is rewritten
+    (its reactor re-allocated) even where the specs change nothing (the
+    --check round trip)."""
     mechs = squad(doc)
     by_index = {m.index: m for m in mechs}
     for sp in specs:
@@ -890,7 +902,7 @@ def plan_loadout(items: Items, doc: dict, specs: list) -> list:
     for m in mechs:
         slots = [slot_dict(items, m.type, s) if s else None for s in m.slots]
         plans.append(MechPlan(m.index, m.type, slots, copy.deepcopy(m.pilot), dict(m.reactor), m.health,
-                              m.max_health, False, move_power=list(m.move_power),
+                              m.max_health, rewrite_all, move_power=list(m.move_power),
                               health_power=list(m.health_power)))
     plan_by = {p.index: p for p in plans}
     for sp in specs:
@@ -1019,8 +1031,7 @@ def finish(items: Items, mechs: list, plans: list, mutation: int = 0) -> None:
     Receiver, which gives the mechs the board's psion `mutation`)."""
     old_by = {m.index: m for m in mechs}
     # HP: a changed squad passive changes every mech's total.
-    old_plans = [MechPlan(m.index, m.type, [slot_dict(items, m.type, s) if s else None for s in m.slots], m.pilot,
-                          {}, m.health, m.max_health, False) for m in mechs]
+    old_plans = squad_plans(items, mechs)
     ammo = squad_passive(items, plans, "Passive_Ammo")
     leech = squad_passive(items, plans, "Psion_Leech")
     if leech != squad_passive(items, old_plans, "Psion_Leech"):
@@ -1046,6 +1057,8 @@ def finish(items: Items, mechs: list, plans: list, mutation: int = 0) -> None:
         if old_total != m.max_health:
             p.notes.append(f"recorded max_health {m.max_health}, computed {old_total}: kept the difference")
         p.max_hp = max(1, m.max_health + new_total - old_total)
+        if pilot_skill(items, p.pilot) == "Zoltan_Skill":
+            p.max_hp = 1  # whatever the recorded difference: ComputeHealthTotal gives 1
         if m.health <= 0:
             p.hp = 0
         else:
@@ -1261,9 +1274,10 @@ def summary_edits(text: str, doc: dict, plans: list) -> list:
     return edits
 
 
-def rewrite_save(text: str, plans: list) -> str:
-    """The save text with each changed mech rewritten as planned."""
-    doc = parse_save(text)
+def rewrite_save(text: str, plans: list, doc: dict | None = None) -> str:
+    """The save text with each changed mech rewritten as planned (`doc`:
+    the text already parsed)."""
+    doc = doc or parse_save(text)
     nodes = {int(p.get("id").value): p for p in battle_pawns(doc)
              if p.get("mech") is not None and p.get("mech").value is True}
     edits = []
@@ -1379,8 +1393,13 @@ def patch_state(state: dict, inj: Injection, items: Items) -> dict:
 
 def verify_state(state: dict, inj: Injection) -> list:
     """Differences between a bridge state after the load and the injected
-    loadout: weapons_exact, weapon_slots ids and power, pilot id, HP; the
-    pilot Skill's live IsAbility (skill_active) for a powered one."""
+    loadout: weapons_exact, weapon_slots ids, power and whether each is
+    powered (as injected: a kept weapon at {0} is off), pilot id, HP; the
+    pilot Skill's live IsAbility (skill_active) against its power cells for
+    one with a PowerCost (on or off as injected: a kept pilot the player
+    never powered is off). A Zoltan mech's max_hp is 1 in the game; bridges
+    before 2026-10-17 said the type's Health (live_play.fill_zoltan_max_hp
+    fills it in)."""
     out = []
     units = {u.get("uid"): u for u in state.get("units", []) if u.get("mech") and u.get("team") == 1}
     for p in inj.changed:
@@ -1399,14 +1418,24 @@ def verify_state(state: dict, inj: Injection) -> list:
             for k in ("power", "mod1", "mod2"):
                 if list(ws.get(k) or []) != list(s[k]):
                     out.append(f"mech {p.index} {s['id']}: {k} {ws.get(k)}, injected {s[k]}")
-            if ws.get("powered") is False:
-                out.append(f"mech {p.index} {s['id']}: unpowered")
+            # On or off as injected: a kept weapon the player never powered
+            # stays off (a Ranged_Dual at {0}).
+            want = slot_bridge(s, 0)["powered"]
+            if isinstance(ws.get("powered"), bool) and ws["powered"] != want:
+                out.append(f"mech {p.index} {s['id']}: {'powered' if ws['powered'] else 'unpowered'} in the game, "
+                           f"injected {'powered' if want else 'unpowered'} (power {s['power']})")
         if p.pilot:
             pid = u.get("pilot_id") or (u.get("pilot") or {}).get("id")
             if pid != p.pilot["id"]:
                 out.append(f"mech {p.index} {p.type}: pilot {pid}, injected {p.pilot['id']}")
-            if "power" in p.pilot and (u.get("pilot") or {}).get("skill_active") is False:
-                out.append(f"mech {p.index}: pilot {p.pilot['id']}'s skill is off in the game (IsAbility)")
+            # The skill as injected: a kept pilot keeps its cells, so one
+            # the player never powered stays off (fuzz 20261017_164513:
+            # Silica and Archimedes at {0} were taken for a failed rewrite).
+            got = (u.get("pilot") or {}).get("skill_active")
+            want = cells_on(p.pilot.get("power"))
+            if "power" in p.pilot and isinstance(got, bool) and got != want:
+                out.append(f"mech {p.index}: pilot {p.pilot['id']}'s skill is {'on' if got else 'off'} in the game "
+                           f"(IsAbility), injected {'on' if want else 'off'} (power {p.pilot['power']})")
         if (u.get("hp"), u.get("max_hp")) != (p.hp, p.max_hp):
             out.append(f"mech {p.index} {p.type}: HP {u.get('hp')}/{u.get('max_hp')}, injected {p.hp}/{p.max_hp}")
         if p.shield and u.get("shield") is False:
@@ -1488,9 +1517,141 @@ class Support:
 
 # ------------------------------------------------------------------ CLI
 
-def check_recordings(items: Items, root: Path, limit: int = 0) -> int:
+def squad_plans(items: Items, mechs: list) -> list:
+    """The squad as MechPlans as it is (for squad_passive)."""
+    return [MechPlan(m.index, m.type, [slot_dict(items, m.type, s) if s else None for s in m.slots], m.pilot,
+                     {}, m.health, m.max_health, False) for m in mechs]
+
+
+def mech_problems(items: Items, m: MechState, plans: list) -> list:
+    """(kind, text) of each way a mech of a save does not fit the item
+    tables: weapon power and mod cells, the class flag, max_health against
+    Pawn::ComputeHealthTotal, the reactor's used and bonus cores."""
+    out = []
+    for s in m.slots:
+        if not s:
+            continue
+        w = items.weapon(s.exact(items)) if items.exists(s.base) else None
+        if w is None:
+            out.append(("unknown_weapon", f"{m.type} {s.base}: no such weapon table"))
+            continue
+        pen = items.class_penalty(m.type, w)
+        if len(s.power) != w.power_cost + pen:
+            out.append(("power_cells", f"{m.type} {s.base}: power {s.power}, cost {w.power_cost} + penalty {pen}"))
+        if pen != s.power_class:
+            out.append(("power_class", f"{m.type} {s.base}: class flag {s.power_class}, computed {pen}"))
+        if len(s.mod1) != w.mod_cells(0) or len(s.mod2) != w.mod_cells(1):
+            out.append(("mod_cells", f"{s.base}: mods {s.mod1} {s.mod2}, cost {w.upgrade_cost}"))
+    hp = health_total(items, m.type, m.pilot, m.health_power, plans, m.mutation)
+    if hp != m.max_health:
+        out.append(("max_health", f"{m.type} pilot {(m.pilot or {}).get('id')} {_learned(m.pilot)}: "
+                                  f"max_health {m.max_health}, computed {hp}"))
+    r = m.reactor
+    cells = [c for s in m.slots if s for c in s.power + s.mod1 + s.mod2] + m.move_power + m.health_power + \
+        list((m.pilot or {}).get("power") or [])
+    used = {v: sum(1 for c in cells if c == v) for v in (1, 2, 3)}
+    if (used[1], used[2], used[3]) != (r.get("iUsedPower"), r.get("iUsedBonus"), r.get("iUsedUndo")):
+        out.append(("reactor_used", f"{m.type}: cells {used}, reactor {r}"))
+    bonus = sum(SKILL_REACTOR.get(s, 0) for s in _learned(m.pilot)) + (pilot_skill(items, m.pilot) == "Zoltan_Skill")
+    # (a Reactor skill learned in this mission gets its core in the mech bay)
+    if bonus < int(r.get("iBonusPower", 0)) + int(r.get("iUsedBonus", 0)):
+        out.append(("reactor_bonus", f"{m.type} {_learned(m.pilot)}: bonus {bonus}, reactor {r}"))
+    return out
+
+
+def powered_items(items: Items, m: MechState) -> tuple:
+    """What a mech's cells switch on: each weapon (exact id, IsPowered) and
+    the pilot's own Skill (Pilot::IsAbility)."""
+    ws = []
+    for s in m.slots:
+        if s:
+            w = items.weapon(s.exact(items)) if items.exists(s.exact(items)) else None
+            ws.append((s.exact(items), cells_on(s.power) or (not s.power and not s.power_class
+                                                              and (w is None or w.power_cost == 0))))
+    return tuple(ws), pilot_powered(items, m.pilot)
+
+
+def recorded_state(save: Path) -> dict | None:
+    """The bridge state recorded with a turn-start checkpoint (its
+    _solve_input.json), when it has the loadout fields verify_state reads."""
+    try:
+        d = json.loads(save.with_name(save.name.replace("_saveData.lua", "_solve_input.json")).read_text())
+    except (OSError, ValueError):
+        return None
+    data = d.get("data", {}) if isinstance(d, dict) else {}
+    st = data.get("bridge_state") if isinstance(data, dict) and "bridge_state" in data else d
+    mechs = [u for u in (st or {}).get("units", []) if u.get("mech") and u.get("team") == 1]
+    return st if mechs and all("weapons_exact" in u and "weapon_slots" in u for u in mechs) else None
+
+
+# Pilots the round trip injects by turns: each with a PowerCost, and Zoltan.
+def round_trip_pilots(items: Items) -> list:
+    return sorted(pid for pid, p in items.pilots.items() if p.power_cost > 0) + ["Pilot_Zoltan"]
+
+
+def round_trip(items: Items, text: str, doc: dict, mechs: list, state: dict | None, n: int) -> list:
+    """(kind, text) of each problem of two rewrites of a checkpoint:
+
+    - every mech rewritten with nothing changed (its reactor re-allocated):
+      the save still fits the item tables, every weapon and pilot Skill is
+      on or off as before (a pilot the player never powered stays off),
+      HP stays, and the recorded bridge state passes verify_state as it is
+      (the game shows what it showed: fuzz 20261017_164513, Silica and
+      Archimedes unpowered);
+    - a pilot injected into one mech (turn by turn: each pilot with a
+      PowerCost, then Zoltan): it is powered, the save fits the tables
+      (Zoltan: max_health 1, as Pawn::ComputeHealthTotal; fuzz
+      20261017_135355), and the patched state passes verify_state."""
+    out = []
+    plans = plan_loadout(items, doc, [], rewrite_all=True)
+    new = squad(parse_save(rewrite_save(text, plans, doc)))
+    after = squad_plans(items, new)
+    for a, b in zip(mechs, new):
+        out += [(f"rewrite_{k}", t) for k, t in mech_problems(items, b, after)]
+        if powered_items(items, a) != powered_items(items, b):
+            out.append(("rewrite_powered", f"{a.type}: on before {powered_items(items, a)}, after "
+                                           f"{powered_items(items, b)}"))
+        if (a.health, a.max_health) != (b.health, b.max_health):
+            out.append(("rewrite_hp", f"{a.type}: HP {a.health}/{a.max_health} -> {b.health}/{b.max_health}"))
+    if state is not None:
+        out += [("rewrite_verify", t) for t in verify_state(state, Injection([], plans, {}))]
+    pilots = round_trip_pilots(items)
+    alive = [m for m in mechs if m.health > 0]
+    if not alive:
+        return out
+    target = alive[n % len(alive)]
+    for k in range(len(pilots)):
+        pid = pilots[(n + k) % len(pilots)]
+        if pid == (target.pilot or {}).get("id"):
+            continue  # not an injection
+        try:
+            specs = [MechSpec(target.index, pilot=pid)]
+            plans = plan_loadout(items, doc, specs)
+        except LoadoutError:
+            continue
+        new_text = rewrite_save(text, plans, doc)
+        new = squad(parse_save(new_text))
+        after = squad_plans(items, new)
+        b = next(m for m in new if m.index == target.index)
+        out += [(f"inject_{k2}", f"{pid}: {t}") for k2, t in mech_problems(items, b, after)]
+        if not pilot_powered(items, b.pilot):
+            out.append(("inject_pilot_power", f"{target.type} {pid}: power {(b.pilot or {}).get('power')}"))
+        if pid == "Pilot_Zoltan":
+            bf = b.node.get("bForceField")
+            if (b.health, b.max_health) != (1, 1) or not (bf is not None and bf.value is True):
+                out.append(("inject_zoltan", f"{target.type}: HP {b.health}/{b.max_health}, shield "
+                                             f"{bf.value if bf is not None else None}"))
+        if state is not None:
+            inj = Injection(specs, plans, {"saveData.lua": new_text})
+            out += [("inject_verify", f"{pid}: {t}") for t in verify_state(patch_state(state, inj, items), inj)]
+        break
+    return out
+
+
+def check_recordings(items: Items, root: Path, limit: int = 0, round_trips: bool = True) -> int:
     """Item tables against every recorded checkpoint: power, mod and
-    max_health as the game wrote them vs. as planned here."""
+    max_health as the game wrote them vs. as planned here; then, unless
+    round_trips is off, the rewrites of each (round_trip)."""
     from collections import Counter
     bad = Counter()
     n = 0
@@ -1498,56 +1659,29 @@ def check_recordings(items: Items, root: Path, limit: int = 0) -> int:
     files = sorted(root.glob("*/m*_turn_*_saveData.lua"))
     if limit:
         files = files[::max(1, len(files) // limit)]
-    for f in files:
+    for i, f in enumerate(files):
+        where = f"{f.parent.name}/{f.name}"
         try:
-            doc = parse_save(f.read_text(errors="replace"))
+            text = f.read_text(errors="replace")
+            doc = parse_save(text)
             mechs = squad(doc)
         except (ValueError, LoadoutError) as e:
             bad["unparsed"] += 1
             examples.append(f"{f}: {e}")
             continue
-        plans = [MechPlan(m.index, m.type, [slot_dict(items, m.type, s) if s else None for s in m.slots], m.pilot,
-                          {}, m.health, m.max_health, False) for m in mechs]
+        plans = squad_plans(items, mechs)
+        problems = []
         for m in mechs:
             n += 1
-            for s in m.slots:
-                if not s:
-                    continue
-                w = items.weapon(s.exact(items)) if items.exists(s.base) else None
-                if w is None:
-                    bad["unknown_weapon"] += 1
-                    continue
-                pen = items.class_penalty(m.type, w)
-                if len(s.power) != w.power_cost + pen:
-                    bad["power_cells"] += 1
-                    examples.append(f"{f.parent.name}/{f.name} {m.type} {s.base}: power {s.power}, "
-                                    f"cost {w.power_cost} + penalty {pen}")
-                if pen != s.power_class:
-                    bad["power_class"] += 1
-                    examples.append(f"{f.parent.name}/{f.name} {m.type} {s.base}: class flag {s.power_class}, "
-                                    f"computed {pen}")
-                if len(s.mod1) != w.mod_cells(0) or len(s.mod2) != w.mod_cells(1):
-                    bad["mod_cells"] += 1
-                    examples.append(f"{f.parent.name}/{f.name} {s.base}: mods {s.mod1} {s.mod2}, "
-                                    f"cost {w.upgrade_cost}")
-            hp = health_total(items, m.type, m.pilot, m.health_power, plans, m.mutation)
-            if hp != m.max_health:
-                bad["max_health"] += 1
-                examples.append(f"{f.parent.name}/{f.name} {m.type} pilot {(m.pilot or {}).get('id')} "
-                                f"{_learned(m.pilot)}: max_health {m.max_health}, computed {hp}")
-            r = m.reactor
-            cells = [c for s in m.slots if s for c in s.power + s.mod1 + s.mod2] + m.move_power + m.health_power + \
-                list((m.pilot or {}).get("power") or [])
-            used = {v: sum(1 for c in cells if c == v) for v in (1, 2, 3)}
-            if (used[1], used[2], used[3]) != (r.get("iUsedPower"), r.get("iUsedBonus"), r.get("iUsedUndo")):
-                bad["reactor_used"] += 1
-                examples.append(f"{f.parent.name}/{f.name} {m.type}: cells {used}, reactor {r}")
-            bonus = sum(SKILL_REACTOR.get(s, 0) for s in _learned(m.pilot)) + \
-                (pilot_skill(items, m.pilot) == "Zoltan_Skill")
-            # (a Reactor skill learned in this mission gets its core in the mech bay)
-            if bonus < int(r.get("iBonusPower", 0)) + int(r.get("iUsedBonus", 0)):
-                bad["reactor_bonus"] += 1
-                examples.append(f"{f.parent.name}/{f.name} {m.type} {_learned(m.pilot)}: bonus {bonus}, reactor {r}")
+            problems += mech_problems(items, m, plans)
+        if round_trips and not problems:
+            try:
+                problems += round_trip(items, text, doc, mechs, recorded_state(f), i)
+            except (ValueError, LoadoutError) as e:
+                problems.append(("round_trip_error", str(e)))
+        for kind, t in problems:
+            bad[kind] += 1
+            examples.append(f"{where} {t}")
     print(f"{n} mechs in {len(files)} checkpoints: " + (", ".join(f"{k} {v}" for k, v in bad.items()) or "all match"))
     for e in examples[:40]:
         print("  " + e)
@@ -1560,13 +1694,15 @@ def main(argv=None) -> int:
     ap.add_argument("--check", action="store_true", help="check the item tables against every recorded checkpoint")
     ap.add_argument("--recordings", default=str(REPO / "recordings" / "live"))
     ap.add_argument("--limit", type=int, default=0, help="--check: about this many checkpoints")
+    ap.add_argument("--no-round-trip", action="store_true",
+                    help="--check: the recorded saves only, without rewriting them (round_trip)")
     ap.add_argument("--show", metavar="SAVE", help="the squad of a checkpoint (with --loadout: after it)")
     ap.add_argument("--loadout", help="a loadout spec to plan on --show")
     ap.add_argument("--out", help="with --show --loadout: write the rewritten save here")
     args = ap.parse_args(argv)
     items = Items(game_scripts(args.game))
     if args.check:
-        return check_recordings(items, Path(args.recordings), args.limit)
+        return check_recordings(items, Path(args.recordings), args.limit, not args.no_round_trip)
     if args.show:
         text = Path(args.show).read_text(errors="replace")
         doc = parse_save(text)

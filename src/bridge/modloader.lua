@@ -425,6 +425,18 @@ local function _read_save_data()
 end
 
 local function get_pawn_max_health(pawn, uid, save_data)
+    local pilot = save_data and save_data.pilots and save_data.pilots[uid]
+    -- Pawn::ComputeHealthTotal: a pawn whose pilot has Zoltan_Skill has 1
+    -- max HP, whatever its type's Health, level-up skills or upgrades (the
+    -- Skill has no PowerCost, so Pilot::IsAbility always grants it). The
+    -- type's Health below would say 3 for a Zoltan RocketMech the game holds
+    -- at 1/1 (fuzz 20261017_135355 sample 0).
+    if pilot then
+        local ok_z, z = pcall(function() return pawn:IsAbility("Zoltan_Skill") end)
+        if (ok_z and z == true) or (not ok_z and pilot.id == "Pilot_Zoltan") then
+            return 1
+        end
+    end
     local pawn_def = _G[pawn:GetType()]
     local base = (pawn_def and pawn_def.Health) or pawn:GetHealth()
     local max_hp = base
@@ -443,7 +455,6 @@ local function get_pawn_max_health(pawn, uid, save_data)
     end
 
     local bonus = 0
-    local pilot = save_data and save_data.pilots and save_data.pilots[uid]
     if pilot then
         local level = pilot.level or 0
         -- Pilot perk ID 0 is a real active skill (+2 HP) once the slot is

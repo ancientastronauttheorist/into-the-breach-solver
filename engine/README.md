@@ -390,7 +390,7 @@ python3 scripts/fuzz_play.py --put-back recordings/fuzz/<session> [--dry-run]  #
 python3 scripts/coverage_report.py [--unseen]                        # what the recordings never exercised
 python3 scripts/fuzz_play.py --dry-run --coverage --samples 60       # inject what they never exercised
 python3 scripts/fuzz_play.py --loadout '0:Prime_Lasermech_A,Passive_FlameImmune;pilot=Pilot_Rock' --samples 5
-python3 scripts/loadout.py --check                                   # the save model vs every recorded checkpoint
+python3 scripts/loadout.py --check                                   # the save model vs every recorded checkpoint, and rewrites of each
 ```
 
 - **Turn starts** are the recorded `m<MM>_turn_<TT>_solve_input.json` of
@@ -522,7 +522,11 @@ python3 scripts/loadout.py --check                                   # the save 
   `iMutation` (Psionic Receiver: the board's psion). GameData.current
   repeats weapons and pilots. Both saveData.lua and undoSave.lua are
   rewritten; `loadout.py --check` recomputes all of it on every recorded
-  checkpoint (8175 mechs in 2725: all match). Legal loadouts only: what a
+  checkpoint, then rewrites each twice (every mech with nothing changed:
+  it still fits, every weapon and pilot skill is on or off as before and
+  the recorded bridge state verifies; and a pilot injected, each with a
+  PowerCost and Zoltan in turn: powered, Zoltan 1/1) (8415 mechs in 2805:
+  all match; `--no-round-trip` skips the rewrites). Legal loadouts only: what a
   run can hold (drops.lua shop/pod lists, the squads' starting weapons,
   upgrades the weapon has, CreatePilot pilots), no weapon base twice in the
   squad or its storage, no named pilot twice, Vek pilots stay in their
@@ -536,8 +540,12 @@ python3 scripts/loadout.py --check                                   # the save 
   the bridge's HP and uses); `no_effect`: not modelled, but outside a
   fuzzed turn (Pilot_Medic's extra Reset Turn, ...); `unsupported`: not
   played. Live, after the load the bridge must show the loadout
-  (`weapons_exact`, `weapon_slots` power, pilot, HP, a powered pilot's
-  `skill_active`, Zoltan's shield), else `loadout_rejected` (a finding; the
+  (`weapons_exact`, `weapon_slots` power and `powered`, pilot, HP, the
+  pilot's `skill_active`, Zoltan's shield; each on or off as injected: a
+  kept weapon or pilot the player never powered, at `{0}`, stays off, as
+  `Pilot::IsAbility` grants a Skill with a PowerCost only while its first
+  cell is set; a Zoltan mech is 1/1, which bridges before 2026-10-17 showed
+  as 1/type Health, `live_play.fill_zoltan_max_hp`), else `loadout_rejected` (a finding; the
   next sample restores anew). The bridge reads weapons and pilots from the
   save, so the game's own word is HP (a wrong max_health is reset), the
   live IsAbility and shields, and every step. Each sample keeps

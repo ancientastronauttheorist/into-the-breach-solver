@@ -229,7 +229,7 @@ class Bridge:
 
     def raw_state(self) -> dict | None:
         try:
-            return fill_pilot_power(lv.read_json(lv.STATE))
+            return bridge_fixes(lv.read_json(lv.STATE))
         except (OSError, json.JSONDecodeError):
             return None
 
@@ -255,12 +255,12 @@ class Bridge:
         ack = self.send("SNAPSHOT live_play", 15)
         if ack.startswith("OK SNAPSHOT "):
             try:
-                return fill_pilot_power(lv.read_json(Path(ack[len("OK SNAPSHOT "):].strip())))
+                return bridge_fixes(lv.read_json(Path(ack[len("OK SNAPSHOT "):].strip())))
             except (OSError, json.JSONDecodeError):
                 pass
         t0 = time.time()
         self.send("LUA return 'refresh'", 15)
-        return fill_pilot_power(lv.fresh_state(t0))
+        return bridge_fixes(lv.fresh_state(t0))
 
     def settled_state(self, before: dict | None = None) -> dict:
         """A dump taken while the board is idle. Bridges that report
@@ -374,6 +374,28 @@ def fill_pilot_power(state):
         pilot["power"], pilot["power_source"] = list(cells), "save"
         u["pilot"] = pilot
     return state
+
+
+def fill_zoltan_max_hp(state):
+    """Sets max_hp 1 on each player mech piloted by Pilot_Zoltan, as
+    Pawn::ComputeHealthTotal gives it (Zoltan_Skill has no PowerCost, so
+    Pilot::IsAbility always grants it: 1 HP whatever the type's Health,
+    level-up skills or upgrades). Bridges before 2026-10-17 report
+    max(type Health, the save's max_health) (Pawn:GetMaxHealth is not
+    bound), e.g. 1/3 for a Zoltan RocketMech the game holds at 1/1 (fuzz
+    20261017_135355 sample 0); the engine would then heal it past 1."""
+    if not isinstance(state, dict):
+        return state
+    for u in units(state):
+        if u.get("team") == 1 and u.get("mech") and pilot_id(u) == "Pilot_Zoltan" and u.get("max_hp") != 1:
+            u["max_hp_bridge"], u["max_hp"] = u.get("max_hp"), 1
+    return state
+
+
+def bridge_fixes(state):
+    """A bridge state with what older bridges get wrong filled in
+    (fill_pilot_power, fill_zoltan_max_hp)."""
+    return fill_zoltan_max_hp(fill_pilot_power(state))
 
 
 def pilot_id(u: dict) -> str | None:

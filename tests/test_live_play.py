@@ -2350,6 +2350,20 @@ class UiLimitTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
         self.assertEqual(lp.save_pilot_power(Path("/nonexistent/saveData.lua")), {})
 
+    def test_an_old_bridge_gets_zoltan_s_one_max_hp(self):
+        # Pawn::ComputeHealthTotal: 1 for a Zoltan pilot; bridges before
+        # 2026-10-17 said max(the type's Health, the save's max_health).
+        state = {"units": [
+            {"uid": 1, "team": 1, "mech": True, "type": "RocketMech", "hp": 1, "max_hp": 3,
+             "pilot": {"id": "Pilot_Zoltan"}, "pilot_id": "Pilot_Zoltan"},
+            {"uid": 2, "team": 1, "mech": True, "type": "FourwayMech", "hp": 2, "max_hp": 2},
+            {"uid": 9, "team": 6, "type": "Scarab2", "hp": 3, "max_hp": 3},
+        ]}
+        lp.bridge_fixes(state)
+        self.assertEqual([(u["hp"], u["max_hp"]) for u in state["units"]], [(1, 1), (2, 2), (3, 3)])
+        self.assertEqual(state["units"][0]["max_hp_bridge"], 3)
+        self.assertNotIn("max_hp_bridge", state["units"][1])
+
 
 class BodyWaitTest(unittest.TestCase):
     """A killed unit stays on the board, dead, while its death animation

@@ -1,0 +1,323 @@
+{
+ "mission_id": "Mission_BouncerBoss",
+ "phase": "combat_player",
+ "turn": 1,
+ "units": [
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 7,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": true,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 5,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 5,
+   "mech": true,
+   "minor": false,
+   "move": 7,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Pinnacle",
+    "level": 2,
+    "skill1": 4,
+    "skill2": 8,
+    "xp": 50
+   },
+   "pilot_id": "Pilot_Pinnacle",
+   "pilot_level": 2,
+   "pilot_skills": [
+    "skill1=4",
+    "skill2=8"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 1,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": true,
+    "health": 3,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 4,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "NeedleMech",
+   "uid": 0,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Brute_KickBack",
+     "damaged": false,
+     "id": "Brute_KickBack",
+     "limited": 0,
+     "mod1": [
+      0
+     ],
+     "mod2": [
+      0,
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    }
+   ],
+   "weapons": [
+    "Brute_KickBack"
+   ],
+   "weapons_exact": [
+    "Brute_KickBack"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 3,
+   "y": 5
+  },
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 3,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": false,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 5,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 5,
+   "mech": true,
+   "minor": false,
+   "move": 3,
+   "moved": false,
+   "moved_source": "turn_start",
+   "pilot": {
+    "id": "Pilot_Rust",
+    "level": 1,
+    "skill1": 0,
+    "skill2": 1,
+    "xp": 19
+   },
+   "pilot_id": "Pilot_Rust",
+   "pilot_level": 1,
+   "pilot_skills": [
+    "skill2=1"
+   ],
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 2,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": false,
+    "health": 3,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 3,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "RocketMech",
+   "uid": 1,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Ranged_Rocket",
+     "damaged": false,
+     "id": "Ranged_Rocket",
+     "limited": 0,
+     "mod1": [
+      0,
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    },
+    {
+     "base": "Passive_Electric",
+     "damaged": false,
+     "id": "Passive_Electric",
+     "limited": 0,
+     "mod1": [
+      0,
+      0,
+      0
+     ],
+     "mod2": [
+      0
+     ],
+     "passive": true,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 1,
+     "uses_saved": 1
+    }
+   ],
+   "weapons": [
+    "Ranged_Rocket",
+    "Passive_Electric"
+   ],
+   "weapons_exact": [
+    "Ranged_Rocket",
+    "Passive_Electric"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 3,
+   "y": 6
+  },
+  {
+   "acid": false,
+   "active": true,
+   "base_move": 4,
+   "burrower": false,
+   "corpse": true,
+   "corpse_on_death": false,
+   "fire": false,
+   "flying": false,
+   "frozen": false,
+   "grappled": false,
+   "guarding": false,
+   "hp": 2,
+   "infected": false,
+   "jumper": false,
+   "massive": true,
+   "max_hp": 2,
+   "mech": true,
+   "minor": false,
+   "move": 4,
+   "moved": false,
+   "moved_source": "turn_start",
+   "powered": true,
+   "pushable": true,
+   "ranged": 0,
+   "shield": false,
+   "shots_remaining": 1,
+   "stable": false,
+   "team": 1,
+   "traits": {
+    "armor": false,
+    "burns": false,
+    "burrows": false,
+    "corpse": false,
+    "explodes": false,
+    "faction": 0,
+    "flying": false,
+    "health": 2,
+    "ignore_fire": false,
+    "ignore_flip": false,
+    "ignore_smoke": false,
+    "jumper": false,
+    "leader": 0,
+    "massive": true,
+    "minor": false,
+    "move_speed": 4,
+    "neutral": false,
+    "non_grid": false,
+    "pushable": true,
+    "spawn_limit": true,
+    "teleporter": false
+   },
+   "type": "FourwayMech",
+   "uid": 2,
+   "void_shock_immune": false,
+   "weapon_slots": [
+    {
+     "base": "Science_MassShift",
+     "damaged": false,
+     "id": "Science_MassShift",
+     "limited": 0,
+     "mod1": [
+      0
+     ],
+     "mod2": [
+      0,
+      0
+     ],
+     "passive": false,
+     "power": [],
+     "power_cost": 0,
+     "powered": true,
+     "slot": 0,
+     "uses_saved": 1
+    }
+   ],
+   "weapons": [
+    "Science_MassShift"
+   ],
+   "weapons_exact": [
+    "Science_MassShift"
+   ],
+   "web": false,
+   "web_probes": {
+    "IsGrappled": false
+   },
+   "x": 2,
+   "y": 4
+  }
+ ]
+}
