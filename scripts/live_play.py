@@ -718,13 +718,14 @@ class Run:
                                       "units": {str(uid): shot for uid, shot in sorted(tracked.items())}}
         self.save_meta()
 
-    def engine_shields(self, state: dict) -> list:
+    def engine_shields(self, state: dict) -> list | None:
         """The structures the engine has shielded at this state's turn ([x, y];
-        see confirmed_shields), kept across commands in the manifest; [] for
-        another mission or turn."""
+        see confirmed_shields), kept across commands in the manifest; None
+        when there is no record for this mission and turn (a turn start the
+        driver has not played from: the bridge's own shields stand)."""
         rec = self.meta.get("engine_shields") or {}
         if rec.get("mission") != self.mission_index(state) or rec.get("turn") != int(state.get("turn") or 0):
-            return []
+            return None
         return [list(p) for p in rec.get("tiles") or []]
 
     def save_engine_shields(self, state: dict, tiles: list) -> None:
@@ -1281,7 +1282,9 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
     active again (`history`, see ui_limit_errors), plus Mission_Reactivation's
     visible list (`reactivation`, see reactivation_after) as
     "reactivation_visible_list", plus the structures the engine has shielded
-    (`shields`, see confirmed_shields) as the tiles' "shield". Returns
+    (`shields`, see confirmed_shields) as the tiles' "shield" (a record,
+    not None, also clears the bridge's stale turn-start marks the engine
+    does not have, see clear_stale_shields). Returns
     (state, patches); queued-shot, underground, reactivation and shield
     notes go to `notes`."""
     out = json.loads(json.dumps(state))
@@ -1371,6 +1374,13 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
         if notes is not None:
             notes.append("shielded (engine; the bridge cannot read a structure's shield): "
                          + ", ".join(visual(x, y) for x, y in shielded))
+    if shields is not None:
+        cleared = clear_stale_shields(out, shields)
+        if cleared:
+            patches["tile_shields_cleared"] = cleared
+            if notes is not None:
+                notes.append("unshielded (engine; the bridge's turn-start map keeps a popped shield): "
+                             + ", ".join(visual(x, y) for x, y in cleared))
     return out, patches
 
 
@@ -1500,6 +1510,16 @@ def reactivation_note(state: dict, listed: list) -> str | None:
 # bare, the end-of-turn prediction lost them and the grid, the game kept
 # both). One the enemy phase leaves standing carries into the next turn when
 # the game matched the prediction.
+#
+# On a mission's turn 1 the bridge may mark shields itself from RegionData
+# (`tile_shields_static_baseline`, e.g. a restored game: the save's map).
+# That map is the turn start's: a shield a hit pops stays marked there, so
+# once the driver has a record for the turn (a step played) the engine's
+# record replaces the bridge's marks (fuzz 20261016_230406 sample 14,
+# Mission_BeltRandom turn 1: Prime_Flamespreader popped G4's shield and took
+# 1 HP, Vek_Scarab popped F6's; read with the stale marks, the end-of-turn
+# prediction kept G4 behind a shield against Firefly2's shot, the game lost
+# it and 1 more grid).
 
 # Freeze mines laid during AI planning. A Snowmine (Mission_BotDefense's two
 # player-team bots, or an enemy one) is neutral, so the AI moves it in its
@@ -1556,6 +1576,23 @@ def apply_shields(state: dict, shields: list) -> list:
             t["shield"] = True
             changed.append([t["x"], t["y"]])
     return sorted(changed)
+
+
+def clear_stale_shields(state: dict, shields: list) -> list:
+    """Clears (in place) the "shield" of every tile not in `shields` (the
+    engine's record for this turn) when the bridge's marks are RegionData's
+    turn-start map (`tile_shields_static_baseline`), which keeps a shield a
+    hit has popped. A bridge that reads shields live keeps its own. Returns
+    the tiles it cleared ([x, y], sorted)."""
+    if state.get("tile_shields_static_baseline") is not True or state.get("tile_shields_live") is True:
+        return []
+    keep = {(int(x), int(y)) for x, y in shields}
+    cleared = []
+    for t in state.get("tiles", []):
+        if t.get("shield") and (t.get("x"), t.get("y")) not in keep:
+            del t["shield"]
+            cleared.append([t["x"], t["y"]])
+    return sorted(cleared)
 
 
 # ------------------------------------------------------------------ queued shots
@@ -2227,7 +2264,11 @@ def end_turn(ctx) -> list:
     say("  enemy phase...")
     after = wait_player_turn(bridge, args.timeout, after_turn=turn, mission_id=state.get("mission_id"))
     if after is None:
-        raise Anomaly(f"no next player turn within {args.timeout:.0f}s")
+        # With no mech left the game gives no player turn with an active mech
+        # (fuzz 20261016_230406 sample 10: the engine had all three dead).
+        mechs = [u for u in (pred.get("after_enemy") or {}).get("units", []) if u.get("mech")]
+        raise Anomaly(f"no next player turn within {args.timeout:.0f}s"
+                      + ("" if mechs else " (the engine predicted no mech alive after the enemy phase)"))
     if not in_combat(after) or after.get("mission_id") != state.get("mission_id"):
         path = run.save_state(after, "after_enemy")
         say(f"mission over (phase {after.get('phase')}, mission {after.get('mission_id')}); "

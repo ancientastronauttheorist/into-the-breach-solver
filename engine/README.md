@@ -244,7 +244,14 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   `patches`; a tile's `shield` loads on buildings and mountains). Shields
   the enemy phase leaves standing carry into the next turn only when the
   game matched the prediction. A bridge with `tile_shields_live` is taken
-  as is.
+  as is. On a mission's turn 1 the bridge may mark shields itself from
+  RegionData (`tile_shields_static_baseline`: the turn start's map, which
+  keeps a shield a hit popped); once the driver has a record for the turn
+  (a step played), the record replaces those marks (`tile_shields_cleared`
+  in `patches`; fuzz 20261016_230406 sample 14, a restored
+  Mission_BeltRandom turn 1: the plan popped G4's and F6's shields, the
+  end-of-turn prediction read them stale and kept G4 against Firefly2's
+  shot, the game lost it and 1 grid).
 - **Mission_Reactivation's thaw list** is kept from what a player sees,
   never from the mission's own `Enemies` list (hidden, like the AI seed).
   The driver starts it from the frozen enemies at deployment or at the
@@ -377,8 +384,8 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
   new pass, said so (`--mission/--turn`: that one every time). Live mode
   restores only a start its recording shows playable (`offline_reason`: a
   player turn with an active mech, not a last turn, and a sequence of
-  `--tries` the engine predicts keeps `--min-grid` from the recorded solve
-  input); one that fails, or fails the same checks after its restore, is
+  `--tries` the engine predicts keeps `--min-grid` and a mech from the
+  recorded solve input); one that fails, or fails the same checks after its restore, is
   never drawn again (`skipped_<why>` in the outcomes, `rejected_starts` in
   `session.json`).
 - **Moves** come from `itb_live actions` on the board after the prefix,
@@ -396,9 +403,12 @@ python3 scripts/coverage_report.py [--unseen]                        # what the 
   legal sub-action left, after `--max-steps` (12), or at random
   (`--stop-prob` 0.06 per step).
 - **Grid safety.** Only sequences the engine predicts keep `--min-grid`
-  (2) grid through the enemy phase (worst case, no resist) are played (up
-  to `--tries` 5, else the start is skipped): at 0 the game leaves for the
-  Timeline Lost screens.
+  (2) grid and a living mech through every step and the enemy phase
+  (worst case, no resist) are played (up to `--tries` 5, else the start is
+  skipped): at 0 grid the game leaves for the Timeline Lost screens, and
+  with no mech left it gives no player turn with an active mech again
+  (fuzz 20261016_230406 sample 10, Mission_ScarabBoss turn 3: the engine
+  had all three mechs dead, End Turn never came back).
 - **Compared** after each step with `diff_boards` and live play's carried
   state (queued shots, Burrowers underground, structure shields; the
   recorded turn start's shields, underground units and

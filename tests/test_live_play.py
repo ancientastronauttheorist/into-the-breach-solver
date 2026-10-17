@@ -1380,6 +1380,35 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual(lp.apply_shields(s, [[2, 2]]), [])
         self.assertNotIn("shield", tile(s, 2, 2))
 
+    def test_clear_stale_shields(self):
+        """A turn-1 bridge marks RegionData's turn-start shields, which keep
+        one a hit popped: with a record, the engine's shields stand."""
+        st = base_state()
+        tile(st, 0, 0).update(terrain="mountain", terrain_id=4, building_hp=2, shield=True)
+        tile(st, 2, 2)["shield"] = True
+        tile(st, 4, 4)["shield"] = True  # rubble the map still marks
+        st["tile_shields_static_baseline"] = True
+        s = copy.deepcopy(st)
+        self.assertEqual(lp.clear_stale_shields(s, [[2, 2]]), [[0, 0], [4, 4]])
+        self.assertTrue(tile(s, 2, 2)["shield"])
+        self.assertNotIn("shield", tile(s, 0, 0))
+        self.assertNotIn("shield", tile(s, 4, 4))
+        # Marks read live (an extended game), or no turn-start map: kept.
+        for flags in ({"tile_shields_live": True}, {"tile_shields_static_baseline": False}):
+            s = copy.deepcopy(st) | flags
+            self.assertEqual(lp.clear_stale_shields(s, []), [])
+            self.assertTrue(tile(s, 0, 0)["shield"])
+        # patch_state: no record (None) keeps the bridge's marks; a record,
+        # even an empty one, replaces them.
+        out, patches = lp.patch_state(copy.deepcopy(st), {}, set(), shields=None)
+        self.assertNotIn("tile_shields_cleared", patches)
+        self.assertTrue(tile(out, 0, 0)["shield"])
+        notes = []
+        out, patches = lp.patch_state(copy.deepcopy(st), {}, set(), notes=notes, shields=[])
+        self.assertEqual(patches["tile_shields_cleared"], [[0, 0], [2, 2], [4, 4]])
+        self.assertFalse(any(t.get("shield") for t in out["tiles"]))
+        self.assertTrue(any(n.startswith("unshielded (engine;") for n in notes), notes)
+
     # ---------------------------------------------------------------- end turn
 
     def test_end_turn_clicks_when_the_bridge_cannot_and_compares(self):
@@ -1911,6 +1940,33 @@ class ItbLiveTest(unittest.TestCase):
         self.assertEqual(hp(before, 4, 1), 0)
         self.assertEqual(after["grid_power"], 2)
         self.assertEqual((hp(after, 4, 1), hp(after, 4, 2)), (2, 2))
+
+    def test_end_of_turn_prediction_drops_the_shields_the_plan_popped(self):
+        """Fuzz 20261016_230406 sample 14 (a restored Mission_BeltRandom,
+        turn 1), end to end: the bridge marks RegionData's turn-start
+        shields on F7, F6 and G4; the plan's Flamespreader popped G4's (and
+        took 1 HP), its Scarab shot F6's. Read with the stale marks, the
+        engine kept G4 (1 HP) behind a shield against Firefly2's shot (grid
+        3); with the engine's record (F7 only), G4 falls as in the game
+        (grid 2)."""
+        fixtures = REPO / "engine" / "tests" / "fixtures"
+        tmp = Path(tempfile.mkdtemp(prefix="itb_live_stale_shields_"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        stale = json.loads((fixtures / "fuzz_beltrandom_t1_end_turn.json").read_text())["data"]["bridge_state"]
+        self.assertEqual(stale["tile_shield_source"], "runtime_region_turn1_baseline")
+        notes = []
+        fixed, patches = lp.patch_state(stale, {}, set(), notes=notes, shields=[[1, 2]])
+        self.assertEqual(patches["tile_shields_cleared"], [[2, 2], [4, 1]])
+        self.assertIn("unshielded (engine; the bridge's turn-start map keeps a popped shield): F6, G4", notes)
+        (tmp / "stale.json").write_text(json.dumps(stale))
+        (tmp / "fixed.json").write_text(json.dumps(fixed))
+        before = self.itb_live("predict", str(tmp / "stale.json"), "--plan", "[]")["after_enemy"]
+        after = self.itb_live("predict", str(tmp / "fixed.json"), "--plan", "[]")["after_enemy"]
+        hp = lambda board, x, y: next((b["hp"] for b in board["buildings"]  # noqa: E731
+                                       if (b["x"], b["y"]) == (x, y)), 0)
+        self.assertEqual((before["grid_power"], hp(before, 4, 1)), (3, 1))  # the bug
+        self.assertEqual((after["grid_power"], hp(after, 4, 1)), (2, 0))
+        self.assertEqual(after["shield_tiles"], [[1, 2]])
 
 
 def tearDownModule():

@@ -234,6 +234,26 @@ class FuzzTest(unittest.TestCase):
             seq = fz.generate(eng, path, fz.Chooser(rng), rng, {}, {}, 10, 0, grid_floor=2)
             self.assertNotIn("Brute_Tankmech", [a.get("weapon") for a in seq.plan])
 
+    def test_grid_safe_needs_a_living_mech(self):
+        """Fuzz 20261016_230406 sample 10: a plan that leaves no mech after
+        the enemy phase never gets a player turn back."""
+        mech = {"uid": 0, "mech": True, "hp": 1}
+        vek = {"uid": 9, "mech": False, "hp": 3}
+        pred = {"refused": -1, "steps": [{"board": {"grid_power": 5, "units": [mech, vek]}}],
+                "after_enemy": {"grid_power": 5, "units": [mech, vek]}}
+        self.assertTrue(fz.grid_safe(pred, 2))
+        pred["after_enemy"]["units"] = [vek]  # the engine's boards omit the dead
+        self.assertFalse(fz.grid_safe(pred, 2))
+        pred["after_enemy"]["units"] = [mech | {"hp": 0}, vek]
+        self.assertFalse(fz.grid_safe(pred, 2))
+        pred["after_enemy"]["units"] = [mech]
+        pred["steps"][0]["board"]["units"] = [vek]  # all dead in the player's turn
+        self.assertFalse(fz.grid_safe(pred, 2))
+        pred["steps"][0]["board"] = {"grid_power": 5}  # a board without units: no say
+        self.assertTrue(fz.grid_safe(pred, 2))
+        pred["after_enemy"]["grid_power"] = 1
+        self.assertFalse(fz.grid_safe(pred, 2))
+
     def test_engine_checks_catch_a_board_the_prediction_does_not_reach(self):
         path = self.record()
         eng = FuzzEngine(CANDIDATES)

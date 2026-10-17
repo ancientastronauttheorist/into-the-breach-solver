@@ -51,11 +51,11 @@ launch or a Main Menu, and never again once the bridge ticks. Turn starts
 are drawn without replacement (a new pass, said so, once all have been
 drawn), and only those the recording shows playable are restored (a
 player turn with an active mech, not a mission's last turn unless
---last-turns, a sequence the engine predicts keeps --min-grid); the check
-after the restore stays. The profile's own save files are copied aside the
-first time (after the game has exited) and put back at the end the same
-way: quit, swap, relaunch, then with a run in them one Continue and the
-second load: from a mission as above, from the island map (the bridge
+--last-turns, a sequence the engine predicts keeps --min-grid and a
+mech); the check after the restore stays. The profile's own save files are
+copied aside the first time (after the game has exited) and put back at the
+end the same way: quit, swap, relaunch, then with a run in them one
+Continue and the second load: from a mission as above, from the island map (the bridge
 stays silent END_WAIT s; Esc does nothing there) blind, the map's gear at
 --map-gear-xy, MAIN MENU, Continue, MAP_CLICK_WAIT s after each click; with
 none (no saveData.lua: no run in progress) the game stays on the title
@@ -371,20 +371,34 @@ def generate(engine, path: Path, chooser: Chooser, rng: random.Random, history: 
     return seq
 
 
+def mech_alive(board: dict) -> bool:
+    """A mech with HP left on an engine board (its units omit the dead), or
+    a board without units."""
+    if "units" not in board:
+        return True
+    return any(u.get("mech") and (u.get("hp") or 0) > 0 for u in board["units"])
+
+
 def grid_safe(pred: dict, min_grid: int) -> bool:
-    """The prediction keeps at least min_grid grid power through the enemy
-    phase (its worst case: no Grid Defense resist). At 0 the run is lost:
-    the game leaves the mission for the Timeline Lost screens, which no
-    restore here gets out of."""
+    """The prediction keeps at least min_grid grid power and a living mech
+    through every step and the enemy phase (its worst case: no Grid Defense
+    resist). At 0 grid the run is lost: the game leaves the mission for the
+    Timeline Lost screens, which no restore here gets out of. With no mech
+    left the game gives no player turn with an active mech again, so End
+    Turn never comes back to one (fuzz 20261016_230406 sample 10,
+    Mission_ScarabBoss turn 3: Brute_Beetle_A's charge killed the Charge Mech
+    and the Napalm Mech, Firefly2 the Hornet Mech; no next player turn
+    within 180 s)."""
     boards = [s.get("board") or {} for s in pred.get("steps") or []] + [pred.get("after_enemy") or {}]
     return pred.get("refused", -1) < 0 and all(
-        not isinstance(b.get("grid_power"), int) or b["grid_power"] >= min_grid for b in boards)
+        (not isinstance(b.get("grid_power"), int) or b["grid_power"] >= min_grid) and mech_alive(b)
+        for b in boards)
 
 
 def safe_sequence(engine, path: Path, chooser: Chooser, rng: random.Random, history: dict, skills: dict,
                   args) -> tuple:
-    """generate() until the prediction keeps --min-grid (up to --tries
-    sequences). Returns (sequence, prediction, tries), the sequence None
+    """generate() until the prediction keeps --min-grid and a mech (up to
+    --tries sequences). Returns (sequence, prediction, tries), the sequence None
     when none did."""
     pred: dict = {}
     for n in range(1, args.tries + 1):
@@ -602,9 +616,9 @@ def offline_reason(engine, ts: TurnStart, args, rng: random.Random, grid: bool =
     """Why a recorded turn start cannot be fuzzed, from the recording alone
     (before any restore), as (key, text), or None: its states unreadable,
     unplayable(), and with grid, no sequence of --tries keeping --min-grid
-    through the enemy phase from the recorded solve input (safe_sequence
-    with a scratch chooser: the session's novelty counts are left alone) or
-    the engine refusing it."""
+    and a mech through the enemy phase from the recorded solve input
+    (safe_sequence with a scratch chooser: the session's novelty counts are
+    left alone) or the engine refusing it."""
     try:
         state, _ = read_state(ts.path)
         read_state(ts.raw_path())
@@ -620,7 +634,8 @@ def offline_reason(engine, ts: TurnStart, args, rng: random.Random, grid: bool =
     except lp.Anomaly as e:
         return "engine_error", f"the engine on the recorded start: {e}"
     if seq is None:
-        return "grid_unsafe", f"no sequence of {args.tries} the engine predicts keeps {args.min_grid} grid"
+        return "grid_unsafe", (f"no sequence of {args.tries} the engine predicts keeps {args.min_grid} grid "
+                               "and a mech")
     return None
 
 
@@ -660,7 +675,7 @@ def dry_run(args, engine, sess: Session, starts: list) -> int:
             sess.outcomes["engine_error"] += 1
             continue
         if seq is None:
-            say(f"  no sequence of {args.tries} keeps {args.min_grid} grid: skipped")
+            say(f"  no sequence of {args.tries} keeps {args.min_grid} grid and a mech: skipped")
             sess.outcomes["grid_unsafe"] += 1
             continue
         sess.samples += 1
@@ -943,7 +958,7 @@ def live_turn(ctx, sess: Session, ts: TurnStart, sample: int, chooser: Chooser, 
     seq, pred, tries = safe_sequence(engine, start, chooser, rng, history, skills, args)
     run.save_json(lp.prediction_path(start).name, pred)
     if seq is None:
-        say(f"  no sequence of {args.tries} keeps {args.min_grid} grid: not played")
+        say(f"  no sequence of {args.tries} keeps {args.min_grid} grid and a mech: not played")
         return "grid_unsafe"
     run.save_json("plan.json", seq.plan)
     sess.surprise.update(surprises(pred))
@@ -1193,7 +1208,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--stop-prob", type=float, default=STOP_PROB, help="chance to end the turn after each step")
     ap.add_argument("--uniform", action="store_true", help="uniform choice (no bias toward odd actions)")
     ap.add_argument("--min-grid", type=int, default=2,
-                    help="play only sequences the engine predicts keep this much grid through the enemy phase")
+                    help="play only sequences the engine predicts keep this much grid (and a mech) through the "
+                         "enemy phase")
     ap.add_argument("--tries", type=int, default=5, help="sequences to try for --min-grid before skipping a start")
     ap.add_argument("--last-turns", action="store_true",
                     help="also a mission's last turn (its enemy phase ends the mission: reward screens, or the "
