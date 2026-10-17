@@ -54,7 +54,7 @@ def base_state() -> dict:
         for y in range(8):
             t = {"x": x, "y": y, "terrain": "ground", "terrain_id": 0}
             if (x, y) == (2, 2):
-                t.update(terrain="building", terrain_id=1, building_hp=1)
+                t.update(terrain="building", terrain_id=1, building_hp=1, populated=True)
             tiles.append(t)
     return {
         "phase": "combat_player", "turn": 1, "total_turns": 5, "mission_id": "Mission_Test",
@@ -112,10 +112,13 @@ def deployed_tank(uid: int, x: int, y: int) -> dict:
             "active": True, "moved": False, "weapons": ["Deploy_TankShot"]}
 
 
-def apply(state: dict, step: dict, damage: int = 1, spawn_uid: int | None = None) -> None:
+def apply(state: dict, step: dict, damage: int = 1, spawn_uid: int | None = None,
+          building_damage: int | None = None) -> None:
     """The fake game's rules (and the fake engine's, with damage=1). A
     DeploySkill_* drops a Deploy_Tank on its target, numbered `spawn_uid`
-    (default: one more than the largest uid, as the engine numbers it)."""
+    (default: one more than the largest uid, as the engine numbers it). A
+    shot at a building takes `building_damage` (default `damage`) of its HP,
+    rubble at 0 (0: a Grid Defense resist); the grid is left to the caller."""
     u = unit(state, step["uid"])
     if step["sub"] == "move":
         u["x"], u["y"] = step["to"]
@@ -133,6 +136,11 @@ def apply(state: dict, step: dict, damage: int = 1, spawn_uid: int | None = None
                 # A hurt Burrower dives: underground (the bridge omits it).
                 if v["type"] == "Burrower1" and v["hp"] > 0:
                     v["underground"] = True
+        t = next((t for t in state.get("tiles") or [] if (t["x"], t["y"]) == (tx, ty)), None)
+        if t is not None and t.get("terrain") == "building":
+            t["building_hp"] = max(0, t["building_hp"] - (damage if building_damage is None else building_damage))
+            if t["building_hp"] == 0:
+                t.update(terrain="rubble", terrain_id=2)
         u["active"] = False
     else:
         u["hp"] = min(u["max_hp"], u["hp"] + 1)
@@ -258,6 +266,7 @@ class FakeBridge:
         self.state = state
         self.commands = []
         self.damage = 1
+        self.building_damage = None  # a shot's damage to a building (None: `damage`; 0: Grid Defense resisted)
         self.refuse_native = False
         self.exec_mode = True  # False: a bridge from before EXEC_MODE
         self.end_turn_ack = "NEEDS_MCP_CLICK END_TURN method=SetActive"
@@ -329,7 +338,7 @@ class FakeBridge:
             if weapon.startswith("DeploySkill_"):
                 self.next_spawn_uid += 1
             apply(self.state, {"sub": "weapon", "uid": uid, "weapon": weapon, "target": [x, y]}, self.damage,
-                  spawn_uid=self.next_spawn_uid)
+                  spawn_uid=self.next_spawn_uid, building_damage=self.building_damage)
             return f"OK ATTACK {uid} slot={slot} at {x},{y} [FireWeapon]"
         if name == "REPAIR":
             apply(self.state, {"sub": "repair", "uid": int(args[0])})
@@ -1315,6 +1324,30 @@ class LivePlayTest(unittest.TestCase):
         manifest = json.loads((self.run_dir() / "manifest.json").read_text())
         self.assertEqual(manifest["engine_shields"], {"mission": 0, "turn": 2, "tiles": []})
 
+    # A restored game's bridge has no turn-start building snapshot (taken in
+    # Mission:BaseNextTurn), so it exports no grid estimate, and the save's
+    # grid is the turn start's until the turn ends (fuzz 20261016_191716:
+    # the player's own shots destroyed grid buildings and the end-of-turn
+    # prediction started 1 or 2 grid too high).
+
+    def test_grid_lost_in_a_restored_turn_reaches_the_end_of_turn_prediction(self):
+        self.bridge()
+        plan = [{"sub": "weapon", "uid": 1, "weapon": "Brute_Tankmech", "target": [2, 2], "target2": None,
+                 "action": 0}]
+        code, text = self.quiet(["turn"], FakeEngine(plan=plan))
+        self.assertEqual(code, 0, text)
+        self.assertEqual(tile(self.fb.state, 2, 2)["terrain"], "rubble")
+        self.assertEqual(self.fb.state["grid_power"], 7)  # the save's turn-start grid
+        manifest = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertEqual(manifest["grid_start"], {"mission": 0, "turn": 1, "grid": 7, "buildings": {"2,2": 1}})
+        self.fb.next_turn = lambda st: dict(FakeBridge.default_next(st), grid_power=6)
+        eng = FakeEngine(plan=plan)
+        code, text = self.quiet(["end-turn", "--run", str(self.run_dir())], eng)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng.predict_states[0]["grid_power"], 6)
+        self.assertIn("grid 6: the save's turn-start 7 less the HP its buildings lost since", text)
+        self.assertIn("enemy phase: MATCH", text)
+
     def test_an_engine_without_shield_boards_patches_no_shield(self):
         self.bridge()
         self.assertEqual(self.quiet(["turn"], FakeEngine())[0], 0)
@@ -1914,6 +1947,57 @@ class PatchStateGridTest(unittest.TestCase):
             self.assertEqual(fixed["grid_power"], 7)
             self.assertNotIn("grid_power", patches)
 
+    @staticmethod
+    def board(*buildings, **extra) -> dict:
+        tiles = [{"x": x, "y": y, "terrain": terrain, "building_hp": hp, "populated": populated}
+                 for x, y, terrain, hp, populated in buildings]
+        return {"grid_power": 7, "turn": 2, "units": [], "tiles": tiles, **extra}
+
+    def test_without_the_bridge_estimate_the_turn_start_buildings_give_the_grid(self):
+        # Fuzz 20261016_191716 s014: a Scarab shell took 1 of B6's 2 HP in a
+        # restored turn; s006: a Kickback destroyed G6 (1 HP), left rubble.
+        start = self.board((2, 1, "building", 2, True), (1, 1, "building", 1, True), (3, 3, "building", 2, True),
+                           (5, 5, "building", 1, False))
+        grid_start = {"grid": 7, "buildings": lp.grid_buildings(start)}
+        self.assertEqual(grid_start["buildings"], {"2,1": 2, "1,1": 1, "3,3": 2})  # not the unpowered one
+        now = self.board((2, 1, "building", 1, True), (1, 1, "rubble", 0, False), (3, 3, "building", 2, True),
+                         (5, 5, "building", 0, False))
+        notes = []
+        fixed, patches = lp.patch_state(now, {}, set(), notes=notes, grid_start=grid_start)
+        self.assertEqual(fixed["grid_power"], 5)
+        self.assertEqual(patches["grid_power"], 5)
+        self.assertTrue(any("grid 5: the save's turn-start 7" in n for n in notes))
+        # A destroyed building that stays a building tile at 0 HP (no longer
+        # populated) counts its whole HP as well.
+        gone = self.board((2, 1, "building", 0, False), (1, 1, "building", 1, True), (3, 3, "building", 2, True))
+        self.assertEqual(lp.grid_since_turn_start(gone, grid_start), 5)
+
+    def test_the_bridge_estimate_or_another_grid_wins_over_the_turn_start(self):
+        grid_start = {"grid": 7, "buildings": {"2,1": 2}}
+        hit = (2, 1, "building", 1, True)
+        # The bridge's own estimate (its snapshot is the turn start's too).
+        fixed, _ = lp.patch_state(self.board(hit, grid_power_estimate=7, grid_turn_start_turn=2), {}, set(),
+                                  grid_start=grid_start)
+        self.assertEqual(fixed["grid_power"], 7)
+        # The bridge has this turn's snapshot but no estimate (the save is not at this turn).
+        self.assertIsNone(lp.grid_since_turn_start(self.board(hit, grid_turn_start_turn=2), grid_start))
+        # The save's grid is not the recorded turn start's: the record is for another grid.
+        self.assertIsNone(lp.grid_since_turn_start(self.board(hit, grid_power=6), grid_start))
+        self.assertIsNone(lp.grid_since_turn_start(self.board(hit), None))
+        fixed, patches = lp.patch_state(self.board(hit), {}, set())
+        self.assertEqual(fixed["grid_power"], 7)
+        self.assertNotIn("grid_power", patches)
+
+    def test_the_run_keeps_the_turn_start_per_mission_and_turn(self):
+        import tempfile
+        run = lp.Run(Path(tempfile.mkdtemp(prefix="itb_grid_start_")), {})
+        st = dict(self.board((2, 1, "building", 2, True)), mission_id="Mission_Test")
+        self.assertIsNone(run.grid_start(st))
+        run.save_grid_start(st)
+        self.assertEqual(run.grid_start(st), {"grid": 7, "buildings": {"2,1": 2}})
+        self.assertIsNone(run.grid_start(dict(st, turn=3)))
+        shutil.rmtree(run.path, ignore_errors=True)
+
 
 class UiLimitTest(unittest.TestCase):
     STATE = {"units": [{"uid": 0, "pilot_id": "Pilot_Leader"}, {"uid": 1, "pilot": {"id": "Pilot_Miner"}},
@@ -2127,6 +2211,53 @@ class TeleporterPairsTest(unittest.TestCase):
         self.assertEqual(lp.logged_teleporter_pairs(Path(f.name)), [[5, 3, 2, 2], [2, 5, 5, 5]])
         self.assertEqual(lp.logged_teleporter_pairs(Path(f.name + ".missing")), [])
 
+    # Fuzz 20261016_191716 s000 (run 20261013_150853 m32 t03, restored): the
+    # bridge had no pads (StartMission never ran), and the log's latest
+    # capture was another mission's, one pad on the building B5. The Beetle
+    # charging onto its real pad (B4 -> E2) was predicted to hit B5.
+    SAVE = ('["region2"] = {["mission"] = "Mission4", ["player"] = {["iCurrentTurn"] = 3, ["iState"] = 0,\n'
+            '["map_data"] = {["pod"] = Point(4,3), ["teleports"] = {Point( 4, 6 ), Point( 6, 3 ), '
+            'Point( 3, 2 ), Point( 3, 5 ), },\n["tele_history"] = {0, -1, -1, -1, },\n')
+    STALE_LOG = ("x | TELEPORT PAD pair captured: (2,3) <-> (5,5)\n"
+                 "x | TELEPORT PAD pair captured: (3,6) <-> (5,1)\n"
+                 "x | TELEPORT PAD: StartMission complete, 2 pair(s) captured\n")
+
+    def write(self, text: str, suffix: str) -> Path:
+        with tempfile.NamedTemporaryFile("w", suffix=suffix, delete=False) as f:
+            f.write(text)
+        self.addCleanup(os.unlink, f.name)
+        return Path(f.name)
+
+    def test_pairs_come_from_the_save(self):
+        save = self.write(self.SAVE, ".lua")
+        self.assertEqual(lp.save_teleporter_pairs(save), [[4, 6, 6, 3], [3, 2, 3, 5]])
+        self.assertEqual(lp.save_teleporter_pairs(save.with_suffix(".missing")), [])
+        # Two lists (which region is playing would be a guess) or none: nothing.
+        self.assertEqual(lp.save_teleporter_pairs(self.write(self.SAVE * 2, ".lua")), [])
+        self.assertEqual(lp.save_teleporter_pairs(self.write('["map_data"] = {}', ".lua")), [])
+
+    def test_patch_state_takes_the_save_pads_before_the_log_and_never_a_pad_on_a_building(self):
+        state = base_state()
+        state["mission_id"] = "Mission_Teleporter"
+        tile(state, 3, 6).update(terrain="building", terrain_id=1, building_hp=2)
+        save, log = self.write(self.SAVE, ".lua"), self.write(self.STALE_LOG, ".log")
+        orig = lp.logged_teleporter_pairs
+        lp.logged_teleporter_pairs = lambda path=log: orig(path)
+        try:
+            fixed, patches = lp.patch_state(state, {}, set(), teleporter_save=save)
+            self.assertEqual(fixed["teleporter_pairs"], [[4, 6, 6, 3], [3, 2, 3, 5]])
+            self.assertEqual(patches["teleporter_pairs"], [[4, 6, 6, 3], [3, 2, 3, 5]])
+            # No save pads: the log's, minus the pair with a pad on the building.
+            fixed, patches = lp.patch_state(state, {}, set(), teleporter_save=False)
+            self.assertEqual(fixed["teleporter_pairs"], [[2, 3, 5, 5]])
+            # The bridge's own pads are kept.
+            fixed, patches = lp.patch_state(dict(state, teleporter_pairs=[[1, 1, 6, 6]]), {}, set(),
+                                            teleporter_save=save)
+            self.assertEqual(fixed["teleporter_pairs"], [[1, 1, 6, 6]])
+            self.assertNotIn("teleporter_pairs", patches)
+        finally:
+            lp.logged_teleporter_pairs = orig
+
 
 class DiffBoardsTest(unittest.TestCase):
     """The enemy-phase comparison's handling of AI planning moves."""
@@ -2134,6 +2265,22 @@ class DiffBoardsTest(unittest.TestCase):
     @staticmethod
     def board(units, buildings=(), grid=5):
         return {"units": list(units), "buildings": list(buildings), "grid_power": grid}
+
+    def test_a_grid_defense_resist_on_a_chance_step_is_a_note(self):
+        # Fuzz 20261016_191716 s001 (Mission_Disposal turn 1): the Bombrun's
+        # bomb on B7 (1 HP) drew a Grid Defense roll; the engine (worst case)
+        # destroyed it, the game resisted. A step's grid is not compared.
+        mech = {"uid": 0, "type": "NeedleMech", "x": 1, "y": 7, "hp": 3, "mech": True}
+        before = self.board([mech], [{"x": 1, "y": 6, "hp": 1}], grid=7)
+        want = self.board([mech], [], grid=6)
+        got = self.board([mech], [{"x": 1, "y": 6, "hp": 1}], grid=7)
+        self.assertEqual(lp.diff_boards(want, got, {0}), (["building B7 hp: engine gone, game 1"], []))
+        diffs, notes = lp.diff_boards(want, got, {0}, resist={"before": before, "tiles": None})
+        self.assertEqual(diffs, [])
+        self.assertEqual(notes, ["Grid Defense resisted at B7 (building hp: engine gone, game 1)"])
+        # More HP than it had before the step is no resist.
+        more = self.board([mech], [{"x": 1, "y": 6, "hp": 2}], grid=7)
+        self.assertEqual(len(lp.diff_boards(want, more, {0}, resist={"before": before, "tiles": None})[0]), 1)
 
     @staticmethod
     def vek(x, y, acid=False):

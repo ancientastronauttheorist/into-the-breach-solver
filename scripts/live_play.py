@@ -732,6 +732,21 @@ class Run:
                                        "tiles": sorted(list(p) for p in tiles)}
         self.save_meta()
 
+    def grid_start(self, state: dict) -> dict | None:
+        """The grid and grid buildings at this state's player-turn start
+        ({"grid", "buildings"}; see grid_since_turn_start), kept across
+        commands in the manifest; None for another mission or turn."""
+        rec = self.meta.get("grid_start") or {}
+        if rec.get("mission") != self.mission_index(state) or rec.get("turn") != int(state.get("turn") or 0):
+            return None
+        return {"grid": rec.get("grid"), "buildings": dict(rec.get("buildings") or {})}
+
+    def save_grid_start(self, state: dict) -> None:
+        """Records `state` as its player turn's start (nothing acted yet)."""
+        self.meta["grid_start"] = {"mission": self.mission_index(state), "turn": int(state.get("turn") or 0),
+                                   "grid": state.get("grid_power"), "buildings": grid_buildings(state)}
+        self.save_meta()
+
     def engine_underground(self, state: dict) -> dict:
         """The Burrowers underground by the engine's predictions (see
         track_underground), kept across commands and turns of this state's
@@ -868,6 +883,9 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
       roll as not resisted (the worst case); a building the prediction
       damaged that the game shows with more HP (at most its HP before), with
       the grid higher by exactly the HP the buildings kept, was resisted.
+      A step's comparison (not enemy_phase) takes `resist` too, for a step
+      whose prediction drew a chance node: the grid is not compared there,
+      so the buildings alone decide.
     - A Soldier Psion / Psion Abomination that emerged from a hidden spawn
       (new in the game, absent from the prediction) gives every Vek +1 HP on
       arrival: +1 HP on a known non-mech unit of the psion's team, and on
@@ -1013,14 +1031,19 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
         if wb.get(xy) == gb.get(xy):
             continue
         engine_hp, game_hp = wb.get(xy, 0), gb.get(xy)
-        if (enemy_phase and resist is not None and game_hp is not None and xy in before
+        if (resist is not None and game_hp is not None and xy in before
                 and engine_hp < game_hp <= before[xy] and (tiles is None or xy in tiles)):
             resisted.append((xy, wb.get(xy, "gone"), game_hp))
             kept += game_hp - engine_hp
             continue
         diffs.append(f"building {visual(*xy)} hp: engine {wb.get(xy, 'gone')}, game {gb.get(xy, 'gone')}")
     grid_w, grid_g = want.get("grid_power"), got.get("grid_power")
-    if resisted:
+    if resisted and not enemy_phase:
+        # A step's boards do not compare the grid (the save's value lags
+        # behind the turn): the buildings alone show the resist.
+        for xy, e, gm in resisted:
+            notes.append(f"Grid Defense resisted at {visual(*xy)} (building hp: engine {e}, game {gm})")
+    elif resisted:
         if enemy_phase and isinstance(grid_w, int) and isinstance(grid_g, int) and grid_g - grid_w == kept:
             for xy, e, gm in resisted:
                 notes.append(f"Grid Defense resisted at {visual(*xy)} (building hp: engine {e}, game {gm})")
@@ -1070,6 +1093,74 @@ def logged_teleporter_pairs(log_path: Path = Path("/tmp/itb_bridge.log")) -> lis
             break
         pairs.append([int(v) for v in m.groups()])
     return list(reversed(pairs))
+
+
+SAVE_TELEPORTS_RE = re.compile(r'\["teleports"\]\s*=\s*\{([^}]*)\}')
+SAVE_POINT_RE = re.compile(r'Point\(\s*(\d+)\s*,\s*(\d+)\s*\)')
+
+
+def save_teleporter_pairs(path: Path | None = None) -> list:
+    """Mission_Teleporter's pad pairs from the game's save: the mission's
+    region keeps them as `["teleports"] = {p1, p2, p3, p4}`, p1 with p2 and
+    p3 with p4 (the order StartMission adds them). Unlike the bridge's
+    capture this survives a restore. [] when the save has no such list, or
+    more than one (which region is playing would be a guess)."""
+    path = path or PROFILE / "saveData.lua"
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return []
+    found = SAVE_TELEPORTS_RE.findall(text)
+    if len(found) != 1:
+        return []
+    pts = [(int(x), int(y)) for x, y in SAVE_POINT_RE.findall(found[0])]
+    if len(pts) < 2 or len(pts) % 2:
+        return []
+    return [[*pts[i], *pts[i + 1]] for i in range(0, len(pts), 2)]
+
+
+def pads_fit(state: dict, pair: list) -> bool:
+    """A pad pair can be on this board: both tiles on it, and no building
+    or mountain on either (a pad is never placed on one)."""
+    if len(pair) != 4 or not all(isinstance(v, int) and 0 <= v < 8 for v in pair):
+        return False
+    blocked = {(t.get("x"), t.get("y")) for t in state.get("tiles") or []
+               if t.get("terrain") in ("building", "mountain")}
+    return (pair[0], pair[1]) not in blocked and (pair[2], pair[3]) not in blocked
+
+
+def grid_buildings(state: dict) -> dict:
+    """The grid (populated) buildings of a bridge state and their HP:
+    {"x,y": hp}, as the bridge's own turn-start snapshot takes them."""
+    out = {}
+    for t in state.get("tiles") or []:
+        if t.get("terrain") == "building" and t.get("populated"):
+            out[f"{t['x']},{t['y']}"] = int(t.get("building_hp") or 0)
+    return out
+
+
+def grid_since_turn_start(state: dict, grid_start: dict | None) -> int | None:
+    """The live grid when the bridge exports no estimate: the save's grid
+    (the player turn's start value until the turn ends) less the HP the turn
+    start's grid buildings have lost since (a destroyed one counts its whole
+    HP), as the bridge's own estimate computes it. The bridge takes its
+    building snapshot in Mission:BaseNextTurn, which a game restored mid
+    mission never runs (fuzz 2026-10-16: grid lost to the player's own shots
+    in a restored turn never showed, and the end-turn prediction was 1 high).
+    `grid_start` is {"grid", "buildings"} recorded at the turn start
+    (Run.grid_start); None unless it is for this grid and nothing else
+    knows better."""
+    grid = state.get("grid_power")
+    if not grid_start or not isinstance(grid, int) or grid != grid_start.get("grid"):
+        return None
+    if state.get("grid_turn_start_turn") == state.get("turn") and state.get("grid_turn_start_turn") is not None:
+        return None  # the bridge has this turn's snapshot (its estimate needs the save at this turn too)
+    # Any building tile's HP now (a destroyed one turns rubble, or stays a
+    # building at 0 HP no longer populated).
+    now = {f"{t['x']},{t['y']}": int(t.get("building_hp") or 0)
+           for t in state.get("tiles") or [] if t.get("terrain") == "building"}
+    lost = sum(max(0, int(hp0) - now.get(key, 0)) for key, hp0 in (grid_start.get("buildings") or {}).items())
+    return max(0, grid - lost)
 
 
 # ------------------------------------------------------------------ UI action limits
@@ -1169,14 +1260,21 @@ def ui_limit_errors(steps: list, history: dict, state: dict, names: dict | None 
 def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = None,
                 notes: list | None = None, underground: dict | None = None,
                 history: dict | None = None, reactivation: list | None = None,
-                shields: list | None = None) -> tuple[dict, dict]:
+                shields: list | None = None, grid_start: dict | None = None,
+                teleporter_save=None) -> tuple[dict, dict]:
     """The solver's input: the live state, plus --loadout weapons for units
     the bridge gives no exact ids, plus moved flags the bridge does not
     export, plus the engine's queued shots (`queued`, see track_queued) where
     the bridge's are stale, plus the live grid estimate (the save's
     grid_power is the turn-start value until the turn ends; the bridge
     estimates the grid lost since from building HP: live 2026-10-10, a grid
-    loss during the player's turn left the end-turn prediction one high),
+    loss during the player's turn left the end-turn prediction one high;
+    without the bridge's estimate, from `grid_start`, the turn start's
+    buildings the driver recorded: the bridge takes its snapshot when the
+    turn begins, which a restored game never does, see grid_since_turn_start),
+    plus Mission_Teleporter's pads when the bridge has none (the save's,
+    `teleporter_save` its path, False not to read it; else the bridge log's
+    latest capture; pads on a tile no pad can be are dropped),
     plus the Burrowers underground (`underground`, see track_underground)
     that the bridge omits, as units with "underground": true at the tile they
     dove from, plus the pilot bonus of a unit that acted this turn and is
@@ -1198,11 +1296,22 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
             u["web"] = True
             patches[f"{u['uid']}.web"] = True
     if out.get("mission_id") == "Mission_Teleporter" and not out.get("teleporter_pairs"):
-        pairs = logged_teleporter_pairs()
+        # The save's pads first: the log's latest capture can be another
+        # mission's (fuzz 2026-10-16: a restored game, whose StartMission
+        # never ran, got an older mission's pads, one on a building).
+        pairs = [p for p in (save_teleporter_pairs(teleporter_save) if teleporter_save is not False else [])
+                 if pads_fit(out, p)]
+        if not pairs:
+            pairs = [p for p in logged_teleporter_pairs() if pads_fit(out, p)]
         if pairs:
             out["teleporter_pairs"] = pairs
             patches["teleporter_pairs"] = pairs
     est, grid = out.get("grid_power_estimate"), out.get("grid_power")
+    if not isinstance(est, int):
+        est = grid_since_turn_start(out, grid_start)
+        if isinstance(est, int) and isinstance(grid, int) and est < grid and notes is not None:
+            notes.append(f"grid {est}: the save's turn-start {grid} less the HP its buildings lost since "
+                         "(the bridge has no turn-start snapshot, e.g. after a restore)")
     if isinstance(est, int) and isinstance(grid, int) and est < grid:
         out["grid_power"] = est
         patches["grid_power"] = est
@@ -1846,6 +1955,11 @@ def play_turn(ctx) -> list:
     history = run.unit_actions(state)
     moved: set = {uid for uid, seq in history.items() if "M" in seq}
     react = run.reactivation_list(state, turn_start=not history)  # Mission_Reactivation only
+    # The turn start's grid buildings, for the live grid when the bridge has
+    # no snapshot of its own (a restored game: grid_since_turn_start).
+    if not history and run.grid_start(state) is None:
+        run.save_grid_start(state)
+    grid_start = run.grid_start(state)
     anomalies: list = []
     # The engine's queued shots this turn (a re-run of `turn` mid-turn
     # continues from the ones tracked so far).
@@ -1860,7 +1974,7 @@ def play_turn(ctx) -> list:
     def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
         solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react,
-                                            shields)
+                                            shields, grid_start)
         # --grid-survival needs the game's Grid Defense chance: an older
         # bridge does not export it, the save has its overpower bonus.
         if getattr(args, "grid_survival", False) and "grid_overflow" not in solver_input \
@@ -2047,7 +2161,8 @@ def end_turn(ctx) -> list:
     queued_notes: list = []
     react = run.reactivation_list(state)
     solver_input, patches = patch_state(state, ctx.loadout, set(), run.engine_queued(state), queued_notes,
-                                        under, reactivation=react, shields=run.engine_shields(state))
+                                        under, reactivation=react, shields=run.engine_shields(state),
+                                        grid_start=run.grid_start(state))
     for n in queued_notes:
         say(f"  note: {n}")
     path = run.save_state(solver_input, "end_turn", {"patches": patches} if patches else None)

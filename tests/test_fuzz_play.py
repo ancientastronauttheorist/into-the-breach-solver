@@ -676,6 +676,45 @@ class FuzzTest(unittest.TestCase):
         self.assertEqual(self.acting()[-1], "END_TURN")
         self.assertEqual(sess.outcomes["resynced"], 1)
 
+    def test_a_grid_defense_resist_on_a_chance_step_is_no_finding(self):
+        # Fuzz 20261016_191716 s001: the engine (worst case) destroyed the
+        # building the shot drew a Grid Defense roll on, the game resisted.
+        # Benign; the rest is re-predicted from the live board, and the turn
+        # ends and compares as usual.
+        shot = {"sub": "weapon", "uid": 1, "weapon": "Brute_Tankmech", "target": [2, 2], "target_kind": "building"}
+        eng = FuzzEngine([shot], chance={"Brute_Tankmech"})
+        orig_init = tlp.FakeBridge.__init__
+
+        def init(fb, state):
+            orig_init(fb, state)
+            fb.building_damage = 0
+
+        tlp.FakeBridge.__init__ = init
+        try:
+            rc, sess, findings = self.live_session(eng)
+        finally:
+            tlp.FakeBridge.__init__ = orig_init
+        self.assertEqual(findings, [])
+        self.assertEqual(tlp.tile(self.fb.state, 2, 2)["building_hp"], 1)
+        self.assertEqual(sess.outcomes["step_resisted"], 1)
+        self.assertEqual(self.acting()[-1], "END_TURN")
+        events = (sess.dir / "s000" / "events.jsonl").read_text()
+        self.assertIn("Grid Defense resisted at F6", events)
+
+    def test_grid_lost_in_the_restored_turn_reaches_the_end_of_turn_prediction(self):
+        # Fuzz 20261016_191716 s006 / s014: the restored game's bridge has no
+        # turn-start snapshot, so the save's turn-start grid stood through a
+        # turn whose shots destroyed a grid building, and the enemy phase
+        # "lost more grid than predicted". The turn start stands in.
+        shot = {"sub": "weapon", "uid": 1, "weapon": "Brute_Tankmech", "target": [2, 2], "target_kind": "building"}
+        eng = FuzzEngine([shot])
+        rc, sess, findings = self.live_session(
+            eng, next_turn=lambda st: dict(tlp.FakeBridge.default_next(st), grid_power=6))
+        self.assertEqual(findings, [])
+        self.assertEqual(self.fb.state["grid_power"], 6)
+        self.assertEqual(eng.predict_states[-1]["grid_power"], 6)  # the end-of-turn prediction's input
+        self.assertEqual(sess.outcomes["matched"], 1)
+
     def test_an_enemy_phase_difference_is_a_finding(self):
         def next_turn(st):
             st = tlp.FakeBridge.default_next(st)

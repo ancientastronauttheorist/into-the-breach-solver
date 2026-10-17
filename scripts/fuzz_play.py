@@ -924,10 +924,15 @@ def live_turn(ctx, sess: Session, ts: TurnStart, sample: int, chooser: Chooser, 
     react = run.reactivation_list(state, turn_start=True)
     shields = run.engine_shields(state)
     skills = unit_skills(state)
+    # A restored game's bridge has no turn-start building snapshot, so it
+    # estimates no grid lost during the turn: this turn start stands in.
+    run.save_grid_start(state)
+    grid_start = run.grid_start(state)
 
     def solver_input(st: dict, label: str) -> Path:
         notes: list = []
-        inp, patches = lp.patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react, shields)
+        inp, patches = lp.patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react, shields,
+                                      grid_start)
         path = run.save_state(inp, label, {"patches": patches} if patches else None)
         if patches:
             run.save_state(st, label + "_raw")
@@ -990,15 +995,28 @@ def live_turn(ctx, sess: Session, ts: TurnStart, sample: int, chooser: Chooser, 
             i += 1
             continue
         chance = bool(step.get("chance_nodes"))
-        plan_path = run.save_json(f"plan_to_step{executed}.json", seq.plan[:k + 1])
-        say(f"  step {executed} {text}: MISMATCH" + (" (after a chance node)" if chance else ""))
-        sess.finding("chance" if chance else "step", ts, sample, {
-            "step": k + 1, "action": text, "diffs": diffs, "plan": seq.plan[:k + 1],
-            "pick": seq.picks[k] if k < len(seq.picks) else None,
-            "files": {"start": str(start), "live": str(path), "prediction": str(lp.prediction_path(start)),
-                      "plan": str(plan_path), "sample_dir": str(run.path)},
-            "engine_board": step["board"], "game_board": live,
-            "replay": f"itb_live predict {start} --plan @{plan_path}"})
+        resisted = []
+        if chance:
+            # A Grid Defense roll the game won: the building kept HP the
+            # engine (worst case) took. Benign, but the rest of the plan was
+            # predicted without it: re-predicted from the live board.
+            before = steps[i - 1]["board"] if i > 0 else pred.get("start") or {}
+            diffs, resisted = lp.diff_boards(step["board"], live, known, resist={"before": before, "tiles": None})
+        if chance and not diffs:
+            uid_map = lp.unit_uid_map(step["board"], live, known, uid_map)
+            say(f"  step {executed} {text}: " + "; ".join(resisted) + " (chance node; benign)")
+            run.event("resisted", {"step": text, "state": path.name, "notes": resisted})
+            sess.outcomes["step_resisted"] += 1
+        else:
+            plan_path = run.save_json(f"plan_to_step{executed}.json", seq.plan[:k + 1])
+            say(f"  step {executed} {text}: MISMATCH" + (" (after a chance node)" if chance else ""))
+            sess.finding("chance" if chance else "step", ts, sample, {
+                "step": k + 1, "action": text, "diffs": diffs, "plan": seq.plan[:k + 1],
+                "pick": seq.picks[k] if k < len(seq.picks) else None,
+                "files": {"start": str(start), "live": str(path), "prediction": str(lp.prediction_path(start)),
+                          "plan": str(plan_path), "sample_dir": str(run.path)},
+                "engine_board": step["board"], "game_board": live,
+                "replay": f"itb_live predict {start} --plan @{plan_path}"})
         if not (chance or args.continue_after_diff):
             outcome = "diverged"
             break
