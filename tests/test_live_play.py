@@ -295,6 +295,17 @@ class FakeBridge:
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
 
+    @property
+    def silent(self) -> bool:
+        return self._silent
+
+    @silent.setter
+    def silent(self, value: bool):
+        # When the heartbeat stopped (FakeGame.alive_since).
+        if value and not getattr(self, "_silent", False):
+            self.silent_since = time.time()
+        self._silent = value
+
     def write_state(self, path=None):
         path = path or lv.STATE
         tmp = Path(str(path) + ".tmp")
@@ -476,15 +487,23 @@ class FakeGame:
         """Puts this game in place of live_play's process functions; returns
         a function that puts them back."""
         saved = (lp.game_running, lp.quit_game, lp.launch_game, lp.CONTINUE_DELAY, lp.PAUSE_STALL,
-                 lp.PAUSE_WAIT, lp.MENU_TO_TITLE)
+                 lp.PAUSE_WAIT, lp.MENU_TO_TITLE, lp.bridge_alive_since)
         lp.game_running = lambda: self.running
         lp.quit_game, lp.launch_game = self.quit, self.launch
         lp.CONTINUE_DELAY, lp.PAUSE_STALL, lp.PAUSE_WAIT, lp.MENU_TO_TITLE = 0.0, 0.1, 1.0, 0.1
+        lp.bridge_alive_since = self.alive_since
 
         def undo():
             (lp.game_running, lp.quit_game, lp.launch_game, lp.CONTINUE_DELAY, lp.PAUSE_STALL, lp.PAUSE_WAIT,
-             lp.MENU_TO_TITLE) = saved
+             lp.MENU_TO_TITLE, lp.bridge_alive_since) = saved
         return undo
+
+    def alive_since(self, bridge, t: float) -> bool:
+        """live_play.bridge_alive_since from the fake's own state, not the
+        heartbeat file's mtime: the bridge ticks continuously unless silent,
+        so a heartbeat thread starved under load (more than PAUSE_STALL
+        between writes) never looks like a pause menu that opened."""
+        return not self.fb.silent or self.fb.silent_since > t
 
     def misclicks(self) -> list:
         return [e for e in self.events if isinstance(e, tuple) and e and e[0] == "MISCLICK"]
@@ -1738,6 +1757,73 @@ class LivePlayTest(unittest.TestCase):
         self.bridge()
         # No chance node in the prediction: the same difference is an anomaly.
         self.assertEqual(self.run_cmd(["end-turn"], FakeEngine(after_enemy=self.building_not_resisted)), 1)
+
+    def test_end_turn_fire_from_the_ai_move_is_a_note(self):
+        # Live run 41 m41 (Mission_Final_Cave turn 3): the prediction stops
+        # before the AI plans; the Scorpion then walked onto a burning tile
+        # and caught fire there.
+        st = base_state()
+        next(t for t in st["tiles"] if (t["x"], t["y"]) == (4, 4))["fire"] = True
+        self.bridge(st)
+
+        def walks_into_fire(s):
+            s = FakeBridge.default_next(s)
+            unit(s, 100).update(x=4, y=4, fire=True)
+            return s
+
+        self.fb.next_turn = walks_into_fire
+        code, text = self.say_end_turn(FakeEngine())
+        self.assertEqual(code, 0, text)
+        self.assertIn("Scorpion1#100 caught fire on D4 moving there during AI planning", text)
+        self.assertIn("enemy phase: MATCH", text)
+
+    def test_end_turn_burning_off_a_fire_tile_still_stops(self):
+        self.bridge()
+
+        def burns_elsewhere(s):
+            s = FakeBridge.default_next(s)
+            unit(s, 100).update(x=4, y=4, fire=True)  # D4 is not burning
+            return s
+
+        self.fb.next_turn = burns_elsewhere
+        code, text = self.say_end_turn(FakeEngine())
+        self.assertEqual(code, 1, text)
+        self.assertIn("Scorpion1#100 fire: engine False, game True", text)
+
+    def burrower_put_out(self, burrower: bool) -> tuple:
+        """The prediction has unit 100 burning; the game shows it moved to
+        E4 and put out."""
+        def moves(s):
+            s = FakeBridge.default_next(s)
+            unit(s, 100).update(x=4, y=3, fire=False)
+            return s
+
+        def alight(s):
+            b = compact(s)
+            unit(b, 100)["fire"] = True
+            return b
+
+        st = base_state()
+        unit(st, 100).update(type="Burrower1", burrower=burrower)
+        self.bridge(st)
+        self.fb.next_turn = moves
+        return self.say_end_turn(FakeEngine(after_enemy=alight))
+
+    def test_end_turn_burrower_put_out_by_its_ai_move_is_a_note(self):
+        # Live run 43 m38 (Mission_JellyBoss turn 1): the BurnbugBoss's
+        # flames set the Burrower alight in the enemy phase (the prediction
+        # stops there); its AI move then burrowed it to another tile, which
+        # puts the fire out.
+        code, text = self.burrower_put_out(True)
+        self.assertEqual(code, 0, text)
+        self.assertIn("Burrower1#100 was put out burrowing to E4 during AI planning", text)
+        self.assertIn("enemy phase: MATCH", text)
+
+    def test_end_turn_walker_put_out_by_its_ai_move_still_stops(self):
+        # The same for a unit that walks: its move does not put fire out.
+        code, text = self.burrower_put_out(False)
+        self.assertEqual(code, 1, text)
+        self.assertIn("Burrower1#100 fire: engine True, game False", text)
 
     def test_end_turn_refuses_outside_a_player_turn(self):
         st = base_state()

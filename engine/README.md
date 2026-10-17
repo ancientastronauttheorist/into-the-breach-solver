@@ -200,7 +200,12 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   in the prediction that the game shows put out on a tile smoked after it
   (a Mosquito smokes the target it queues on while the AI plans, so a burning
   mech there is put out; live m78; the compact boards list `smoke_tiles`;
-  `itb_inspect --ai` reproduces the game's board there); Grid Defense
+  `itb_inspect --ai` reproduces the game's board there); a Vek burning
+  after the phase on another tile, one the game shows burning or lava (it
+  walked into the fire while the AI planned; live run 41, Final Cave turn
+  3: a Scorpion2 onto F2), or a Burrower put out on another tile (the AI
+  moves it by burrowing, which puts fire out; live run 43, JellyBoss turn
+  1: a Burrower2 the BurnbugBoss's flames lit on D5 burrowed to F7); Grid Defense
   (the prediction takes every roll as not resisted, its worst case: with
   chance nodes in the prediction, a building it damaged that the game shows
   with more HP, at most its HP before the phase and on a tile with a roll,

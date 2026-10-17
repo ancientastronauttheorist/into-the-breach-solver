@@ -47,8 +47,9 @@ omits it) until the AI's move brings it up: the engine's boards list it under
 re-solves and the end-of-turn prediction, so a resurfacing Burrower is
 matched by uid, not reported as a spawn.
 Notes, not differences: a Vek picking up an acid pool while the AI plans; a
-unit put out by smoke a Mosquito lays on it while the AI plans; a Grid
-Defense resist the prediction (worst case: no resist) could not know; a
+unit put out by smoke a Mosquito lays on it while the AI plans; a Vek
+catching fire on the burning tile it moves to while the AI plans, or a
+Burrower put out by burrowing (its AI move); a Grid Defense resist the prediction (worst case: no resist) could not know; a
 Soldier Psion / Psion Abomination emerging from a hidden spawn (+1 HP to
 every Vek).
 
@@ -851,7 +852,8 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
                 xp_split: bool = False, mines_gone: frozenset = frozenset(),
                 random_thaw: bool = False, freeze_mines_gone: frozenset = frozenset(),
                 repair_mines_gone: frozenset = frozenset(),
-                smoke_new: frozenset = frozenset()) -> tuple[list, list]:
+                smoke_new: frozenset = frozenset(), fire_tiles: frozenset = frozenset(),
+                burrowers: frozenset = frozenset()) -> tuple[list, list]:
     """Differences between a predicted and a live compact board (itb_live's
     live_board_json). Returns (differences, notes). Units in `known` (the
     turn-start uids) are matched by uid; others by type/tile/HP (the engine
@@ -881,6 +883,17 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
       the prediction that the game shows not burning on one of these tiles
       was put out by it (live m78 Mission_Power: a TeleMech under a
       Mosquito2's planning smoke).
+    - `fire_tiles` are the tiles the game shows burning (or lava) after the
+      phase: a non-mech the game shows burning on one of them, on another
+      tile than the prediction's, caught fire there moving while the AI
+      planned (fire is picked up where a move ends; live run 41 m41
+      Mission_Final_Cave turn 3: Scorpion2#128 walked from D1 onto the
+      burning F2).
+    - `burrowers` are the uids the game lists as Burrowers. The AI moves one
+      by burrowing, and burrowing puts its fire out (Pawn::Burrow), so one
+      the prediction has burning that the game shows put out on another tile
+      is a note (live run 43 m38 Mission_JellyBoss turn 1: Burrower2#485,
+      set alight on D5 by the BurnbugBoss's flames, burrowed to F7).
     - `random_thaw` (the prediction thawed frozen enemies at random:
       Mission_Reactivation thaws 2 random frozen Vek each enemy turn, a chance
       node the prediction takes one outcome of): enemies whose frozen flag
@@ -1000,6 +1013,15 @@ def diff_boards(want: dict, got: dict, known: set, *, enemy_phase: bool = False,
                     notes.append(f"{who} was put out by smoke laid on {visual(b['x'], b['y'])} during AI "
                                  "planning (a Mosquito's queued attack)")
                     continue
+                if enemy_phase and f == "fire" and not a.get("mech") and moved:
+                    if b.get(f) and (b["x"], b["y"]) in fire_tiles:
+                        notes.append(f"{who} caught fire on {visual(b['x'], b['y'])} moving there during AI "
+                                     "planning")
+                        continue
+                    if not b.get(f) and uid in burrowers:
+                        notes.append(f"{who} was put out burrowing to {visual(b['x'], b['y'])} during AI "
+                                     "planning (burrowing extinguishes)")
+                        continue
                 if (enemy_phase and f == "frozen" and b.get(f) and not a.get("mech") and freeze_left > 0):
                     freeze_left -= 1
                     notes.append(f"{who} froze on a freeze mine moving during AI planning (tripped: "
@@ -2321,6 +2343,12 @@ def end_turn(ctx) -> list:
     # queues): smoked in the game, not in the prediction (an itb_live without
     # "smoke_tiles": not smoked before the phase either).
     smoked = lambda s: {(t["x"], t["y"]) for t in s.get("tiles", []) if t.get("smoke")}
+    # Fire a Vek picks up or loses with its own move while the AI plans: the
+    # tiles burning (or lava) after the phase, and the Burrowers (their AI
+    # move is a burrow, which puts fire out).
+    burning = frozenset((t["x"], t["y"]) for t in after.get("tiles", []) if t.get("fire") or t.get("lava"))
+    burrowers = frozenset(u["uid"] for u in after.get("units", [])
+                          if u.get("burrower") or (u.get("traits") or {}).get("burrows"))
 
     def compare(p: dict) -> tuple:
         """diff_boards of the prediction `p` (or one of its enemy_branches)."""
@@ -2340,6 +2368,7 @@ def end_turn(ctx) -> list:
                                                        - mines(after, "Freeze_Mine")),
                            repair_mines_gone=frozenset(mines(state, "Item_Repair_Mine")
                                                        - mines(after, "Item_Repair_Mine")),
+                           fire_tiles=burning, burrowers=burrowers,
                            random_thaw=any(ev.get("type") == "thawed" for ev in phase.get("events", [])),
                            resist=resist_info(p),
                            xp_split=bool(phase.get("xp_split")))
