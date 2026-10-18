@@ -156,12 +156,16 @@ PLAN = [
 
 class FakeEngine:
     def __init__(self, plan=PLAN, after_enemy=None, enemy_phase=None, clears=None, shields=None,
-                 enemy_shields=(), enemy_branches=()):
+                 enemy_shields=(), enemy_branches=(), resisted=None):
         self.plan = plan
         # [(choices, after_enemy(board) -> compact, enemy_phase)]: the
         # "enemy_branches" a predict with "branches" returns.
         self.enemy_branches = list(enemy_branches)
         self.branch_requests = []
+        # after_enemy(board) -> compact for a predict with "resist" (the
+        # Grid Defense rolls resisted); None: the same as without.
+        self.resisted = resisted
+        self.resist_requests = []
         # (k, tiles): from plan step k on, the boards' "shield_tiles" (the
         # structures the plan shielded); after the enemy phase, enemy_shields.
         # None: boards without "shield_tiles" (an itb_live from before it).
@@ -234,11 +238,18 @@ class FakeEngine:
         out.update(searched=True, proven_optimal=True, worst_case={"grid": 0}, stats={"time_s": 0.1})
         return out
 
-    def predict(self, path, plan, branches=0):
+    def predict(self, path, plan, branches=0, resist=None):
         self.predicts.append(plan)
         self.predict_states.append(self._state(path))
         # A given plan (`turn --plan`) plays out as this engine's own plan.
         out = self._simulate(self._state(path), self.plan if plan else [])
+        if resist:
+            self.resist_requests.append([list(p) for p in resist])
+            if self.resisted is not None:
+                b = copy.deepcopy(self._state(path))
+                for s in (self.plan if plan else []):
+                    apply(b, s)
+                out["after_enemy"] = self.resisted(b)
         if branches:
             self.branch_requests.append(branches)
             b = copy.deepcopy(self._state(path))
@@ -1695,6 +1706,59 @@ class LivePlayTest(unittest.TestCase):
         self.assertIn("enemy phase: MATCH", text)
 
     @staticmethod
+    def scorpion_shocked(st):
+        """The Scorpion at 2 HP: Void Shocker shocked it (its only hit was resisted)."""
+        st = copy.deepcopy(st)
+        unit(st, 100)["hp"] = 2
+        return st
+
+    RESIST_PHASE = {"mission_ended": False, "chance_nodes": 1, "grid_defense": [{"point": [2, 2], "amount": 1}]}
+
+    def test_end_turn_takes_the_resisted_rerun_when_a_resist_changes_more(self):
+        # Fuzz 20261018_082428 sample 1: Firefly2#6551's only hit was the
+        # building at G7; the game resisted it, so Void Shocker shocked the
+        # Firefly. The worst-case prediction (no resist) has the building
+        # hit and the Firefly unhurt; the enemy phase re-run with that roll
+        # resisted matches the game.
+        self.bridge()
+        self.fb.next_turn = lambda st: self.scorpion_shocked(FakeBridge.default_next(st))
+        eng = FakeEngine(after_enemy=self.building_not_resisted, enemy_phase=self.RESIST_PHASE,
+                         resisted=lambda st: compact(self.scorpion_shocked(st)))
+        code, text = self.say_end_turn(eng)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng.resist_requests, [[[2, 2]]])
+        self.assertIn("Grid Defense resisted at F6", text)
+        self.assertIn("re-run with the roll(s) at F6 resisted matches", text)
+        self.assertIn("enemy phase: MATCH", text)
+        self.assertTrue(list(self.run_dir().glob("*_prediction_resisted.json")))
+
+    def test_end_turn_resisted_rerun_that_still_differs_stops(self):
+        self.bridge()
+        self.fb.next_turn = lambda st: self.scorpion_shocked(FakeBridge.default_next(st))
+        eng = FakeEngine(after_enemy=self.building_not_resisted, enemy_phase=self.RESIST_PHASE, resisted=compact)
+        code, text = self.say_end_turn(eng)
+        self.assertEqual(code, 1, text)
+        self.assertEqual(eng.resist_requests, [[[2, 2]]])
+        self.assertIn("Scorpion1#100 hp: engine 3, game 2", text)
+        self.assertIn("re-run with the Grid Defense roll(s) at F6 resisted differs too", text)
+
+    def test_end_turn_resist_alone_needs_no_rerun(self):
+        # The building is all the resist changed: a note, no second predict.
+        self.bridge()
+        eng = FakeEngine(after_enemy=self.building_not_resisted, enemy_phase=self.RESIST_PHASE)
+        code, text = self.say_end_turn(eng)
+        self.assertEqual(code, 0, text)
+        self.assertEqual(eng.resist_requests, [])
+
+    def test_end_turn_without_a_resist_asks_for_no_rerun(self):
+        self.bridge()
+        self.fb.next_turn = lambda st: self.scorpion_shocked(FakeBridge.default_next(st))
+        eng = FakeEngine(enemy_phase=self.RESIST_PHASE, resisted=lambda st: compact(self.scorpion_shocked(st)))
+        code, text = self.say_end_turn(eng)
+        self.assertEqual(code, 1, text)
+        self.assertEqual(eng.resist_requests, [])
+
+    @staticmethod
     def scorpion_crushed(st):
         """A hidden choice's first outcome: a mission hook's drop kills the Scorpion."""
         b = compact(st)
@@ -2794,6 +2858,28 @@ class DiffBoardsTest(unittest.TestCase):
         r = lp.resist_info({"enemy_phase": {"chance_nodes": 2, "grid_defense": [{"point": [2, 1], "amount": 1}]},
                             "after_player": {"buildings": []}})
         self.assertEqual(r["tiles"], {(2, 1)})
+
+    def test_resisted_rolls(self):
+        # The rolls itb_live predict "resist" re-runs: one per roll the kept
+        # HP needs, in order, on the buildings the game kept.
+        def rolls(engine_hp, game_hp, before_hp=2, grid_defense=None, chance_nodes=1):
+            phase = {"chance_nodes": chance_nodes}
+            if grid_defense is not None:
+                phase["grid_defense"] = grid_defense
+            pred = {"enemy_phase": phase,
+                    "after_player": self.board([], [self.building(2, 1, before_hp), self.building(5, 5, 2)]),
+                    "after_enemy": self.board([], [b for b in [self.building(2, 1, engine_hp),
+                                                               self.building(5, 5, 2)] if b["hp"] > 0])}
+            return lp.resisted_rolls(pred, self.board([], [self.building(2, 1, game_hp), self.building(5, 5, 2)]))
+        two_hits = [{"point": [2, 1], "amount": 1}, {"point": [5, 5], "amount": 1}, {"point": [2, 1], "amount": 1}]
+        self.assertEqual(rolls(0, 2, grid_defense=two_hits), [[2, 1], [2, 1]])  # both kept
+        self.assertEqual(rolls(0, 1, grid_defense=two_hits), [[2, 1]])  # the first kept
+        self.assertEqual(rolls(0, 2, grid_defense=[{"point": [2, 1], "amount": 2}]), [[2, 1]])
+        self.assertEqual(rolls(1, 2), [[2, 1]])  # rolls not listed: one
+        self.assertEqual(rolls(1, 2, grid_defense=[{"point": [5, 5], "amount": 1}]), [])  # no roll on G6
+        self.assertEqual(rolls(1, 2, chance_nodes=0), [])  # no chance node
+        self.assertEqual(rolls(1, 1), [])  # as predicted
+        self.assertEqual(rolls(1, 2, before_hp=1), [])  # more than before the phase
 
     # A Soldier Psion emerging from a hidden spawn: every Vek +1 HP at once.
     # Live 2026-10-10 m24 turn 1 (Jelly_Health1 from a spawn point).

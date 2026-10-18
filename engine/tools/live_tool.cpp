@@ -3,7 +3,7 @@
 //
 //   itb_live [--game DIR] solve <state.json> [--time S] [--nodes N] [--threads N]
 //            [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns]] [--out FILE] [--pretty]
-//   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--branches N] [--threat-tier] [--out FILE] [--pretty]
+//   itb_live [--game DIR] predict <state.json> --plan JSON|@FILE [--branches N] [--resist JSON|@FILE] [--threat-tier] [--out FILE] [--pretty]
 //   itb_live [--game DIR] board <state.json> [--pretty]
 //   itb_live [--game DIR] actions <state.json> [--plan JSON|@FILE] [--no-effects] [--out FILE] [--pretty]
 //   itb_live [--game DIR] deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N]
@@ -257,9 +257,13 @@ int weapon_index(const Pawn* p, const std::string& weapon) {
 // Fills out["plan"], ["steps"], ["refused"], the boards and the predicted
 // score, and appends to `warnings`. `branches` > 0: also the enemy phase's
 // other hidden-choice outcomes (enemy_branches below), at most that many.
+// `resist`: the enemy phase's Grid Defense outcomes instead of none resisted,
+// one entry per resisted roll: each resists the next roll on its tile (a
+// tile listed twice resists its first two rolls); every other roll does not.
 void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& plan, json& out,
               std::vector<std::string>& warnings, const ScoreOptions& score_options,
-              const LookaheadOptions* lookahead = nullptr, int branches = 0) {
+              const LookaheadOptions* lookahead = nullptr, int branches = 0,
+              const std::vector<Point>& resist = {}) {
   Board b = l.board;
   ActionOptions opts = action_options(l.ctx);  // the mission's per-frame hooks
   opts.check_legal = true;
@@ -337,6 +341,18 @@ void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
   }
   out["after_player"] = live_board_json(b);
   TurnContext ctx = l.ctx;
+  // The resisted rolls (live_play: the game kept buildings the worst case
+  // loses). Each run of the phase consumes its own copy of the list.
+  auto resisting = [&resist](TurnContext& c) {
+    if (resist.empty()) return;
+    c.grid_resist = [left = resist](Point p, int) mutable {
+      const auto it = std::find(left.begin(), left.end(), p);
+      if (it == left.end()) return false;
+      left.erase(it);
+      return true;
+    };
+  };
+  resisting(ctx);
   const Board after_player = b;
   engine.lua().seed(kLuaSeed);
   const PhaseResult pr = engine.end_turn(b, ctx);
@@ -372,6 +388,7 @@ void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
       std::vector<int> options;
       json choices = json::array();
       TurnContext bctx = l.ctx;
+      resisting(bctx);
       bctx.choose = [&](const ChanceRecord& node) {
         const int pick = options.size() < prefix.size() ? prefix[options.size()] : 0;
         options.push_back(node.options);
@@ -1053,6 +1070,7 @@ json LiveSession::handle(const json& request) {
     }
     std::vector<std::string> warnings;
     std::vector<PlayerAction> plan;
+    std::vector<Point> resist;  // predict: the enemy phase's resisted Grid Defense rolls
     const SolveOptions tiers = ranking_options(request, l.repair_skills);
     if (const int rate = mech_grid_rate(l.board, tiers.score_options()); rate >= 0) {
       out["mech_grid_rate"] = rate;
@@ -1074,6 +1092,13 @@ json LiveSession::handle(const json& request) {
     if (cmd == "predict") {
       if (!request.contains("plan")) throw std::invalid_argument("predict needs a 'plan'");
       plan = parse_plan(request["plan"]);
+      if (auto it = request.find("resist"); it != request.end() && it->is_array()) {
+        for (const json& p : *it) {
+          const Point q = json_point(p);
+          if (!q.valid()) throw std::invalid_argument("predict: 'resist' takes [x, y] tiles");
+          resist.push_back(q);
+        }
+      }
     } else {
       out["searched"] = l.active_units > 0;
       if (l.active_units > 0) {
@@ -1136,7 +1161,8 @@ json LiveSession::handle(const json& request) {
       }
     }
     simulate(*main_, l, plan, out, warnings, tiers.score_options(),
-             tiers.lookahead ? &tiers.lookahead_options : nullptr, std::max(0, request.value("branches", 0)));
+             tiers.lookahead ? &tiers.lookahead_options : nullptr, std::max(0, request.value("branches", 0)),
+             resist);
     std::vector<std::string> unique;
     for (const std::string& w : warnings) {
       if (std::find(unique.begin(), unique.end(), w) == unique.end()) unique.push_back(w);
@@ -1279,6 +1305,8 @@ int run_live(int argc, char** argv) {
         request["threads"] = threads;
       } else if (args[i] == "--branches" && more && cmd == "predict") {
         request["branches"] = std::stoi(args[++i]);
+      } else if (args[i] == "--resist" && more && cmd == "predict") {
+        request["resist"] = json::parse(read_text_arg(args[++i]));
       } else if (args[i] == "--plan" && more && (cmd == "predict" || cmd == "actions")) {
         request["plan"] = json::parse(read_text_arg(args[++i]));
       } else if (args[i] == "--no-effects" && cmd == "actions") {

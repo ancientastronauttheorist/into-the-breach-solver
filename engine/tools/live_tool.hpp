@@ -28,7 +28,11 @@
 //       random picks (e.g. the Final Cave's bomb drop) with the branch the
 //       prediction took (0); "branches" N > 0 adds "enemy_branches": up to
 //       N other outcomes of them, each {"choices", "after_enemy",
-//       "enemy_phase"}, and "enemy_branches_complete" (all were run)
+//       "enemy_phase"}, and "enemy_branches_complete" (all were run).
+//       "resist": [[x, y], ...] runs the enemy phase (and its branches)
+//       with those Grid Defense rolls resisted instead of none: each entry
+//       resists the next roll on its tile, every other roll does not
+//       (live_play, after the game kept a building the worst case loses)
 //   {"cmd": "deploy", "state": "...", "time_limit": 45, "threads": N,
 //    "screen_samples": 3, "finalists": 3, "samples": 12, "solve_time": 0.5,
 //    "solve_nodes": 0, "seed": 1, "placements": [[[x,y], ...], ...],

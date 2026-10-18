@@ -234,7 +234,8 @@ bool Simulation::is_exploding(const Pawn& pawn) const {
 }
 
 // Pawn::TriggerDeathEffect: [ACID pool, Fast Decay forest, Lua entries],
-// appended to the stack as a FULL_DELAY follow-up effect.
+// appended to the stack as a FULL_DELAY follow-up effect (+0x60 set: the
+// last-shot record, HitSomething flag included, stays as it is).
 void Simulation::trigger_death_effect(Pawn& pawn, PawnSim& ps) {
   ps.death_fx_pending = false;
   const int32_t uid = pawn.uid;
@@ -326,8 +327,16 @@ void Simulation::detonate_corpse(Pawn& pawn, PawnSim& ps) {
   }
   prepare_effect(fx, pos, pos, last_team_ != Team::None ? last_team_ : pawn.team, kNoSymbol);
   fx.owner = last_owner_ >= 0 ? last_owner_ : pawn.uid;
-  fx.follow_up = true;
-  push_back(std::move(fx), kFullDelay, last_shot_, new_cause());
+  // Unlike TriggerDeathEffect, DetonateCorpse never sets the follow-up flag
+  // (+0x60) and its effect has no skill name. Board::ApplyEffect then records
+  // it as a new last shot: the shooter's owner and team, an empty name. The
+  // name differs from the shot that caused the death, so SetLastEffect
+  // replaces the record and its HitSomething flag starts over. For Void
+  // Shocker, the explosion (or spider egg) is judged on its own (fuzz
+  // 20261018_082428 s7: a Scorpion2 whose sting killed a Burnbug under the
+  // Arachnid Psion was shocked, because the egg it left hit nothing).
+  fx.follow_up = false;
+  push_back(std::move(fx), kFullDelay, kNoSymbol, new_cause());
   ps.detonate_pending = false;
   changed_ = true;
   log(ResolveEventType::CorpseExploded, pos, pawn.uid);

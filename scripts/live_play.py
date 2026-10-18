@@ -49,7 +49,8 @@ matched by uid, not reported as a spawn.
 Notes, not differences: a Vek picking up an acid pool while the AI plans; a
 unit put out by smoke a Mosquito lays on it while the AI plans; a Vek
 catching fire on the burning tile it moves to while the AI plans, or a
-Burrower put out by burrowing (its AI move); a Grid Defense resist the prediction (worst case: no resist) could not know; a
+Burrower put out by burrowing (its AI move); a Grid Defense resist the prediction (worst case: no resist) could not know
+(when more than the building differs, the enemy phase is predicted again with those rolls resisted); a
 Soldier Psion / Psion Abomination emerging from a hidden spawn (+1 HP to
 every Vek).
 
@@ -593,12 +594,16 @@ class Engine:
                     req["survival_cap_strict"] = True
         return self.request(req)
 
-    def predict(self, path: Path, plan: list, branches: int = 0) -> dict:
+    def predict(self, path: Path, plan: list, branches: int = 0, resist: list | None = None) -> dict:
         """branches > 0: also up to that many other outcomes of the enemy
-        phase's hidden choices ("enemy_branches", itb_live predict)."""
+        phase's hidden choices ("enemy_branches", itb_live predict).
+        resist: [[x, y], ...], the enemy phase's Grid Defense rolls to resist
+        (each resists the next roll on its tile) instead of none."""
         req = {"cmd": "predict", "state": str(path), "plan": plan}
         if branches > 0:
             req["branches"] = branches
+        if resist:
+            req["resist"] = [list(p) for p in resist]
         return self.request(req)
 
     def board(self, path: Path) -> dict:
@@ -2275,6 +2280,39 @@ def resist_info(pred: dict) -> dict | None:
     return {"before": pred.get("after_player") or pred.get("start") or {}, "tiles": tiles}
 
 
+def resisted_rolls(pred: dict, live: dict) -> list:
+    """The enemy phase's Grid Defense rolls the game resisted, as itb_live
+    predict's "resist" list ([x, y] once per roll): the buildings the
+    prediction (no resist, the worst case) damaged that the game shows with
+    more HP, at most their HP before, on a roll tile (diff_boards' test).
+    A building that kept more HP than its first roll took resisted as many
+    of its rolls, in order, as that HP needs. Empty without chance nodes.
+    A resist changes what follows (Void Shocker shocks a Vek whose only hit
+    was resisted; the building can be hit again), so the caller re-runs the
+    phase with these rolls resisted rather than patch the prediction."""
+    info = resist_info(pred)
+    if info is None:
+        return []
+    before = {(b["x"], b["y"]): b["hp"] for b in info["before"].get("buildings", [])}
+    want = {(b["x"], b["y"]): b["hp"] for b in pred["after_enemy"]["buildings"]}
+    got = {(b["x"], b["y"]): b["hp"] for b in live["buildings"]}
+    rolls = (pred.get("enemy_phase") or {}).get("grid_defense") or []
+    out = []
+    for xy in sorted(before):
+        engine_hp, game_hp = want.get(xy, 0), got.get(xy)
+        if game_hp is None or not engine_hp < game_hp <= before[xy]:
+            continue
+        if info["tiles"] is not None and xy not in info["tiles"]:
+            continue
+        amounts = [r.get("amount") or 1 for r in rolls if tuple(r.get("point") or ()) == xy]
+        kept, n = game_hp - engine_hp, 0
+        while n < len(amounts) and kept > 0:
+            kept -= amounts[n]
+            n += 1
+        out += [list(xy)] * max(n, 1)
+    return out
+
+
 def branch_text(branch: dict) -> str:
     """One enemy_branches entry in words: its picks and the mission hooks it ran."""
     picks = ", ".join(f"{c.get('kind')} {c.get('pick', 0) + 1}/{c.get('options')}" for c in branch.get("choices", []))
@@ -2435,12 +2473,31 @@ def end_turn(ctx) -> list:
                            xp_split=bool(phase.get("xp_split")))
 
     diffs, notes = compare(pred)
+    rolls = resisted_rolls(pred, live) if diffs else []
+    if rolls:
+        # The game resisted Grid Defense rolls the prediction (worst case)
+        # did not, and something else differs: the resist can change more
+        # than the building (fuzz 20261018_082428 sample 1: Void Shocker
+        # shocked a Firefly2 whose only hit, on G7, was resisted). Run the
+        # enemy phase again with those rolls resisted.
+        resisted = engine.predict(pred_path, [], resist=rolls)
+        run.save_json(prediction_path(pred_path).stem + "_resisted.json", resisted)
+        r_diffs, r_notes = compare(resisted)
+        where = ", ".join(visual(*xy) for xy in rolls)
+        if not r_diffs:
+            pred, diffs = resisted, []
+            notes = ([n for n in notes if n.startswith("Grid Defense resisted")] + r_notes +
+                     [f"Grid Defense: the enemy phase re-run with the roll(s) at {where} resisted matches the "
+                      "game (the prediction took none resisted, the worst case)"])
+        else:
+            notes.append(f"the enemy phase re-run with the Grid Defense roll(s) at {where} resisted differs "
+                         f"too: {'; '.join(r_diffs)}")
     if diffs and (pred.get("enemy_phase") or {}).get("hidden_choices"):
         # The prediction took the first outcome of each hidden choice (the
         # Final Cave's bomb drop tile, an environment order); the game may
         # have taken another (fuzz 20261017_000242 sample 4: the new bomb
         # fell on the Scorpion at C6, the prediction's on the rock at E6).
-        branched = engine.predict(pred_path, [], branches=ENEMY_BRANCHES)
+        branched = engine.predict(pred_path, [], branches=ENEMY_BRANCHES, resist=rolls)
         run.save_json(prediction_path(pred_path).stem + "_branches.json", branched)
         found = matching_branch(pred, branched, compare)
         if found is not None:

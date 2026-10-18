@@ -1721,6 +1721,84 @@ TEST_CASE("fuzz: Void Shocker shocks the Vek whose attack hit nothing (20261018_
   }
 }
 
+TEST_CASE("fuzz: a corpse detonation starts a new last shot (Void Shocker, 20261018_082428 s7)") {
+  NEED_ENGINE();
+  // IgniteMech #1 carries Passive_VoidShock; Jelly_Spider1 #687 (Arachnid
+  // Psion) is up. End Turn: Burnbug1 #690 (2 HP) grapples from E4 into the
+  // building at G4 and pulls itself onto the forest at F4; Scorpion2 #691
+  // stings F4 and kills it. The psion's egg comes from Pawn::DetonateCorpse,
+  // whose effect is no follow-up: Board::ApplyEffect records it as a new
+  // shot (the Scorpion's id and team, no name), so the sting's hit is
+  // forgotten and the egg hits nothing: the game shocked the Scorpion (4 ->
+  // 3). Burnbug1 #697's grapple at the empty C3 hit nothing either (3 -> 2).
+  // The egg hatched while the AI planned (not modelled): the game has a
+  // Spiderling1 instead, which moved off the burning F4 to E4.
+  const Recording before = live_fixture("fuzz_voidshock_egg_t2_end_turn.json");
+  const Recording after = live_fixture("fuzz_voidshock_egg_t3_after_enemy.json");
+  REQUIRE(before.board.has_passive(kPassiveVoidShock));
+  REQUIRE(before.board.psion == Leader::Spider);
+  const int32_t burnbug = 690, scorpion = 691, other_burnbug = 697;
+  Board b = before.board;
+  TurnContext ctx = turn_context(before, Visibility::Full);
+  const PhaseResult r = E.end_turn(b, ctx);
+  CHECK(fired(r).count(burnbug) == 1);
+  CHECK(fired(r).count(scorpion) == 1);
+  CHECK(dead(b, burnbug));
+  CHECK(hp_of(b, scorpion) == 3);
+  CHECK(hp_of(b, other_burnbug) == 2);
+  const Pawn* egg = board_pawn(b, {4, 2});
+  REQUIRE(egg != nullptr);
+  CHECK(symbol_name(egg->type) == "SpiderlingEgg1");
+  for (const Pawn& p : before.board.pawns()) {
+    if (!p.alive()) continue;
+    CAPTURE(p.uid);
+    const Pawn* g = after.board.find_pawn(p.uid);
+    const Pawn* e = b.find_pawn(p.uid);
+    const bool engine_alive = e && e->alive() && !e->fallen;
+    CHECK(engine_alive == (g != nullptr));
+    if (g && e) CHECK(e->hp == g->hp);
+  }
+  CHECK(b.grid_power == after.board.grid_power);
+}
+
+TEST_CASE("fuzz: Grid Defense resisting a Firefly's only hit gets it shocked (Void Shocker, 20261018_082428 s1)") {
+  NEED_ENGINE();
+  // PierceMech #1 carries Passive_VoidShock. End Turn: Firefly2 #6551 (G3)
+  // shoots up its column; the shot's only hit is the building at G7, which
+  // the game resisted: no hit, so the Firefly lost 1 HP (5 -> 4), the
+  // building kept its HP and the grid stayed 5. The worst case (no resist)
+  // has the building hit and the Firefly at 5; live_play re-predicts with
+  // the resist (itb_live predict "resist") rather than call that a finding.
+  const Recording before = live_fixture("fuzz_voidshock_resist_t3_end_turn.json");
+  const Recording after = live_fixture("fuzz_voidshock_resist_t4_after_enemy.json");
+  REQUIRE(before.board.has_passive(kPassiveVoidShock));
+  const int32_t firefly = 6551;
+  const Point g7{1, 1};
+  auto run = [&](bool resist) {
+    Board b = before.board;
+    TurnContext ctx = turn_context(before, Visibility::Full);
+    ctx.grid_resist = [resist, g7](Point p, int) { return resist && p == g7; };
+    E.end_turn(b, ctx);
+    return b;
+  };
+  const Board worst = run(false);
+  CHECK(hp_of(worst, firefly) == 5);
+  CHECK(worst.tile(g7).hp == before.board.tile(g7).hp - 1);
+  const Board b = run(true);
+  CHECK(hp_of(b, firefly) == 4);
+  CHECK(b.tile(g7).hp == after.board.tile(g7).hp);
+  CHECK(b.grid_power == after.board.grid_power);
+  for (const Pawn& p : before.board.pawns()) {
+    if (!p.alive()) continue;
+    CAPTURE(p.uid);
+    const Pawn* g = after.board.find_pawn(p.uid);
+    const Pawn* e = b.find_pawn(p.uid);
+    const bool engine_alive = e && e->alive() && !e->fallen;
+    CHECK(engine_alive == (g != nullptr));
+    if (g && e) CHECK(e->hp == g->hp);
+  }
+}
+
 // ---- Void Shocker (Passive_VoidShock, Board::OnLoop @00955070) ----------------------------
 
 namespace {
@@ -1813,6 +1891,45 @@ TEST_CASE("Void Shocker: bots too, and the shock kills") {
   queue(b, t, {1, 3});  // the shell flies to the board's edge over empty ground
   E.end_turn(b, context());
   CHECK(dead(b, t));
+}
+
+TEST_CASE("Void Shocker: a kill whose corpse detonates is judged on the detonation") {
+  NEED_ENGINE();
+  // Firefly1 at (3,1) shoots up the column and kills the Leaper1 (1 HP) at
+  // (3,4). A death effect (TriggerDeathEffect: the ACID pool) is a
+  // follow-up and keeps the shot's hit. A corpse detonation (DetonateCorpse:
+  // a psion's explosion or spider egg) is a new record with no name, so
+  // the Firefly is shocked unless the detonation itself hits something.
+  struct Case {
+    const char* what;
+    bool shocked;
+  };
+  for (const Case c : {Case{"plain", false}, Case{"acid", false}, Case{"spider egg", true},
+                       Case{"blast", true}, Case{"blast on a hornet", false}}) {
+    const std::string what = c.what;
+    CAPTURE(what);
+    Board b = void_shock_board();
+    const int32_t f = place(b, "Firefly1", {3, 1});
+    const int32_t l = place(b, "Leaper1", {3, 4});
+    REQUIRE(hp_of(b, l) == 1);
+    if (what == "acid") P(b, l).acid = true;
+    if (what == "spider egg") place(b, "Jelly_Spider1", {7, 7});
+    if (what == "blast" || what == "blast on a hornet") place(b, "Jelly_Explode1", {7, 7});
+    int32_t h = -1;
+    if (what == "blast on a hornet") h = place(b, "Hornet1", {3, 5});
+    set_psion(b);
+    queue(b, f, {3, 2});
+    const int before = hp_of(b, f);
+    E.end_turn(b, context());
+    CHECK(dead(b, l));
+    CHECK(hp_of(b, f) == before - (c.shocked ? 1 : 0));
+    if (what == "spider egg") {
+      const Pawn* egg = board_pawn(b, {3, 4});
+      REQUIRE(egg != nullptr);
+      CHECK(symbol_name(egg->type) == "SpiderlingEgg1");
+    }
+    if (h >= 0) CHECK(hp_of(b, h) == 1);
+  }
 }
 
 TEST_CASE("Void Shocker: immune types, telegraphing skills and moves are spared") {

@@ -209,7 +209,13 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   (the prediction takes every roll as not resisted, its worst case: with
   chance nodes in the prediction, a building it damaged that the game shows
   with more HP, at most its HP before the phase and on a tile with a roll,
-  with the grid higher by exactly the HP kept); a Soldier Psion or Psion
+  with the grid higher by exactly the HP kept; when something else differs
+  too, the driver predicts again with those rolls resisted, `"resist":
+  [[x, y], ...]` (`itb_live predict --resist`, each entry resists the next
+  roll on its tile; saved as `..._prediction_resisted.json`), and takes
+  that prediction if it matches: a resist can change more than the
+  building, e.g. Void Shocker shocks a Vek whose only hit was resisted,
+  fuzz 20261018_082428 sample 1); a Soldier Psion or Psion
   Abomination emerging from a hidden spawn (every Vek of its team +1 HP at
   once); another outcome of a hidden choice (the prediction's
   `hidden_choices`: an environment order or choice, a mission hook's
@@ -774,7 +780,15 @@ Done so far (build order from the decompile):
      re-record it (delayed remainders); a new record clears it
      (`RulesContext::shot_hit`). Fuzz 2026-10-18 s1: a Leaper whose bite a
      building resisted and a Centipede that spat at an empty tile took 1
-     each.
+     each. A death effect (`Pawn::TriggerDeathEffect`: Lua death effects,
+     ACID pools, Fast Decay) is a follow-up and keeps the record. A corpse
+     detonation (`Pawn::DetonateCorpse`: Explosive Vek, the Blast and Boss
+     psions' explosions, the Arachnid Psion's egg, Burns) is not: it
+     carries the shooter's owner and team but no name, so it starts a new
+     record and is judged on its own. A Vek whose kill only left a spider
+     egg, or set off an explosion that hit nothing, is shocked (fuzz
+     20261018_082428 s7: Scorpion2 killed a Burnbug under the Arachnid
+     Psion and took 1).
    - Outcomes that hinge on two events within one frame are reported as
      timing-sensitive; Grid Defense rolls and spider-egg picks are logged as
      chance nodes.
