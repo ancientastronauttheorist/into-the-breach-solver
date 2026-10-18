@@ -389,6 +389,7 @@ python3 scripts/fuzz_play.py --samples 20 --minutes 60               # live: qui
 python3 scripts/fuzz_play.py --put-back recordings/fuzz/<session> [--dry-run]  # the profile's own saves back
 python3 scripts/coverage_report.py [--unseen]                        # what the recordings never exercised
 python3 scripts/fuzz_play.py --dry-run --coverage --samples 60       # inject what they never exercised
+python3 scripts/fuzz_play.py --unfired --samples 10                  # inject the weapons never fired, and fire them
 python3 scripts/fuzz_play.py --loadout '0:Prime_Lasermech_A,Passive_FlameImmune;pilot=Pilot_Rock' --samples 5
 python3 scripts/loadout.py --check                                   # the save model vs every recorded checkpoint, and rewrites of each
 ```
@@ -554,7 +555,12 @@ python3 scripts/loadout.py --check                                   # the save 
   carry the loadout. `--coverage` gives each living mech an unseen weapon
   of its class first (else off class), a passive as secondary while one is
   left, and an unseen pilot; an item goes once (unplayed or inconclusive
-  ones come back, 3 times at most).
+  ones come back, 3 times at most). `--unfired` gives each living mech two
+  active weapons the recordings never fired (carried or not; no passives
+  or pilots), and one goes only once the game fired it. With either, the
+  choice of sub-actions favours a never-fired weapon 25 times over as a
+  group (`FIRE_BOOST`), and the turn does not end at random while one can
+  still fire; the summary says which injected weapons fired.
 - `scripts/coverage_report.py` lists the player weapons (upgrades apart),
   passives, pilots, level-up skills, missions and enemy types the recorded
   turn starts hold (and the weapons the executed plans fired) against the

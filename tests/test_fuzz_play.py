@@ -92,6 +92,24 @@ class FuzzEngine(tlp.FakeEngine):
         return out
 
 
+class ArmedEngine(FuzzEngine):
+    """FuzzEngine that also lets every mech fire each weapon it holds
+    (weapons_exact) at the Scorpion: loadouts injected show up."""
+
+    def actions(self, path, plan, effects=True):
+        reply = super().actions(path, plan, effects)
+        st = self._play(self._state(path), plan)
+        for u in st["units"]:
+            if u.get("team") == 1 and u.get("mech"):
+                for w in u.get("weapons_exact") or []:
+                    if not w.startswith("Passive_"):
+                        reply["actions"].append({"sub": "weapon", "uid": u["uid"], "weapon": w, "target": [3, 3],
+                                                 "target_kind": "unit_enemy", "slot": 0, "target2": None,
+                                                 "end": [3, 3], "effect": {"hp": {"enemy": 1}, "kills": {}}})
+        reply["units"] = [{"uid": u["uid"], "can_act": True} for u in st["units"] if u.get("team") == 1]
+        return reply
+
+
 CANDIDATES = [
     {"sub": "move", "uid": 0, "weapon": "Move", "target": [3, 4], "target_kind": "road"},
     {"sub": "weapon", "uid": 0, "weapon": "Prime_Lasermech_A", "target": [3, 3], "target_kind": "unit_enemy"},
@@ -866,6 +884,64 @@ class FuzzTest(unittest.TestCase):
             if not wid.startswith("Pilot_"):
                 self.assertEqual(given.count(wid), 1, wid)
         self.assertIn("coverage_left", meta)
+
+    def test_the_chooser_fires_a_target_weapon_and_the_turn_waits_for_it(self):
+        path = self.record()
+        hits = 0
+        for seed in range(20):
+            rng = random.Random(seed)
+            chooser = fz.Chooser(rng, targets={"Brute_Tankmech"})
+            # stop_prob 1: the turn would end after its first step, but not
+            # while the target weapon can still fire.
+            seq = fz.generate(FuzzEngine(CANDIDATES), path, chooser, rng, {}, {0: None, 1: None}, 10, 1.0)
+            self.assertIn("Brute_Tankmech", [a.get("weapon") for a in seq.plan], seed)
+            hits += seq.plan[0].get("weapon") == "Brute_Tankmech"
+        self.assertGreater(hits, 14)  # FIRE_BOOST: mostly first
+
+    def test_unfired_injects_and_fires_weapons_the_recordings_never_fired(self):
+        game = self.loadout_setup()
+        # Live play fired the Laser (m00_turn_01_solve.json): not a target.
+        d = lp.LIVE_ROOT / "20261016_000000"
+        (d / "m00_turn_01_solve.json").write_text(json.dumps(
+            {"data": {"actions": [{"weapon_id": "Prime_Lasermech_A"}]}}))
+        eng = ArmedEngine(CANDIDATES)
+        rc, sess, samples, meta, eng = self.dry(game, ["--samples", "4", "--unfired"], eng)
+        self.assertEqual(rc, 0)
+        specs = [tl.lo.parse_spec(s["loadout"]["spec"]) for s in samples if s.get("loadout")]
+        given = [w for spec in specs for m in spec for w in m.weapons or [] if w != "*"]
+        self.assertTrue(given)
+        self.assertNotIn("Prime_Lasermech_A", given)
+        self.assertFalse([m.pilot for spec in specs for m in spec if m.pilot])  # weapons only
+        self.assertFalse([w for w in given if w.startswith("Passive_")])
+        status = meta["loadout_items"]
+        fired = {k.split(":", 1)[1] for k, v in status.items() if v.get("fired")}
+        self.assertTrue(fired)
+        for wid in fired:  # fired once: used up (one not fired goes back)
+            after = [s for s in samples if s.get("loadout") and s["sample"] > min(status[f"weapon:{wid}"]["fired"])]
+            self.assertFalse([s for s in after for m in tl.lo.parse_spec(s["loadout"]["spec"])
+                              if wid in (m.weapons or [])], wid)
+        for rec in meta["loadout_samples"]:
+            self.assertIn("fired", rec)
+
+    def test_unfired_gives_back_a_weapon_the_sample_did_not_fire(self):
+        game = self.loadout_setup()
+        args = args_for(["--recordings", str(lp.LIVE_ROOT), "--game", str(game), "--unfired"])
+        lds = fz.Loadouts(args, random.Random(1), seen={"weapons": set(), "fired": set(), "pilots": set()})
+        pk = lds.picker
+        self.assertTrue(pk.unfired)
+        self.assertEqual((pk.passives, pk.pilots), ([], []))
+        self.assertTrue(lds.fire_targets >= set(pk.actives))
+        wid = pk.actives[0]
+        inj = type("Inj", (), {"items": lambda self: [("weapon", wid)]})()
+        ls = fz.LoadoutSample(inj, Path("x"), {}, {}, {f"weapon:{wid}": {"status": "supported"}})
+        pk.actives.remove(wid)
+        lds.unfired_back(ls, fired=set())
+        self.assertEqual(pk.actives[0], wid)
+        pk.actives.remove(wid)
+        lds.unfired_back(ls, fired={wid})
+        self.assertNotIn(wid, pk.actives)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fz.main(["--dry-run", "--recordings", str(lp.LIVE_ROOT), "--unfired", "--coverage"]), 2)
 
     def loadout_game(self, loaded_matches: bool) -> tuple:
         """The game for a live sample with SPEC: the profile holds the

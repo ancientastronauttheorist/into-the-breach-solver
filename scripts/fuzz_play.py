@@ -71,9 +71,11 @@ recorded turn starts, predicts them, and checks the engine against itself
 board; refusals, Lua errors, unmodelled Lua writes and frame-timing flags
 are counted), writing samples.jsonl and the same summary.
 
---loadout SPEC / --coverage rewrite each start's checkpoint first so the
-mechs carry other weapons, upgrades, passives and pilots
-(scripts/loadout.py; --coverage: what the recordings never exercised). The
+--loadout SPEC / --coverage / --unfired rewrite each start's checkpoint
+first so the mechs carry other weapons, upgrades, passives and pilots
+(scripts/loadout.py; --coverage: what the recordings never exercised;
+--unfired: the weapons they never fired, which the choice then favours
+until the game fired them). The
 engine is asked on the recorded start with that loadout; an item it does
 not model is an "unsupported" outcome, not played. Live, the bridge must
 show the loadout after the load, else "loadout_rejected".
@@ -114,6 +116,10 @@ OTHER_DRIVERS = (r"live_play\.py\s+(mission|turn|deploy|end-turn|restore)\b", r"
 
 # Sampling: a unit's weapons first, then moves, Repair seldom.
 GROUP_WEIGHT = {"weapon": 3.0, "move": 1.5, "repair": 0.4}
+# --coverage / --unfired: a weapon the recordings never fired weighs this
+# much more as a group, and the turn does not end at random while one can
+# still fire.
+FIRE_BOOST = 25.0
 STOP_PROB = 0.06
 MAX_STEPS = 12
 # Putting the profile's own run back at the end: Continue is clicked once,
@@ -306,13 +312,19 @@ class Chooser:
     """Weighted choice of the next sub-action. Two levels: a (unit, kind,
     weapon) group by GROUP_WEIGHT and its best candidate's interest, then a
     target within it by interest, each damped by how often the session has
-    already played the same kind of action (novelty). --uniform: every
-    candidate alike."""
+    already played the same kind of action (novelty). A weapon in `targets`
+    (never fired in the recordings) weighs FIRE_BOOST times more as a
+    group. --uniform: every candidate alike."""
 
-    def __init__(self, rng: random.Random, uniform: bool = False):
+    def __init__(self, rng: random.Random, uniform: bool = False, targets: set | None = None):
         self.rng = rng
         self.uniform = uniform
+        self.targets = set(targets or ())
         self.seen: Counter = Counter()
+
+    def wants(self, cands: list) -> bool:
+        """A candidate fires a target weapon."""
+        return any(c["sub"] == "weapon" and c["weapon"] in self.targets for c in cands)
 
     def weight(self, a: dict) -> float:
         return interest(a) / math.sqrt(1 + self.seen[novelty_key(a)])
@@ -326,7 +338,7 @@ class Chooser:
                 groups.setdefault((c["uid"], c["sub"], c["weapon"]), []).append(c)
             keys = sorted(groups)
             gw = [GROUP_WEIGHT.get(k[1], 1.0) * (1 + math.log1p(max(self.weight(c) for c in groups[k])))
-                  for k in keys]
+                  * (FIRE_BOOST if k[1] == "weapon" and k[2] in self.targets else 1.0) for k in keys]
             members = groups[self.rng.choices(keys, weights=gw)[0]]
             a = self.rng.choices(members, weights=[self.weight(c) for c in members])[0]
         self.seen[novelty_key(a)] += 1
@@ -360,7 +372,8 @@ def generate(engine, path: Path, chooser: Chooser, rng: random.Random, history: 
     prefix, keeps those the UI allows (`history`: what each unit already did
     this turn) and that leave at least `grid_floor` grid power, and picks
     one. Ends with no candidate left, after max_steps, or at random
-    (stop_prob per step after the first)."""
+    (stop_prob per step after the first; not while a candidate fires one
+    of the chooser's target weapons)."""
     seq = Sequence([], [], [], [])
     seqs = dict(history)
     while True:
@@ -375,7 +388,7 @@ def generate(engine, path: Path, chooser: Chooser, rng: random.Random, history: 
         grid = reply["board"].get("grid_power")
         cands = [a for a in reply["actions"] if ui_allows(a, seqs, skills)
                  and not (isinstance(grid, int) and grid - (a.get("effect") or {}).get("grid", 0) < grid_floor)]
-        if not cands or (seq.plan and rng.random() < stop_prob):
+        if not cands or (seq.plan and not chooser.wants(cands) and rng.random() < stop_prob):
             break
         a = chooser.choose(cands)
         seq.picks.append(a)
@@ -511,6 +524,7 @@ class Session:
         self.t0 = time.time()
         self.loadouts: Loadouts | None = None
         self.loadout: dict | None = None  # the current sample's injected loadout (findings carry it)
+        self.fired_now: set = set()  # weapons fired in the current sample
 
     def write_meta(self, extra: dict | None = None) -> None:
         meta = {"tool": "scripts/fuzz_play.py", "argv": sys.argv[1:], "created": lp.now_iso(),
@@ -533,6 +547,13 @@ class Session:
     def sample_log(self, rec: dict) -> None:
         with open(self.dir / "samples.jsonl", "a") as f:
             f.write(json.dumps(rec) + "\n")
+
+    def fire_targets(self) -> set:
+        return self.loadouts.fire_targets if self.loadouts is not None else set()
+
+    def fired(self, weapons) -> None:
+        """Weapons the game fired in this sample (its sub-actions sent)."""
+        self.fired_now.update(w for w in weapons if w)
 
     def count(self, seq: Sequence, executed: int | None = None) -> None:
         picks = seq.picks if executed is None else seq.picks[:executed]
@@ -709,19 +730,28 @@ class CoveragePicker:
     first, every living mech a new primary and secondary (a passive when
     one is left) and pilot. An item is used up once a sample played it
     (or the engine reported it unsupported); one whose sample was skipped
-    for another reason goes back, at most COVERAGE_TRIES times."""
+    for another reason goes back, at most COVERAGE_TRIES times.
 
-    def __init__(self, items: lo.Items, support: lo.Support, seen: dict, rng: random.Random):
+    unfired (--unfired): the active weapons the recordings never fired
+    instead (carried or not), two per mech, no passives or pilots; one is
+    used up only once the game fired it (fire_done)."""
+
+    def __init__(self, items: lo.Items, support: lo.Support, seen: dict, rng: random.Random,
+                 unfired: bool = False):
         self.items = items
+        self.unfired = unfired
         weapons = set(seen.get("weapons") or ())
+        fired = set(seen.get("fired") or ())
         pilots = set(seen.get("pilots") or ())
         actives, passives = [], []
         for wid in items.all_weapon_ids():
-            if wid in weapons:
-                continue
-            (passives if items.weapon(wid).passive else actives).append(wid)
+            if items.weapon(wid).passive:
+                if not unfired and wid not in weapons:
+                    passives.append(wid)
+            elif wid not in (fired if unfired else weapons):
+                actives.append(wid)
         self.actives, self.passives = actives, passives
-        self.pilots = [p for p in sorted(items.pilots) if p not in pilots]
+        self.pilots = [] if unfired else [p for p in sorted(items.pilots) if p not in pilots]
         for q in (self.actives, self.passives, self.pilots):
             rng.shuffle(q)
         self.static: dict = {}  # known unsupported before any sample (passives, pilots)
@@ -825,10 +855,14 @@ class Loadouts:
         self.support = lo.Support(self.items)
         self.fixed = [lo.parse_spec(s) for s in (args.loadout_specs or [])]
         self.picker = None
-        if args.coverage:
+        self.fire_targets: set = set()  # weapons the recordings never fired (the chooser favours them)
+        if args.coverage or args.unfired:
             if seen is None:
                 seen = coverage_seen(args)
-            self.picker = CoveragePicker(self.items, self.support, seen, rng)
+            self.picker = CoveragePicker(self.items, self.support, seen, rng, unfired=args.unfired)
+            fired = set(seen.get("fired") or ())
+            self.fire_targets = {w for w in self.items.all_weapon_ids()
+                                 if not self.items.weapon(w).passive and w not in fired}
         self.n = 0
         self.status: dict = {}  # item key -> {"status", "why", "samples": [...]}
         if self.picker:
@@ -857,13 +891,26 @@ class Loadouts:
             items = [it for it in items if ls.acceptance.get(item_key(*it), {}).get("status") == "inconclusive"]
         self.picker.give_back(items)
 
-    def note(self, sample: int, ls: LoadoutSample, outcome: str) -> None:
+    def note(self, sample: int, ls: LoadoutSample, outcome: str, fired: set | None = None) -> None:
         for k, v in ls.acceptance.items():
             st = self.status.setdefault(k, {"status": v["status"], "why": v.get("why"), "samples": []})
             if v["status"] == "unsupported" or st["status"] == "inconclusive":
                 st.update(status=v["status"], why=v.get("why"))
             st["samples"].append(sample)
-        self.records.append({"sample": sample, "outcome": outcome, **ls.record()})
+            kind, iid = k.split(":", 1)
+            if kind == "weapon" and fired and iid in fired:
+                st.setdefault("fired", []).append(sample)
+        self.records.append({"sample": sample, "outcome": outcome, **ls.record(),
+                             **({"fired": sorted(fired)} if fired is not None else {})})
+
+    def unfired_back(self, ls: LoadoutSample, fired: set) -> None:
+        """--unfired: the injected weapons the sample did not fire go back
+        to the picker (at most COVERAGE_TRIES times)."""
+        if self.picker is None or not self.picker.unfired:
+            return
+        self.picker.give_back([(kind, iid) for kind, iid in ls.inj.items() if kind == "weapon"
+                               and iid not in fired
+                               and ls.acceptance.get(item_key(kind, iid), {}).get("status") != "inconclusive"])
 
     def counts(self) -> Counter:
         return Counter(v["status"] for v in self.status.values())
@@ -872,9 +919,14 @@ class Loadouts:
         c = self.counts()
         lines = ["  loadouts: " + (", ".join(f"{k} {v}" for k, v in sorted(c.items())) or "none injected")]
         if self.picker is not None:
-            lines[0] += (f" (coverage: {self.picker.total} unseen items a run can hold, {self.picker.left()} not "
+            what = "never-fired weapons" if self.picker.unfired else "unseen items a run can hold"
+            lines[0] += (f" (coverage: {self.picker.total} {what}, {self.picker.left()} not "
                          "yet injected" + (f", {len(self.picker.unplaced)} given up" if self.picker.unplaced else "")
                          + ")")
+            fired = sorted(k.split(":", 1)[1] for k, v in self.status.items() if v.get("fired"))
+            injected = [k for k in self.status if k.startswith("weapon:")]
+            lines.append(f"  fired {len(fired)} of {len(injected)} injected weapons"
+                         + (": " + ", ".join(fired) if fired else ""))
         bad = sorted((k, v["why"]) for k, v in self.status.items() if v["status"] == "unsupported")
         if bad:
             lines.append(f"  unsupported ({len(bad)}):")
@@ -978,11 +1030,12 @@ class Loadouts:
 
 
 def coverage_seen(args) -> dict:
-    """What live play and live fuzz sessions exercised (coverage_report)."""
+    """What live play and live fuzz sessions exercised (coverage_report):
+    weapons carried, weapons fired, pilots."""
     import coverage_report as cr
     seen = cr.seen(Path(args.recordings))
     fuzz = cr.seen_fuzz(Path(args.out) if args.out else FUZZ_ROOT)
-    return {k: set(seen.get(k) or ()) | set(fuzz.get(k) or ()) for k in ("weapons", "pilots")}
+    return {k: set(seen.get(k) or ()) | set(fuzz.get(k) or ()) for k in ("weapons", "fired", "pilots")}
 
 
 def loadout_sample(sess: Session, engine, ts: TurnStart, i: int, args) -> tuple:
@@ -1002,7 +1055,7 @@ def loadout_sample(sess: Session, engine, ts: TurnStart, i: int, args) -> tuple:
 
 def dry_run(args, engine, sess: Session, starts: list) -> int:
     rng = random.Random(args.seed)
-    chooser = Chooser(rng, uniform=args.uniform)
+    chooser = Chooser(rng, uniform=args.uniform, targets=sess.fire_targets())
     pool = sess.pool = start_pool(args, starts, rng)
     i = -1
     while i + 1 < args.samples and budget_left(sess, args):
@@ -1019,6 +1072,7 @@ def dry_run(args, engine, sess: Session, starts: list) -> int:
         say(f"[{i + 1}] {ts.key} {state.get('mission_id')} turn {state.get('turn')}")
         start, ls = ts.path, None
         sess.loadout = None
+        sess.fired_now = set()
         if sess.loadouts is not None:
             ls, why = loadout_sample(sess, engine, ts, i, args)
             if why:
@@ -1040,6 +1094,7 @@ def dry_run(args, engine, sess: Session, starts: list) -> int:
             continue
         sess.samples += 1
         sess.count(seq)
+        sess.fired(a["weapon"] for a in seq.plan if a["kind"] == "weapon")
         sess.surprise.update(surprises(pred))
         problems = engine_checks(seq, pred)
         say("  " + " | ".join(describe(a) for a in seq.picks) if seq.picks else "  (no legal sub-action)")
@@ -1087,11 +1142,14 @@ def loadout_skipped(sess: Session, i: int, ts: TurnStart, ls: LoadoutSample | No
 def loadout_done(sess: Session, i: int, ls: LoadoutSample | None, outcome: str, played: bool = True) -> None:
     """The end of a sample with a loadout: its items' outcome; unplayed
     ones go back to the coverage picker, and so do those the engine could
-    not check from this start (inconclusive)."""
+    not check from this start (inconclusive); with --unfired also the
+    weapons the sample did not fire (sess.fired_now)."""
     if ls is None:
         return
-    sess.loadouts.note(i, ls, outcome)
+    sess.loadouts.note(i, ls, outcome, sess.fired_now)
     sess.loadouts.give_back(ls, only_inconclusive=played)
+    if played:
+        sess.loadouts.unfired_back(ls, sess.fired_now)
 
 
 # ------------------------------------------------------------------ live safety
@@ -1412,6 +1470,8 @@ def live_turn(ctx, sess: Session, ts: TurnStart, sample: int, chooser: Chooser, 
             outcome = "diverged"
             break
         executed += 1
+        if seq.plan[k]["kind"] == "weapon":
+            sess.fired([seq.plan[k]["weapon"]])
         if not diffs:
             uid_map = lp.unit_uid_map(step["board"], live, known, uid_map)
             for u in live["units"]:
@@ -1509,7 +1569,7 @@ def seed_run(run, state: dict, carry: Carry, save: Path | None = None) -> None:
 
 def live(args, engine, sess: Session, starts: list, bridge=None, click=None, escape=None) -> int:
     rng = random.Random(args.seed)
-    chooser = Chooser(rng, uniform=args.uniform)
+    chooser = Chooser(rng, uniform=args.uniform, targets=sess.fire_targets())
     ctx = lp.Context(args, bridge=bridge, engine=engine, run=None, click=click, escape=escape)
     ctx.loadout = {}
     lock = lp.DriverLock("fuzz_play.py").acquire()
@@ -1525,6 +1585,7 @@ def live(args, engine, sess: Session, starts: list, bridge=None, click=None, esc
                 say(pool.exhausted())
                 break
             sess.loadout, ls = None, None
+            sess.fired_now = set()
             # Only a start the recording shows playable costs a restore.
             why = offline_reason(engine, ts, args, rng, grid=sess.loadouts is None)
             if why:
@@ -1666,6 +1727,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--coverage", action="store_true",
                     help="inject what the recordings never exercised (coverage_report: live runs and live fuzz "
                          "sessions), a new primary, secondary and pilot for each living mech")
+    ap.add_argument("--unfired", action="store_true",
+                    help="inject the weapons the recordings never fired (two per mech) and fire them: the "
+                         "choice favours them and the turn goes on while one can fire; one goes back until "
+                         "the game fired it")
     ap.add_argument("--seed", type=int, default=None, help="random seed (default: from the clock; logged)")
     ap.add_argument("--max-steps", type=int, default=MAX_STEPS, help="sub-actions per turn at most")
     ap.add_argument("--stop-prob", type=float, default=STOP_PROB, help="chance to end the turn after each step")
@@ -1723,9 +1788,9 @@ def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int
         return 2
     if args.itb_live:
         lp.ITB_LIVE = Path(args.itb_live)
-    inject = bool(args.loadout_specs or args.coverage)
-    if args.loadout_specs and args.coverage:
-        say("REFUSED: --loadout or --coverage, not both")
+    inject = bool(args.loadout_specs or args.coverage or args.unfired)
+    if sum(map(bool, (args.loadout_specs, args.coverage, args.unfired))) > 1:
+        say("REFUSED: one of --loadout, --coverage and --unfired")
         return 2
     try:
         for spec in args.loadout_specs or []:
@@ -1755,9 +1820,13 @@ def main(argv=None, *, bridge=None, engine=None, click=None, escape=None) -> int
             sess.loadouts = Loadouts(args, random.Random(args.seed + 1))
             if sess.loadouts.picker is not None:
                 pk = sess.loadouts.picker
-                say(f"coverage: {pk.total} items never exercised that a run can hold: {len(pk.actives)} weapons, "
-                    f"{len(pk.passives)} passives, {len(pk.pilots)} pilots to inject, {len(pk.static)} the engine "
-                    "does not model")
+                if pk.unfired:
+                    say(f"unfired: {len(pk.actives)} weapons a run can hold the recordings never fired, to inject "
+                        "and fire")
+                else:
+                    say(f"coverage: {pk.total} items never exercised that a run can hold: {len(pk.actives)} "
+                        f"weapons, {len(pk.passives)} passives, {len(pk.pilots)} pilots to inject, "
+                        f"{len(pk.static)} the engine does not model")
         if engine is None:
             engine = lp.Engine(args.threads, args.game, sess.dir / "itb_live.log")
         if args.dry_run:
