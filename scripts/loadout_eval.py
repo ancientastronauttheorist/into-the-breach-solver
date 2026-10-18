@@ -217,9 +217,18 @@ class Result:
         }
 
     def rank_key(self) -> tuple:
-        """Proven turns first (no search noise), then all turns."""
+        """Proven turns first (no search noise): their sums of the outcome
+        tiers above mech HP (grid .. objectives failed), then how many of
+        them the solver itself ranked better minus worse (that verdict
+        includes the next-turn estimates the sums leave out: a candidate
+        that only buys a safer next turn still counts), then the rest of
+        their sums, then the same over all turns."""
         s = self.summary()
-        return (tuple(s["proven_sums"].get(t, 0.0) for t in TIERS), tuple(s["sums"].get(t, 0.0) for t in TIERS))
+        head, tail = TIERS[:5], TIERS[5:]
+        proven, every = s["proven_sums"], s["sums"]
+        return (tuple(proven.get(t, 0.0) for t in head), s["proven_better"] - s["proven_worse"],
+                tuple(proven.get(t, 0.0) for t in tail), tuple(every.get(t, 0.0) for t in head),
+                s["better"] - s["worse"], tuple(every.get(t, 0.0) for t in tail))
 
 
 def current_run() -> str:

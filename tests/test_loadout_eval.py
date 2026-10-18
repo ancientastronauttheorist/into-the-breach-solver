@@ -184,6 +184,20 @@ class LoadoutEvalTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(report["turns"], ["20261018_000000/m00/t03", "20261018_000000/m00/t04"])
 
+    def test_a_safer_next_turn_outranks_no_change(self):
+        """Run 58's shop: Frost Beam cost 2 mech HP but the solver ranked
+        6 proven turns better (its next-turn tiers); "no change" candidates
+        must not rank above it."""
+        def result(text, rows):
+            r = le.Result(le.parse_candidate(text))
+            r.rows = rows
+            return r
+        safer = result("hp:0", [{"verdict": 1, "delta": {"mech_hp": -2.0}, "proven": True, "cores": 1}] * 6)
+        same = result("hp:1", [{"verdict": 0, "delta": {}, "proven": True, "cores": 1}] * 6)
+        grid = result("hp:2", [{"verdict": 1, "delta": {"grid": 1.0}, "proven": True, "cores": 1}])
+        ranked = sorted([same, safer, grid], key=lambda r: r.rank_key(), reverse=True)
+        self.assertEqual([r.cand.text for r in ranked], ["hp:2", "hp:0", "hp:1"])
+
     def test_unproven_turns_are_counted_apart(self):
         self.record()
         rc, report, out, _ = self.run_eval(["--candidate", "hp:0", "--no-control"], engine=ScoringEngine(proven=False))
