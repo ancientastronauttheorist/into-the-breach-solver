@@ -19,6 +19,15 @@ bool is_train_shot(Symbol shot) {
   return name == "Train_Move" || name == "Armored_Train_Move";
 }
 
+// Pawn::Damage @0088b9a0 raises HitSomething for every pawn type but these
+// three (rock walls and thrown rocks).
+bool counts_as_shot_hit(const Pawn& pawn) {
+  static const Symbol wall = intern("Wall");
+  static const Symbol rock = intern("RockThrown");
+  static const Symbol bomb_rock = intern("BombRock");
+  return pawn.type != wall && pawn.type != rock && pawn.type != bomb_rock;
+}
+
 // D6d: a damaging hit on a building. Populated buildings roll Grid Defense
 // first; a resisted hit leaves the building untouched.
 void damage_building(Board& board, Point p, int damage, RulesContext& ctx) {
@@ -35,6 +44,9 @@ void damage_building(Board& board, Point p, int damage, RulesContext& ctx) {
     emit(ctx, RulesEventType::GridDamaged, p, -1, n);
   }
   t.hp = static_cast<int8_t>(t.hp - n);
+  // EventSystem::HitSomething (BoardSpace::DamageSpace): any HP a building
+  // loses, populated or not. A Grid Defense resist above is no hit.
+  ctx.shot_hit = true;
   emit(ctx, RulesEventType::BuildingDamaged, p, -1, n);
   if (t.hp == 0) emit(ctx, RulesEventType::BuildingDestroyed, p);
   if (board.has_passive(kPassiveAutoShield) && t.hp > 0) set_tile_shield(board, p, true, ctx);
@@ -394,6 +406,11 @@ void damage_pawn(Board& board, Pawn& pawn, SpaceDamage sd, DamageMode mode, Rule
   } else if (sd.injure == StatusChange::Remove) {
     set_pawn_injured(pawn, false);
   }
+
+  // EventSystem::HitSomething (Pawn::Damage): the hit takes HP from a living
+  // pawn (Networked Shielding zeroes it), unless the pawn is a Wall,
+  // RockThrown or BombRock. Mech corpses have no HP to lose.
+  if (x > 0 && pawn.alive() && !is_turn_shielded(board, pawn) && counts_as_shot_hit(pawn)) ctx.shot_hit = true;
 
   // P6
   modify_health(board, pawn, -x, mode, ctx);

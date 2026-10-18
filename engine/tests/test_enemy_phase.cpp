@@ -1675,6 +1675,217 @@ TEST_CASE("fuzz: the final cave's new bomb falls on a random tile and kills who 
   CHECK(game_pick > 0);
 }
 
+TEST_CASE("fuzz: Void Shocker shocks the Vek whose attack hit nothing (20261018_071535 s1)") {
+  NEED_ENGINE();
+  // BottlecapMech #0 carries Passive_VoidShock. End Turn, in list order:
+  // Centipede2 #45 (5 HP) spits at an empty (6,3); Leaper2 #49 (3 HP) bites
+  // the 2-HP building at (3,1), which Grid Defense resisted (the grid fell
+  // by 2 only once); Burrower2 #62's swipe then destroyed it. The two whose
+  // attack took no HP from anything took 1 each; the Burrower kept 5 HP.
+  const Recording before = live_fixture("fuzz_voidshock_t2_end_turn.json");
+  const Recording after = live_fixture("fuzz_voidshock_t3_after_enemy.json");
+  REQUIRE(before.board.has_passive(kPassiveVoidShock));
+  const int32_t centipede = 45, leaper = 49, burrower = 62;
+  auto run = [&](bool resist_first) {
+    Board b = before.board;
+    TurnContext ctx = turn_context(before, Visibility::Full);
+    int rolls = 0;
+    ctx.grid_resist = [&rolls, resist_first](Point, int) { return resist_first && rolls++ == 0; };
+    const PhaseResult r = E.end_turn(b, ctx);
+    CHECK(fired(r).count(centipede) == 1);
+    CHECK(fired(r).count(leaper) == 1);
+    CHECK(fired(r).count(burrower) == 1);
+    CHECK(b.grid_power == before.board.grid_power - 2);
+    CHECK(b.tile({3, 1}).terrain == Terrain::Rubble);
+    return b;
+  };
+  // Worst case (no resist): the Leaper destroys the building, the Burrower's
+  // swipe finds rubble and empty ground and is the one shocked.
+  const Board worst = run(false);
+  CHECK(hp_of(worst, centipede) == 4);
+  CHECK(hp_of(worst, leaper) == 3);
+  CHECK(hp_of(worst, burrower) == 4);
+  // The game's outcome.
+  const Board b = run(true);
+  CHECK(hp_of(b, centipede) == 4);
+  CHECK(hp_of(b, leaper) == 2);
+  CHECK(hp_of(b, burrower) == 5);
+  for (const Pawn& p : before.board.pawns()) {
+    if (!p.alive()) continue;
+    CAPTURE(p.uid);
+    const Pawn* g = after.board.find_pawn(p.uid);
+    const Pawn* e = b.find_pawn(p.uid);
+    REQUIRE(g != nullptr);
+    REQUIRE(e != nullptr);
+    CHECK(e->hp == g->hp);
+  }
+}
+
+// ---- Void Shocker (Passive_VoidShock, Board::OnLoop @00955070) ----------------------------
+
+namespace {
+
+Board void_shock_board() {
+  Board b;
+  b.passives |= kPassiveVoidShock;
+  return b;
+}
+
+}  // namespace
+
+TEST_CASE("Void Shocker: a Vek attack that hits nothing costs the Vek 1 HP, through shield and armor") {
+  NEED_ENGINE();
+  for (const bool passive : {true, false}) {
+    CAPTURE(passive);
+    Board b = void_shock_board();
+    if (!passive) b.passives = kPassiveNone;
+    const int32_t s = place(b, "Scorpion1", {3, 3});
+    const int32_t h = place(b, "Hornet1", {5, 5});
+    P(b, h).shield = true;  // the shock is a raw HP loss: the shield stays
+    queue(b, s, {3, 4});
+    queue(b, h, {5, 6});
+    const int s_hp = hp_of(b, s), h_hp = hp_of(b, h);
+    E.end_turn(b, context());
+    CHECK(hp_of(b, s) == s_hp - (passive ? 1 : 0));
+    CHECK(hp_of(b, h) == h_hp - (passive ? 1 : 0));
+    CHECK(P(b, h).shield);
+  }
+}
+
+TEST_CASE("Void Shocker: what counts as a hit") {
+  NEED_ENGINE();
+  struct Case {
+    const char* what;
+    bool shocked;
+  };
+  // Scorpion1 at (3,3) bites (3,4) for 1.
+  for (const Case c : {Case{"mech", false}, Case{"shielded mech", true}, Case{"frozen mech", true},
+                       Case{"vek", false}, Case{"rock", true}, Case{"mountain", true},
+                       Case{"building", false}, Case{"resisted building", true},
+                       Case{"shielded building", true}}) {
+    CAPTURE(c.what);
+    Board b = void_shock_board();
+    const int32_t s = place(b, "Scorpion1", {3, 3});
+    const std::string what = c.what;
+    TurnContext ctx = context();
+    if (what == "mech" || what == "shielded mech" || what == "frozen mech") {
+      const int32_t m = mech(b, {3, 4});
+      P(b, m).shield = what == "shielded mech";
+      P(b, m).frozen = what == "frozen mech";
+    } else if (what == "vek") {
+      place(b, "Hornet1", {3, 4});
+    } else if (what == "rock") {
+      place(b, "RockThrown", {3, 4});
+    } else if (what == "mountain") {
+      set_mountain(b, {3, 4});
+    } else {
+      set_building(b, {3, 4}, 2);
+      if (what == "shielded building") b.tile({3, 4}).shield = true;
+      if (what == "resisted building") ctx.grid_resist = [](Point, int) { return true; };
+    }
+    queue(b, s, {3, 4});
+    const int before = hp_of(b, s);
+    E.end_turn(b, ctx);
+    CHECK(hp_of(b, s) == before - (c.shocked ? 1 : 0));
+  }
+  // Bumps count: a punch (an instant shot, no queued part) on a shielded
+  // Hornet does no damage, but pushed into a mech both take a bump.
+  for (const bool blocked : {true, false}) {
+    CAPTURE(blocked);
+    Board b = void_shock_board();
+    const int32_t s = place(b, "Scorpion1", {3, 3});
+    const int32_t h = place(b, "Hornet1", {3, 4});
+    P(b, h).shield = true;
+    if (blocked) mech(b, {3, 5});
+    P(b, s).weapons[0] = intern("Prime_Punchmech");
+    const int before = hp_of(b, s);
+    REQUIRE(E.fire_weapon(b, s, 0, {3, 4}).ok());
+    CHECK(hp_of(b, s) == before - (blocked ? 0 : 1));
+  }
+}
+
+TEST_CASE("Void Shocker: bots too, and the shock kills") {
+  NEED_ENGINE();
+  Board b = void_shock_board();
+  const int32_t t = place(b, "Snowtank1", {0, 3});
+  REQUIRE(P(b, t).team == Team::Enemy);
+  REQUIRE(hp_of(b, t) == 1);
+  queue(b, t, {1, 3});  // the shell flies to the board's edge over empty ground
+  E.end_turn(b, context());
+  CHECK(dead(b, t));
+}
+
+TEST_CASE("Void Shocker: immune types, telegraphing skills and moves are spared") {
+  NEED_ENGINE();
+  // Blobbers and Spiders fire their (harmless) attack at once in the AI
+  // phase: VoidShockImmune. The same skill on another Vek is shocked.
+  for (const char* type : {"Blobber1", "Spider1", "Scorpion1"}) {
+    CAPTURE(type);
+    Board b = void_shock_board();
+    const int32_t v = place(b, type, {3, 3});
+    P(b, v).weapons[0] = intern("BlobberAtk1");
+    const int before = hp_of(b, v);
+    const ActionResult a = E.fire_weapon(b, v, 0, {3, 5});
+    REQUIRE(a.ok());
+    CHECK_FALSE(P(b, v).queued.active());
+    CHECK(hp_of(b, v) == before - (std::string(type) == "Scorpion1" ? 1 : 0));
+  }
+  // A skill with a queued part: its instant part (the web) leaves the shot
+  // queued, so nothing happens yet.
+  {
+    Board b = void_shock_board();
+    const int32_t s = place(b, "Scorpion1", {3, 3});
+    const int before = hp_of(b, s);
+    const ActionResult a = E.fire_weapon(b, s, 0, {3, 4});
+    REQUIRE(a.ok());
+    CHECK(P(b, s).queued.active());
+    CHECK(hp_of(b, s) == before);
+    // A move ("Move") is no attack.
+    ActionOptions free_move;
+    free_move.check_legal = false;
+    P(b, s).queued = QueuedShot{};
+    const ActionResult m = E.move(b, s, {4, 3}, free_move);
+    REQUIRE(m.ok());
+    CHECK(P(b, s).pos == Point{4, 3});
+    CHECK(hp_of(b, s) == before);
+  }
+  // A mech's own shot that hits nothing is no Vek attack.
+  {
+    Board b = void_shock_board();
+    const int32_t m = mech(b, {3, 3});
+    const int before = hp_of(b, m);
+    REQUIRE(E.fire_weapon(b, m, "Prime_Punchmech", {3, 4}).ok());
+    CHECK(hp_of(b, m) == before);
+  }
+}
+
+TEST_CASE("Void Shocker: an enraged unit that hits nothing is shocked, whatever its type") {
+  NEED_ENGINE();
+  // Science_TC_Enrage: the mech's shot makes the unit on p2 strike p3. A
+  // TC_Enrage shot is checked on the mech (never immune, never queued) and
+  // shocks the pawn on the first tile of its effect holding one: the
+  // enraged unit, even a VoidShockImmune Spider.
+  for (const char* type : {"Scorpion1", "Spider1"}) {
+    for (const bool target : {false, true}) {
+      CAPTURE(type);
+      CAPTURE(target);
+      Board b = void_shock_board();
+      const int32_t m = mech(b, {3, 6});
+      P(b, m).weapons[0] = intern("Science_TC_Enrage");
+      const int32_t v = place(b, type, {3, 3});
+      int32_t victim = -1;
+      if (target) victim = place(b, "Hornet1", {4, 3});
+      const int before = hp_of(b, v);
+      const int victim_before = target ? hp_of(b, victim) : 0;
+      const ActionResult a = E.fire_weapon(b, m, 0, {3, 3}, Point{4, 3});
+      REQUIRE(a.ok());
+      CHECK(hp_of(b, v) == before - (target ? 0 : 1));
+      if (target) CHECK(hp_of(b, victim) < victim_before);
+      CHECK(hp_of(b, m) == P(b, m).max_hp);
+    }
+  }
+}
+
 // ---- Environment coverage on recorded boards ---------------------------------------------
 
 namespace {

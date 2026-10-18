@@ -284,6 +284,7 @@ class Simulation final : public FrameHooks {
   void update_kills(Pawn& pawn);
   void update_xp();
   void clear_last_shot();
+  void void_shock(int32_t owner, Symbol shot, bool hit, Point point);
   bool removable(const Pawn& pawn, const PawnSim& ps) const;
   void remove(int32_t uid);
   void cancel_queued_shot(Pawn& pawn);
@@ -327,6 +328,9 @@ class Simulation final : public FrameHooks {
   int32_t last_owner_ = -1;
   Team last_team_ = Team::None;
   Symbol last_shot_ = kNoSymbol;
+  // LastShot +0x28: the effect's target, or for a TC_Enrage shot the first
+  // entry's tile with a pawn. Its HitSomething flag is rules_.shot_hit.
+  Point last_point_ = kInvalidPoint;
   // EventSystem data a death leaves for Pawn::UpdateKills, per shooter uid:
   // XP ("xp_<id>"), XP-giving kills ("kill_<id>") and every enemy kill
   // ("any_kill_<id>"); and XP for the whole squad ("env_xp").

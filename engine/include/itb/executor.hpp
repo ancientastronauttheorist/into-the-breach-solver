@@ -93,6 +93,7 @@ enum class ResolveEventType : uint8_t {
   TimingSensitive,   // see ResolveResult::timing
   PilotLevelUp,      // pawn `uid`'s pilot reached level `amount` (itb/pilot_xp.hpp)
   PawnUnderground,   // burrower `uid` finished its dive from `point` (off the board)
+  VoidShock,         // Void Shocker took `amount` HP from pawn `uid` (its shot hit nothing)
 };
 
 struct ResolveEvent {

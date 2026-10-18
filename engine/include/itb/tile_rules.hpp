@@ -121,6 +121,13 @@ struct RulesContext {
   // Preview / event-freeze mode: populated buildings lose HP but no grid.
   bool freeze_events = false;
 
+  // EventSystem::HitSomething: the shot being resolved dealt damage to a
+  // unit or a building (Void Shocker, Passive_VoidShock). Set by
+  // damage_pawn (a living pawn's HP would drop; never a Wall, RockThrown or
+  // BombRock) and damage_building (an unresisted hit that takes HP); the
+  // executor clears it when a new shot is recorded.
+  bool shot_hit = false;
+
   // Frame-exact executor hooks (busy pawns, deferred chasms, falls, dives).
   FrameHooks* frame = nullptr;
 

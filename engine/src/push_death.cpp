@@ -567,10 +567,61 @@ void Simulation::update_xp() {
 // Board::OnLoop calls it only while a shooter is recorded.
 void Simulation::clear_last_shot() {
   if (last_owner_ == -1) return;
+  const int32_t owner = last_owner_;
+  const Symbol shot = last_shot_;
   last_owner_ = -1;
   last_team_ = Team::None;
   last_shot_ = kNoSymbol;
   rules_.current_shot = kNoSymbol;
+  // Board::OnLoop answers the cleared record with Void Shocker at once.
+  void_shock(owner, shot, rules_.shot_hit, last_point_);
+}
+
+// Passive_VoidShock (Board::OnLoop @00955070, right after ClearLastEffect).
+// The record's shooter is shocked when the shot hit nothing (no HitSomething:
+// no unit or building lost HP) and it is not a move ("Move"), the shooter
+// is enemy-team (Vek and bots alike), has no queued shot left (the instant
+// part of a skill that telegraphs one is spared) and its type is not
+// VoidShockImmune. A TC_Enrage shot (any owner) shocks the pawn on the
+// recorded tile instead, whatever its team. The shock is a raw 1 HP loss
+// (Pawn::ModifyHealth in weapon mode: shields, ice, armor and ACID do not
+// matter) with a LightningBolt_Animated on the tile (ANIM_DELAY); a pawn it
+// kills dies as any other (SetProcessDeath). One shock per shot: the passive
+// has no upgrade, and a second carrier adds nothing.
+void Simulation::void_shock(int32_t owner, Symbol shot, bool hit, Point point) {
+  if (hit || !board_.has_passive(kPassiveVoidShock)) return;
+  static const Symbol move = intern("Move");
+  if (shot == move) return;
+  const Pawn* shooter = board_.find_pawn(owner);
+  if (!shooter) return;
+  const bool enrage = symbol_name(shot).find("TC_Enrage") != std::string_view::npos;
+  if (shooter->team != Team::Enemy && !enrage) return;
+  if (shooter->queued.active()) return;
+  if (rules_.data) {
+    const PawnDef* def = rules_.data->pawn(shooter->type);
+    if (def && def->void_shock_immune) return;
+  }
+  Pawn* target = enrage ? (point.valid() ? board_pawn(board_, point) : nullptr) : board_.find_pawn(owner);
+  if (!target) return;
+  const bool was_dead = !target->alive();
+  const int before = target->hp;
+  modify_health(board_, *target, -1, DamageMode::Weapon, rules_);
+  if (target->hp < before) log(ResolveEventType::VoidShock, target->pos, target->uid, before - target->hp);
+  if (target->pos.valid()) {
+    SpaceDamage bolt;
+    bolt.loc = target->pos;
+    bolt.animation = intern("LightningBolt_Animated");
+    bolt.anim_flags = kAnimDelay;
+    register_tile_anim(bolt);
+  }
+  if (!was_dead && !target->alive() && !target->dying) {
+    target->dying = true;
+    target->queued = QueuedShot{};
+    emit(rules_, RulesEventType::PawnKilled, target->pos, target->uid);
+  }
+  changed_ = true;
+  note_deaths();
+  register_holes();
 }
 
 }  // namespace itb::detail

@@ -105,7 +105,7 @@ Passive_Electric = PassiveSkill:new{ Passive = "Electric_Smoke", Upgrades = 1, U
     "weapons_deploy.lua": "",
     "weapons_technovek.lua": 'Vek_Beetle = Skill:new{ Class = "TechnoVek", Upgrades = 2, UpgradeCost = {1, 3} }\n',
     "advanced/ae_weapons_base.lua": "",
-    "advanced/ae_weapons.lua": "",
+    "advanced/ae_weapons.lua": 'Passive_VoidShock = PassiveSkill:new{ PowerCost = 2, Passive = "Passive_VoidShock" }\n',
     "drops.lua": """
 local weapon_list = {
 	"Prime_KO_Crack",
@@ -202,12 +202,16 @@ uint32_t passive_of(std::string_view weapon) {
   static const std::pair<const char*, uint32_t> kNames[] = {
       {"Passive_FlameImmune", kPassiveFlameImmune},
       {"Passive_Leech", kPassiveLeechKill},
+      {"Passive_VoidShock", kPassiveVoidShock},
   };
   return 0;
 }
 """,
     "src/game_data.cpp": '{"Rock_Skill", 1}, {"Zoltan_Skill", 2}, {"Double_Shot", 3}, {"Flying", 4},\n',
-    "include/itb/board.hpp": "// nothing\n",
+    "src/tile_status.cpp": "bool f(const Board& b) { return b.has_passive(kPassiveFlameImmune) || "
+                           "b.has_passive(kPassiveLeechKill); }\n",
+    # The enum defines kPassiveVoidShock, but nothing reads it.
+    "include/itb/board.hpp": "enum Passive : uint32_t {\n  kPassiveVoidShock = 1u << 16,  // Passive_VoidShock\n};\n",
 }
 
 
@@ -629,6 +633,10 @@ class LoadoutTest(unittest.TestCase):
         self.assertEqual(sup.passive("Passive_Defenses")[0], "supported")  # in the bridge's max_hp
         self.assertEqual(sup.passive("Passive_Medical")[0], "no_effect")
         self.assertEqual(sup.passive("Passive_Strange")[0], "unsupported")
+        # Parsed into a bit that no engine code reads: no effect, so unsupported.
+        self.assertEqual(sup.passive("Passive_VoidShock"),
+                         ("unsupported", "passive Passive_VoidShock not modelled (passive_of parses it, but nothing "
+                                         "reads kPassiveVoidShock)"))
         self.assertEqual(sup.pilot("Pilot_Rock")[0], "supported")
         self.assertEqual(sup.pilot("Pilot_Archive")[0], "supported")  # no Skill
         self.assertEqual(sup.pilot("Pilot_Medic")[0], "no_effect")

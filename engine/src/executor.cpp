@@ -535,6 +535,25 @@ void Simulation::apply_effect(const SkillEffect& effect, Symbol shot, int cause,
   // (EventSystem::SetLastEffect @00708240: an effect without an owner, -1,
   // leaves a recorded shooter in place).
   if (!effect.follow_up && !(effect.owner == -1 && last_owner_ != -1)) {
+    // The same owner, team and name keep the record as it is (the rest of a
+    // delayed effect): its HitSomething flag and its Enrage point stay. A new
+    // record starts with no hit.
+    if (effect.owner != last_owner_ || effect.team != last_team_ || shot != last_shot_) {
+      rules_.shot_hit = false;
+      last_point_ = effect.target;
+      // Board::ApplyEffect: a TC_Enrage shot records the first entry's tile
+      // that holds a pawn (the enraged unit), for Void Shocker (the only
+      // reader, so skipped without it).
+      if (board_.has_passive(kPassiveVoidShock) &&
+          symbol_name(shot).find("TC_Enrage") != std::string_view::npos) {
+        for (const SpaceDamage& sd : effect.effect) {
+          if (sd.loc.valid() && has_pawn(board_, sd.loc)) {
+            last_point_ = sd.loc;
+            break;
+          }
+        }
+      }
+    }
     last_owner_ = effect.owner;
     last_team_ = effect.team;
     last_shot_ = shot;

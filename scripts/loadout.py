@@ -1445,22 +1445,44 @@ def verify_state(state: dict, inj: Injection) -> list:
 
 # ------------------------------------------------------------------ engine support
 
-def engine_names(src: Path = ENGINE_SRC) -> tuple[set, set]:
-    """(squad passive weapon prefixes of the engine's passive_of, every
-    string literal in the engine's sources): what the engine knows by
-    name."""
-    passives, literals = set(), set()
+def engine_passives(src: Path = ENGINE_SRC) -> tuple[dict, set]:
+    """({passive weapon prefix of the engine's passive_of: the kPassive bits it
+    sets}, the kPassive bits some engine source reads outside passive_of and
+    their definitions in board.hpp). A bit nobody reads is parsed but has no
+    effect (Passive_VoidShock had one until the engine modelled it)."""
+    names, used = {}, set()
     for p in sorted(src.glob("*.cpp")) + sorted((src.parent / "include").rglob("*.hpp")):
         try:
             text = p.read_text(errors="replace")
         except OSError:
             continue
-        literals.update(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', text))
         if p.name == "recording.cpp":
             m = re.search(r"uint32_t passive_of\(.*?\n\}", text, re.S)
             if m:
-                passives.update(re.findall(r'\{"(Passive_\w+)"', m.group(0)))
-    return passives, literals
+                for name, bits in re.findall(r'\{"(Passive_\w+)",\s*([^}]*)\}', m.group(0)):
+                    names[name] = set(re.findall(r"\bkPassive\w+", bits))
+                text = text[:m.start()] + text[m.end():]
+        if p.name == "board.hpp":
+            text = re.sub(r"^\s*kPassive\w+\s*=.*$", "", text, flags=re.M)  # the enum's definitions
+        used.update(re.findall(r"\bkPassive\w+", text))
+    return names, used
+
+
+def engine_names(src: Path = ENGINE_SRC) -> tuple[set, set]:
+    """(squad passive weapon prefixes of the engine's passive_of whose bits
+    the engine reads, every string literal in the engine's sources but
+    passive_of's names): what the engine knows by name."""
+    literals = set()
+    for p in sorted(src.glob("*.cpp")) + sorted((src.parent / "include").rglob("*.hpp")):
+        try:
+            text = p.read_text(errors="replace")
+        except OSError:
+            continue
+        if p.name == "recording.cpp":
+            text = re.sub(r"uint32_t passive_of\(.*?\n\}", "", text, flags=re.S)
+        literals.update(re.findall(r'"([A-Za-z_][A-Za-z0-9_]*)"', text))
+    names, used = engine_passives(src)
+    return {n for n, bits in names.items() if bits and bits <= used}, literals
 
 
 def game_lua_passive_checks(scripts: Path) -> set:
@@ -1486,14 +1508,19 @@ class Support:
     def __init__(self, items: Items, src: Path = ENGINE_SRC):
         self.items = items
         self.passives, self.literals = engine_names(src)
+        self.parsed, self.bits_read = engine_passives(src)
         self.lua_checked = game_lua_passive_checks(items.scripts)
 
     def passive(self, wid: str) -> tuple:
         """(status, why) of a passive weapon: "supported" (why None or how),
         "no_effect" (not modelled, but nothing in a player turn or an enemy
-        phase depends on it), "unsupported"."""
+        phase depends on it), "unsupported". A passive_of entry counts only
+        when the engine reads every bit it sets (its first match, as
+        passive_of picks it)."""
         w = self.items.weapon(wid)
-        if any(wid.startswith(p) for p in self.passives):
+        match = next((n for n in self.parsed if wid.startswith(n)), None)
+        inert = sorted(self.parsed[match] - self.bits_read) if match else []
+        if match and self.parsed[match] and not inert:
             return "supported", None
         for k, how in STATE_PASSIVES.items():
             if w.passive.startswith(k):
@@ -1503,6 +1530,9 @@ class Support:
             return "supported", None
         if w.passive in NO_TURN_EFFECT:
             return "no_effect", f"passive {w.passive} not modelled: {NO_TURN_EFFECT[w.passive]}"
+        if inert:
+            return "unsupported", (f"passive {w.passive} not modelled (passive_of parses it, but nothing reads "
+                                   f"{', '.join(inert)})")
         return "unsupported", f"passive {w.passive} not modelled (not in the engine's passive_of, no engine reference)"
 
     def pilot(self, pid: str) -> tuple:

@@ -754,6 +754,27 @@ Done so far (build order from the decompile):
      As for every passive, only the skill's power counts, not whether its
      mech lives. The bounds stay sound: shields never raise grid power or
      building HP, they only stop losses.
+   - Void Shocker (`Passive_VoidShock`, AE; the `_A` upgrade exists only
+     in the localization: always 1 damage, and a second carrier adds
+     nothing). When `Board::OnLoop` (@00955070) ends the last shot (no
+     effect active any more), it checks the shot's "hit something" flag:
+     set by `Pawn::Damage` when a hit takes HP from a living pawn (any
+     team, the attacker included, bumps too; never a Wall, RockThrown or
+     BombRock) and by `BoardSpace::DamageSpace` when a building loses HP
+     (a Grid Defense resist is no hit; mountains, ice and rubble are not
+     buildings). A shot that hit nothing, is not "Move", and whose owner
+     is enemy-team (Vek and bots), has no queued shot left (the instant
+     part of a telegraphing skill is spared) and is not `VoidShockImmune`
+     (Blobbers, Spiders, eggs, psions, Shamans, three bosses) costs the
+     owner 1 HP: a raw `ModifyHealth` (shield, ice, armor and ACID do not
+     matter), with an ANIM_DELAY bolt on its tile; it can kill (an
+     ordinary death, with no shooter). A `TC_Enrage` shot (Science_TC_
+     Enrage, the mech's) shocks the enraged unit instead, whatever its
+     type. A shot keeps its flag while the same owner, team and name
+     re-record it (delayed remainders); a new record clears it
+     (`RulesContext::shot_hit`). Fuzz 2026-10-18 s1: a Leaper whose bite a
+     building resisted and a Centipede that spat at an empty tile took 1
+     each.
    - Outcomes that hinge on two events within one frame are reported as
      timing-sensitive; Grid Defense rolls and spider-egg picks are logged as
      chance nodes.
