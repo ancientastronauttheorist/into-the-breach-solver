@@ -398,6 +398,7 @@ python3 scripts/fuzz_play.py --dry-run --coverage --samples 60       # inject wh
 python3 scripts/fuzz_play.py --unfired --samples 10                  # inject the weapons never fired, and fire them
 python3 scripts/fuzz_play.py --loadout '0:Prime_Lasermech_A,Passive_FlameImmune;pilot=Pilot_Rock' --samples 5
 python3 scripts/loadout.py --check                                   # the save model vs every recorded checkpoint, and rewrites of each
+python3 scripts/loadout_eval.py --last 15 --candidate '1:*,Brute_Bombrun' --candidate 'hp:0'   # what a purchase would have been worth
 ```
 
 - **Turn starts** are the recorded `m<MM>_turn_<TT>_solve_input.json` of
@@ -567,6 +568,19 @@ python3 scripts/loadout.py --check                                   # the save 
   choice of sub-actions favours a never-fired weapon 25 times over as a
   group (`FIRE_BOOST`), and the turn does not end at random while one can
   still fire; the summary says which injected weapons fired.
+- `scripts/loadout_eval.py` prices a shop purchase or a reactor core on
+  the boards the run really played: every recorded turn start of the
+  current run (`--last N`, `--run`) is solved with the live ranking as
+  recorded and once per candidate (a `loadout.py` spec written into that
+  turn's checkpoint, weapons from storage allowed; `hp:<mech>` +2 Health,
+  `move:<mech>` +1 Move), and each candidate's change of the solver's
+  worst case is summed tier by tier (grid first), proven turns ranked
+  first. A turn's better/worse verdict follows the solver's own ranking
+  (next-turn estimates included). A control re-solves each baseline with
+  1.5x the budget: the solver is deterministic on a board, so that shows
+  how far unproven answers move with search effort. One turn at a time on
+  boards the old loadout reached: what the change would have done there,
+  not where the run would have gone.
 - `scripts/coverage_report.py` lists the player weapons (upgrades apart),
   passives, pilots, level-up skills, missions and enemy types the recorded
   turn starts hold (and the weapons the executed plans fired) against the

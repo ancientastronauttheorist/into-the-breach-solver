@@ -888,11 +888,13 @@ def slot_dict(items: Items, mech_type: str, s: SlotState) -> dict:
             "power_cost": w.power_cost if w else 0, "damaged": s.damaged, "starting": s.starting, "changed": False}
 
 
-def plan_loadout(items: Items, doc: dict, specs: list, rewrite_all: bool = False) -> list:
+def plan_loadout(items: Items, doc: dict, specs: list, rewrite_all: bool = False,
+                 storage_ok: bool = False) -> list:
     """The squad after the specs, as MechPlans (every mech, changed or not);
     LoadoutError if a spec is illegal. rewrite_all: every mech is rewritten
     (its reactor re-allocated) even where the specs change nothing (the
-    --check round trip)."""
+    --check round trip). storage_ok: a weapon the squad's storage holds may
+    be given (equipped from storage, as the shop screen does)."""
     mechs = squad(doc)
     by_index = {m.index: m for m in mechs}
     for sp in specs:
@@ -953,7 +955,7 @@ def plan_loadout(items: Items, doc: dict, specs: list, rewrite_all: bool = False
                     if k in old and old[k] != p.pilot.get(k):
                         p.notes.append(f"{k} {LEVEL_SKILLS[old[k]]} -> {LEVEL_SKILLS[p.pilot[k]]} "
                                        f"({sp.pilot}'s Blacklist)")
-    check_unique(items, doc, plans)
+    check_unique(items, doc, plans, storage_ok)
     finish(items, mechs, plans, board_mutation(doc))
     return plans
 
@@ -990,9 +992,9 @@ def new_pilot(items: Items, pid: str, old: dict | None) -> dict:
     return out
 
 
-def check_unique(items: Items, doc: dict, plans: list) -> None:
+def check_unique(items: Items, doc: dict, plans: list, storage_ok: bool = False) -> None:
     """No weapon base twice in the squad (or squad and storage, for a newly
-    given one), no named pilot twice."""
+    given one, unless storage_ok), no named pilot twice."""
     st_weapons, st_pilots = storage_items(doc)
     seen: dict = {}
     for p in plans:
@@ -1002,7 +1004,7 @@ def check_unique(items: Items, doc: dict, plans: list) -> None:
             if s["base"] in seen:
                 raise LoadoutError(f"{s['base']} twice in the squad (mechs {seen[s['base']]} and {p.index})")
             seen[s["base"]] = p.index
-            if s["changed"] and s["base"] in st_weapons:
+            if s["changed"] and s["base"] in st_weapons and not storage_ok:
                 raise LoadoutError(f"{s['base']} is in the squad's storage already")
     pilots: dict = {}
     for p in plans:
@@ -1320,11 +1322,11 @@ class Injection:
         return {"spec": spec_text(self.specs), "mechs": [p.summary() for p in self.changed]}
 
 
-def inject(items: Items, save_texts: dict, specs: list) -> Injection:
+def inject(items: Items, save_texts: dict, specs: list, storage_ok: bool = False) -> Injection:
     """Plans the specs on the checkpoint (saveData.lua; undoSave.lua must
-    hold the same squad) and rewrites both."""
+    hold the same squad) and rewrites both (storage_ok: plan_loadout)."""
     main = save_texts["saveData.lua"]
-    plans = plan_loadout(items, parse_save(main), specs)
+    plans = plan_loadout(items, parse_save(main), specs, storage_ok=storage_ok)
     out = {}
     for name, text in save_texts.items():
         if text is None:

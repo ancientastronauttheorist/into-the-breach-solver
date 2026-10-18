@@ -61,3 +61,5 @@ research_*.png
 
 # Claude Code agent worktrees
 .claude/worktrees/
+# scripts/loadout_eval.py reports.
+recordings/loadout_eval/
