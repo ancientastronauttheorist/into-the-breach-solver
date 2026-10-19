@@ -243,6 +243,7 @@ int run_solve(const SolveToolOptions& opt) {
     so.lookahead_options.reply = opt.lookahead_reply;
     so.lookahead_options.fold = opt.lookahead_fold;
     so.lookahead_options.search_nodes = std::max<uint64_t>(1, opt.lookahead_search_nodes);
+    so.lookahead_options.plan_env = opt.lookahead_env;
     so.helper_engines = helper_ptrs;
     if (opt.beam >= 0) so.beam_width = opt.beam;
     if (opt.tt_entries > 0) so.tt_max_entries = opt.tt_entries;

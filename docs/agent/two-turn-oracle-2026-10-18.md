@@ -229,3 +229,10 @@ worst fold, at both budgets tried, and never changed this turn's tiers on
 272 turn starts. It is now live_play's default (`--lookahead-fold
 worst_sum`). The Search reply stays opt-in: per board it is more accurate,
 but each sample costs 4x as much.
+
+**Follow-up (2026-10-19):** recommendation 2 is in
+`next-turn-env-2026-10-19.md`. With `lookahead_env`, the actual next turn
+falls inside the sampled range on 63 of 70 turns (10 of the 13
+environment-mission turns), and the misses left are AI-seed and
+hidden-spawn sampling. Its effect on the ranking is within noise, so it
+stays opt-in.

@@ -36,6 +36,7 @@ struct SolveToolOptions {
   LookaheadOptions::Reply lookahead_reply = LookaheadOptions::Reply::Greedy;  // LookaheadOptions::reply
   LookaheadOptions::Fold lookahead_fold = LookaheadOptions::Fold::Worst;      // LookaheadOptions::fold
   uint64_t lookahead_search_nodes = 200;  // LookaheadOptions::search_nodes (Reply::Search)
+  bool lookahead_env = false;             // LookaheadOptions::plan_env
   bool grid_survival = false;      // SolveOptions::grid_survival (Grid Defense odds when every line loses the grid)
   double survival_cap = 0;         // SolveOptions::survival_cap_share (the certificate pre-pass; 0: off)
   bool survival_cap_strict = false;  // SolveOptions::survival_cap_strict

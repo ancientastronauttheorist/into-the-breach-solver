@@ -65,7 +65,7 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_inspect [--game DIR] (<recording.json> | --pawns | --scripts | --corpus DIR | "
                "--moves DIR | --weapons DIR | --replay DIR [--turns] [--show N] [--no-sync] [--weapon ID] [--trace RUN/M/T] [--json FILE] | --score FILE | "
-               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] [--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle|search [--lookahead-search-nodes N]] [--lookahead-fold worst|sum|worst_sum]] [--grid-survival [--survival-cap [SHARE] [--survival-cap-strict]]] [--threat-eval] | "
+               "--solve (<recording.json> | DIR) [--time S] [--max-time S --min-tiers K] [--nodes N] [--threads N] [--beam W] [--sample N] [--shard I/N] [--verbose] [--json FILE] [--lua-counts] [--tt ENTRIES] [--threat-tier] [--kills-tier] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] [--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle|search [--lookahead-search-nodes N]] [--lookahead-fold worst|sum|worst_sum] [--lookahead-env]] [--grid-survival [--survival-cap [SHARE] [--survival-cap-strict]]] [--threat-eval] | "
                "--survival-cert <recording.json> [--time S] [--threads N] [--plain] [--json FILE] | "
                "--two-turn <state.json> [--arm base|laN|sumN|idleN]... [--plan FILE]... [--time S] [--next-time S] [--next-seeds N] [--seed N] [--threads N] [--deploy [--placement C5,D6,E5]... [--deploy-top N [--search-time S --search-samples N --search-finalists N]] [--deploy-seeds N] [--spawn F1,...] [--no-state-placement]] [--json FILE] [--verbose] | "
                "--lookahead-study (<recording.json> | DIR) [--time S] [--next-time S] [--threads N] [--samples N] [--seed N] [--compare [--skip-base] [--la-samples N] [--la-reply greedy|idle] [--la-sum]] [--no-spawns] [--json FILE] [--verbose] | "
@@ -459,6 +459,8 @@ int main(int argc, char** argv) {
         o.lookahead_reply = *r;
       } else if (args[i] == "--lookahead-search-nodes" && i + 1 < args.size()) {
         o.lookahead_search_nodes = static_cast<uint64_t>(std::max(1, std::stoi(args[++i])));
+      } else if (args[i] == "--lookahead-env") {
+        o.lookahead_env = true;
       } else if (args[i] == "--lookahead-fold" && i + 1 < args.size()) {
         const std::optional<LookaheadOptions::Fold> f = lookahead_fold_of(args[++i]);
         if (!f) return usage();

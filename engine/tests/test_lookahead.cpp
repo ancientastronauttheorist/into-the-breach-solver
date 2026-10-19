@@ -7,10 +7,12 @@
 #include <cstdint>
 #include <filesystem>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "itb/engine.hpp"
+#include "itb/environment.hpp"
 #include "itb/game_data.hpp"
 #include "itb/lookahead.hpp"
 #include "itb/score.hpp"
@@ -231,6 +233,202 @@ TEST_CASE("lookahead: the solver kills the Vek it could not answer next turn; of
   REQUIRE(again);
   CHECK((*again)[ScoreKey::NextTurn] < 0);
   CHECK(*again < on.best.worst_case);
+}
+
+namespace {
+
+MissionData mission_of(const char* id, std::vector<Point> danger = {}) {
+  MissionData m;
+  m.mission_id = id;
+  for (Point p : danger) m.danger.push_back(DangerTile{p, 1, true, -1});
+  return m;
+}
+
+std::vector<Point> danger_tiles(const MissionData& m) {
+  std::vector<Point> out;
+  for (const DangerTile& d : m.danger) out.push_back(d.p);
+  return out;
+}
+
+bool has(const std::vector<Point>& v, Point p) { return std::find(v.begin(), v.end(), p) != v.end(); }
+
+int dist(Point a, Point b) { return std::abs(a.x - b.x) + std::abs(a.y - b.y); }
+
+}  // namespace
+
+TEST_CASE("environment planning: tides, cataclysm, unplanned missions") {
+  Board b;
+  b.tile({2, 1}).terrain = Terrain::Building;  // shadows column 2 below it
+  b.tile({5, 4}).terrain = Terrain::Building;  // in the row itself
+  MissionData m = mission_of("Mission_Tides", {{0, 3}, {1, 3}});
+  m.tides_index = 3;
+  const EnvPlan t = plan_next_environment(b, b, m, 1);
+  CHECK(t.planned);
+  CHECK_FALSE(t.sampled);
+  REQUIRE(t.mission.tides_index);
+  CHECK(*t.mission.tides_index == 4);
+  CHECK(t.hazard.size() == 6);
+  CHECK_FALSE(has(t.hazard, {2, 4}));
+  CHECK_FALSE(has(t.hazard, {5, 4}));
+  CHECK(has(t.hazard, {0, 4}));
+  CHECK(danger_tiles(t.mission) == t.hazard);
+  // Without a recorded index, from the marked row.
+  const EnvPlan u = plan_next_environment(b, b, mission_of("Mission_Tides", {{0, 2}, {1, 2}}), 1);
+  CHECK(*u.mission.tides_index == 3);
+  // Terratide counts rows from the bottom and has no shadow.
+  MissionData tt = mission_of("Mission_Terratide");
+  tt.tides_index = 1;
+  const EnvPlan s = plan_next_environment(b, b, tt, 1);
+  CHECK(*s.mission.tides_index == 2);
+  CHECK(s.hazard.size() == 8);
+  CHECK(has(s.hazard, {3, 5}));
+  // Cataclysm: the next column to the left, chasms and buildings left out.
+  Board c;
+  c.tile({4, 0}).terrain = Terrain::Hole;
+  c.tile({4, 7}).terrain = Terrain::Building;
+  std::vector<Point> col;
+  for (int y = 0; y < 8; ++y) col.push_back({5, y});
+  const EnvPlan k = plan_next_environment(c, c, mission_of("Mission_Cataclysm", col), 1);
+  CHECK(k.hazard.size() == 6);
+  CHECK(has(k.hazard, {4, 3}));
+  CHECK_FALSE(has(k.hazard, {4, 0}));
+  // Missions without a planning step keep their data.
+  const EnvPlan n = plan_next_environment(b, b, mission_of("Mission_Belt", {{1, 1}}), 1);
+  CHECK_FALSE(n.planned);
+  CHECK(danger_tiles(n.mission) == std::vector<Point>{{1, 1}});
+  CHECK_FALSE(environment_plannable(mission_of("Mission_Final")));
+}
+
+TEST_CASE("environment planning: random picks are valid, seeded, and cover the choices") {
+  Board b;
+  // Airstrike centres x 3..5, y 1..6 whose cross has no building or pod.
+  b.tile({4, 3}).terrain = Terrain::Building;
+  b.tile({3, 6}).pod = PodState::Present;
+  b.tile({4, 1}).terrain = Terrain::Water;  // water is a valid airstrike tile
+  int valid = 0;
+  for (int x = 3; x <= 5; ++x) {
+    for (int y = 1; y <= 6; ++y) valid += dist({x, y}, {4, 3}) > 1 && dist({x, y}, {3, 6}) > 1;
+  }
+  std::set<int> centres;
+  for (uint64_t seed = 0; seed < 400; ++seed) {
+    const EnvPlan a = plan_next_environment(b, b, mission_of("Mission_Airstrike", {{4, 4}}), seed);
+    CHECK(a.sampled);
+    REQUIRE(a.hazard.size() == 5);
+    const Point c = a.hazard.front();
+    CHECK(c.x >= 3);
+    CHECK(c.x <= 5);
+    CHECK(c.y >= 1);
+    CHECK(c.y <= 6);
+    for (Point p : a.hazard) {
+      CHECK(b.tile(p).terrain != Terrain::Building);
+      CHECK(b.tile(p).pod != PodState::Present);
+    }
+    centres.insert(c.index());
+    CHECK(plan_next_environment(b, b, mission_of("Mission_Airstrike"), seed).hazard == a.hazard);  // seeded
+  }
+  CHECK(static_cast<int>(centres.size()) == valid);
+  CHECK(centres.count(Point{4, 1}.index()) == 1);  // over the water tile
+  // Lightning: one tile per quarter, never water or a building.
+  Board l;
+  for (int x = 1; x <= 3; ++x) {
+    for (int y = 1; y <= 3; ++y) l.tile({x, y}).terrain = Terrain::Water;
+  }
+  l.tile({2, 2}).terrain = Terrain::Road;
+  l.tile({5, 5}).terrain = Terrain::Building;
+  for (uint64_t seed = 0; seed < 50; ++seed) {
+    const EnvPlan z = plan_next_environment(l, l, mission_of("Mission_Lightning"), seed);
+    REQUIRE(z.hazard.size() == 4);
+    CHECK(z.hazard[0] == Point{2, 2});
+    CHECK_FALSE(has(z.hazard, {5, 5}));
+  }
+  // Wind: two full columns in 1..5, neither of this turn's; a direction.
+  std::vector<Point> marks;
+  for (int y = 0; y < 8; ++y) {
+    marks.push_back({1, y});
+    marks.push_back({4, y});
+  }
+  std::set<int> cols;
+  for (uint64_t seed = 0; seed < 50; ++seed) {
+    const EnvPlan w = plan_next_environment(b, b, mission_of("Mission_Wind", marks), seed);
+    REQUIRE(w.hazard.size() == 16);
+    REQUIRE(w.mission.wind_dir);
+    for (Point p : w.hazard) {
+      CHECK(p.x != 1);
+      CHECK(p.x != 4);
+      cols.insert(p.x);
+    }
+    CHECK(w.hazard[0].x != w.hazard[8].x);
+  }
+  CHECK(cols == std::set<int>{2, 3, 5});
+  // Ice storm: the 3x3 block of a centre other than this turn's.
+  MissionData snow = mission_of("Mission_SnowStorm");
+  for (int dx = -1; dx <= 1; ++dx) {
+    for (int dy = -1; dy <= 1; ++dy) snow.freeze.push_back({3 + dx, 2 + dy});
+  }
+  for (uint64_t seed = 0; seed < 20; ++seed) {
+    const EnvPlan f = plan_next_environment(b, b, snow, seed);
+    REQUIRE(f.mission.freeze.size() == 9);
+    CHECK(f.mission.danger.empty());
+    CHECK_FALSE(has(f.mission.freeze, {3, 1}));
+  }
+}
+
+TEST_CASE("environment planning: the seismic path goes on from its marked end") {
+  // Marked (2,7) (2,6) (3,6): the path entered at the bottom edge. Its far
+  // end lies where every marked step got closer; the next three tiles go on
+  // from (3,6), each a neighbour of the one before.
+  Board b;
+  const std::vector<Point> marked{{2, 6}, {3, 6}, {2, 7}};
+  std::set<int> firsts;
+  for (uint64_t seed = 0; seed < 100; ++seed) {
+    const EnvPlan p = plan_next_environment(b, b, mission_of("Mission_Crack", marked), seed);
+    REQUIRE(p.hazard.size() == 3);
+    CHECK(p.mission.ordered_locations == p.hazard);
+    CHECK(dist(p.hazard[0], {3, 6}) == 1);
+    for (size_t i = 1; i < 3; ++i) CHECK(dist(p.hazard[i], p.hazard[i - 1]) == 1);
+    for (Point q : p.hazard) CHECK_FALSE(has(marked, q));
+    firsts.insert(p.hazard[0].index());
+  }
+  CHECK(firsts.count(Point{4, 6}.index()) == 1);
+  CHECK(firsts.count(Point{3, 5}.index()) == 1);
+  // A chasm below (4,6) says which end came first: the path goes on from (4,4).
+  Board c;
+  c.tile({4, 7}).terrain = Terrain::Hole;
+  for (uint64_t seed = 0; seed < 50; ++seed) {
+    const EnvPlan p = plan_next_environment(c, c, mission_of("Mission_Crack", {{4, 4}, {4, 5}, {4, 6}}), seed);
+    REQUIRE_FALSE(p.hazard.empty());
+    CHECK(dist(p.hazard[0], {4, 4}) == 1);
+    CHECK(p.hazard[0].y <= 4);
+  }
+}
+
+TEST_CASE("lookahead: plan_env strikes the next turn's hazards, and the greedy reply answers them") {
+  NEED_ENGINE();
+  // Lightning: the top-left quarter's only valid tile is (2,2), where a mech
+  // stands; next turn it is struck for sure. Without plan_env the next turn
+  // reruns this turn's (empty) marks: nothing.
+  Board b;
+  b.turn = 1;
+  b.total_turns = 4;
+  for (int x = 1; x <= 3; ++x) {
+    for (int y = 1; y <= 3; ++y) b.tile({x, y}).terrain = Terrain::Water;
+  }
+  b.tile({2, 2}).terrain = Terrain::Road;
+  add(b, "PunchMech", {2, 2}, true);
+  TurnContext ctx;
+  ctx.mission.mission_id = "Mission_Lightning";
+  Board after = b;
+  const PhaseResult pr = E.end_turn(after, ctx);
+  LookaheadOptions o;
+  o.samples = 2;
+  o.reply = LookaheadOptions::Reply::Idle;
+  CHECK(lookahead_loss(E, b, after, &pr, ctx, o).mechs == 0);
+  o.plan_env = true;
+  CHECK(lookahead_loss(E, b, after, &pr, ctx, o).mechs == 1);
+  CHECK(has(danger_tiles(next_turn_mission(b, after, ctx, lookahead_seed(o, 0), o)), {2, 2}));
+  o.reply = LookaheadOptions::Reply::Greedy;
+  CHECK(lookahead_loss(E, b, after, &pr, ctx, o).mechs == 0);  // it walks off
+  CHECK_FALSE(LookaheadOptions{}.plan_env);  // off by default
 }
 
 TEST_CASE("score: the pilot floor of the mech exchange (mech_grid_pilot)") {

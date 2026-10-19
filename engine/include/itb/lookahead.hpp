@@ -69,6 +69,13 @@ struct LookaheadOptions {
   // mean loss), WorstSum = the worst sample, ties broken by the sum.
   enum class Fold : uint8_t { Worst, Sum, WorstSum };
   Fold fold = Fold::Worst;
+  // Plan the environment's next-turn hazards (next_turn_mission): the next
+  // turn's enemy phase strikes the tiles the environment picks for it (its
+  // random picks sampled from the sample's AI seed), and the greedy reply
+  // also answers them (moves off, pushes onto them). Off: the next turn runs
+  // with this turn's mission data (its hazards strike this turn's tiles
+  // again).
+  bool plan_env = false;
   // Repair skill per unit uid (as SolveOptions::repair_skills).
   std::vector<std::pair<int32_t, std::string>> repair_skills;
 };
@@ -144,6 +151,13 @@ std::optional<LookaheadOptions::Reply> lookahead_reply_of(const std::string& nam
 Board next_turn_start(Engine& engine, const Board& root, const Board& after, const PhaseResult* phase,
                       const TurnContext& ctx, uint32_t ai_seed, const LookaheadOptions& options,
                       AiPhaseResult* ai = nullptr);
+
+// The next turn's mission data: `ctx.mission` with, under
+// LookaheadOptions::plan_env, the environment's next-turn hazards planned on
+// `after` (environment.hpp plan_next_environment; random picks drawn from
+// `ai_seed`). Without plan_env: `ctx.mission` unchanged.
+MissionData next_turn_mission(const Board& root, const Board& after, const TurnContext& ctx, uint32_t ai_seed,
+                              const LookaheadOptions& options);
 
 // Step 3 on a next-turn start board. `plan`, if given, gets the reply's
 // actions (Greedy, Search).

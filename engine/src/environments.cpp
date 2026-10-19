@@ -117,6 +117,20 @@ std::vector<Point> chain_order(const std::vector<Point>& tiles) {
   return {};
 }
 
+// Env_Seismic: how well a marked chain read first-to-last continues the
+// path: its first tile next to the chasm the previous turn left (2 per
+// chasm neighbour off the chain), or at the board edge on the first turn (1).
+int seismic_start_score(const Board& b, const std::vector<Point>& c) {
+  const Point first = c.front();
+  int s = 0;
+  for (int d = 0; d < 4; ++d) {
+    const Point q = step(first, static_cast<Dir>(d));
+    if (q.valid() && !contains(c, q) && b.tile(q).is_chasm()) s += 2;
+  }
+  if (first.x == 0 || first.x == 7 || first.y == 0 || first.y == 7) s += 1;
+  return s;
+}
+
 // ---- Env_Null and friends ---------------------------------------------------------
 
 class NullEnv : public Environment {
@@ -271,18 +285,8 @@ class SeismicEnv final : public AttackEnv {
       return;
     }
     std::vector<Point> rev(chain.rbegin(), chain.rend());
-    auto score = [&](const std::vector<Point>& c) {
-      // The first tile continues the previous turn's chasm, or starts at an edge.
-      const Point first = c.front();
-      int s = 0;
-      for (int d = 0; d < 4; ++d) {
-        const Point q = step(first, static_cast<Dir>(d));
-        if (q.valid() && !contains(c, q) && host.board().tile(q).is_chasm()) s += 2;
-      }
-      if (first.x == 0 || first.x == 7 || first.y == 0 || first.y == 7) s += 1;
-      return s;
-    };
-    const int a = score(chain), b = score(rev);
+    // The first tile continues the previous turn's chasm, or starts at an edge.
+    const int a = seismic_start_score(host.board(), chain), b = seismic_start_score(host.board(), rev);
     if (a != b) {
       locations_ = a > b ? chain : rev;
       return;
@@ -1201,6 +1205,276 @@ bool native_environment_has_update(const MissionData& m) {
   return id == "Mission_Final" || id == "Mission_Final_Cave" || id == "Mission_Dam" || id == "Mission_Train" ||
          id == "Mission_Armored_Train" || id == "Mission_Volatile" || id == "Mission_AcidStorm" ||
          id == "Mission_Shields" || id == "Mission_Hacking";
+}
+
+// ---- Next-turn planning (environment.hpp plan_next_environment) -------------------
+//
+// Each planner mirrors the environment's Plan() / SelectSpaces() (Env_Attack
+// moves the selected tiles into Locations; the others advance an index).
+// Board queries are made on the board at planning time (the end of this
+// turn's enemy phase, after the spawns), as the game makes them.
+
+namespace {
+
+// The sample's own stream (splitmix64): a function of the seed alone.
+class PlanRng {
+ public:
+  explicit PlanRng(uint64_t seed) : s_(seed ^ 0x6a09e667f3bcc909ULL) {}
+  uint64_t next() {
+    uint64_t z = (s_ += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+  }
+  // Uniform in [0, n); 0 for n <= 1.
+  int below(int n) { return n <= 1 ? 0 : static_cast<int>(next() % static_cast<uint64_t>(n)); }
+  template <class T>
+  const T& pick(const std::vector<T>& v) {
+    return v[static_cast<size_t>(below(static_cast<int>(v.size())))];
+  }
+
+ private:
+  uint64_t s_;
+};
+
+// Environment:IsValidTarget: on the board, no pod, no building, no water
+// (lava is water) unless the environment targets water.
+bool valid_env_target(const Board& b, Point p, bool water) {
+  if (!p.valid()) return false;
+  const Tile& t = b.tile(p);
+  return t.pod != PodState::Present && !t.is_building() && (water || !t.is_liquid());
+}
+
+std::vector<DangerTile> danger_of(const std::vector<Point>& tiles) {
+  std::vector<DangerTile> out;
+  for (Point p : tiles) out.push_back(DangerTile{p, kDamageDeath, true, -1});
+  return out;
+}
+
+std::vector<Point> airstrike_cross(Point c) {
+  return {c, step(c, Dir::Up), step(c, Dir::Right), step(c, Dir::Down), step(c, Dir::Left)};
+}
+
+// Env_Airstrike:SelectSpaces: a centre in x 3..5, y 1..6 whose five tiles
+// are no building and no pod (water allowed), uniformly at random.
+void plan_airstrike(const Board& b, PlanRng& rng, EnvPlan& out) {
+  std::vector<Point> choices;
+  for (int x = 3; x <= 5; ++x) {
+    for (int y = 1; y <= 6; ++y) {
+      bool ok = true;
+      for (Point p : airstrike_cross(Point{x, y})) {
+        ok = ok && p.valid() && b.tile(p).pod != PodState::Present && !b.tile(p).is_building();
+      }
+      if (ok) choices.push_back(Point{x, y});
+    }
+  }
+  out.sampled = choices.size() > 1;
+  if (!choices.empty()) out.hazard = airstrike_cross(rng.pick(choices));
+}
+
+// Env_Lightning:SelectSpaces: one valid tile per quarter (GetQuarters),
+// uniformly at random.
+void plan_lightning(const Board& b, PlanRng& rng, EnvPlan& out) {
+  for (Point start : {Point{1, 1}, Point{1, 4}, Point{4, 1}, Point{4, 4}}) {
+    std::vector<Point> choices;
+    for (int x = start.x; x <= start.x + 2; ++x) {
+      for (int y = start.y; y <= start.y + 2; ++y) {
+        if (valid_env_target(b, Point{x, y}, false)) choices.push_back(Point{x, y});
+      }
+    }
+    if (choices.empty()) continue;
+    out.sampled = out.sampled || choices.size() > 1;
+    out.hazard.push_back(rng.pick(choices));
+  }
+}
+
+int manhattan(Point a, Point b) { return std::abs(a.x - b.x) + std::abs(a.y - b.y); }
+
+// Env_Seismic: the next three tiles of the path GetCrossPath built at
+// mission start. The path itself is hidden; the player sees the marked
+// tiles. GetCrossPath walks from one edge tile to another (endpoints in
+// 2..5 on opposite edges), each step to a neighbour closest to the far end
+// (Manhattan, +0.5 on rows 0 and 7 off the end; ties at random). So the far
+// end is sampled among the edge endpoints every marked step got closer to,
+// and the walk continued from the last marked tile.
+void plan_seismic(const Board& before, const Board& after, const MissionData& m, PlanRng& rng, EnvPlan& out) {
+  std::vector<Point> chain = m.ordered_locations;
+  if (chain.empty()) {
+    const std::vector<Point> tiles = danger_points(m);
+    chain = tiles.size() < 2 ? tiles : chain_order(tiles);
+    if (chain.size() >= 2) {
+      // This turn's order, as SeismicEnv reads it (ties: either way).
+      std::vector<Point> rev(chain.rbegin(), chain.rend());
+      const int a = seismic_start_score(before, chain), c = seismic_start_score(before, rev);
+      if (c > a || (c == a && rng.below(2) == 1)) chain = rev;
+      out.sampled = out.sampled || a == c;
+    }
+  }
+  if (chain.empty()) return;  // nothing marked: the path is over (or unknown)
+  // The tile before the chain: the previous turn's chasm next to its first
+  // tile, when there is exactly one.
+  std::vector<Point> known = chain;
+  {
+    std::vector<Point> prev;
+    for (int d = 0; d < 4; ++d) {
+      const Point q = step(chain.front(), static_cast<Dir>(d));
+      if (q.valid() && !contains(chain, q) && before.tile(q).is_chasm()) prev.push_back(q);
+    }
+    if (prev.size() == 1) known.insert(known.begin(), prev.front());
+  }
+  std::vector<Point> ends;
+  for (int i = 2; i <= 5; ++i) {
+    for (Point e : {Point{i, 0}, Point{i, 7}, Point{0, i}, Point{7, i}}) {
+      if (!valid_env_target(after, e, true) && !contains(chain, e)) continue;
+      bool closer = true;
+      for (size_t k = 1; k < known.size(); ++k) closer = closer && manhattan(known[k], e) == manhattan(known[k - 1], e) - 1;
+      if (closer) ends.push_back(e);
+    }
+  }
+  out.sampled = true;
+  if (ends.empty()) return;
+  const Point fin = rng.pick(ends);
+  std::vector<Point> path = chain;
+  Point cur = chain.back();
+  while (cur != fin && out.hazard.size() < 3) {
+    std::vector<Point> best;
+    double closest = 1e9;
+    for (int d = 0; d < 4; ++d) {
+      const Point n = step(cur, static_cast<Dir>(d));
+      if (!valid_env_target(after, n, true) || contains(path, n)) continue;
+      double dist = manhattan(n, fin);
+      if ((n.y == 7 || n.y == 0) && n != fin) dist += 0.5;
+      if (dist < closest) {
+        best = {n};
+        closest = dist;
+      } else if (dist == closest) {
+        best.push_back(n);
+      }
+    }
+    if (best.empty()) break;  // a dead end (the Lua backtracks; rare)
+    cur = rng.pick(best);
+    path.push_back(cur);
+    out.hazard.push_back(cur);
+  }
+  out.mission.ordered_locations = out.hazard;
+}
+
+// Env_Tides / Env_Terratide: Plan advances Index; the next step floods
+// (smokes) row Index + 1. The hazard: the row's tiles the step changes
+// (Tides: buildings, and the tiles a building shadows, are spared).
+void plan_tides(const Board& b, const MissionData& m, bool sand, EnvPlan& out) {
+  int index = m.tides_index.value_or(-1);
+  if (index < 0) {
+    for (Point p : danger_points(m)) index = std::max(index, sand ? 7 - p.y : p.y);
+  }
+  if (index < 0) return;  // unknown
+  ++index;
+  out.mission.tides_index = index;
+  if (index >= kBoardSize) return;
+  const int y = sand ? 7 - index : index;
+  for (int x = 0; x < kBoardSize; ++x) {
+    bool shadowed = false;
+    for (int i = 0; i <= index && !sand; ++i) shadowed = shadowed || b.tile(Point{x, i}).is_building();
+    if (!shadowed) out.hazard.push_back(Point{x, y});
+  }
+}
+
+// Env_Cataclysm: Plan advances Index; the next column (one to the left)
+// collapses, buildings and chasms excepted (as MarkBoard marks it).
+void plan_cataclysm(const Board& b, const MissionData& m, EnvPlan& out) {
+  int column = -1;
+  for (Point p : danger_points(m)) column = column < 0 ? p.x : std::min(column, p.x);
+  if (column <= 0) return;  // unknown, or the last column collapsed
+  for (int y = 0; y < kBoardSize; ++y) {
+    const Point p{column - 1, y};
+    if (!b.tile(p).is_chasm() && !b.tile(p).is_building()) out.hazard.push_back(p);
+  }
+}
+
+// Env_RandomWind:Plan: UP or DOWN at random; two distinct columns in 1..5,
+// neither of them this turn's (LastIndices).
+void plan_wind(const MissionData& m, PlanRng& rng, EnvPlan& out) {
+  std::map<int, int> rows;
+  for (Point p : danger_points(m)) ++rows[p.x];
+  std::vector<int> last, choices;
+  for (const auto& [x, n] : rows) {
+    if (n == kBoardSize) last.push_back(x);
+  }
+  for (int x = 1; x <= 5; ++x) {
+    if (std::find(last.begin(), last.end(), x) == last.end()) choices.push_back(x);
+  }
+  out.sampled = true;
+  out.mission.wind_dir = rng.below(2) == 0 ? Dir::Up : Dir::Down;
+  for (int i = 0; i < 2 && !choices.empty(); ++i) {
+    const int k = rng.below(static_cast<int>(choices.size()));
+    for (int y = 0; y < kBoardSize; ++y) out.hazard.push_back(Point{choices[static_cast<size_t>(k)], y});
+    choices.erase(choices.begin() + k);
+  }
+}
+
+// Env_SnowStorm:SelectSpaces: a centre drawn from (3,2), (3,5), (2,3),
+// (5,3) without repeat until all four were used (the remaining ones are
+// hidden: any centre but this turn's), and its 3x3 block.
+void plan_snowstorm(const MissionData& m, PlanRng& rng, EnvPlan& out) {
+  std::vector<Point> centres;
+  for (Point c : {Point{3, 2}, Point{3, 5}, Point{2, 3}, Point{5, 3}}) {
+    if (!contains(m.freeze, c) || m.freeze.empty()) centres.push_back(c);
+  }
+  // The block of a centre covers the other centres only partly, so this
+  // turn's centre is the one whose whole block is marked.
+  std::vector<Point> rest;
+  for (Point c : centres) {
+    bool whole = !m.freeze.empty();
+    for (int dx = -1; dx <= 1; ++dx) {
+      for (int dy = -1; dy <= 1; ++dy) whole = whole && contains(m.freeze, Point{c.x + dx, c.y + dy});
+    }
+    if (!whole) rest.push_back(c);
+  }
+  if (rest.empty()) rest = centres;
+  out.sampled = true;
+  const Point c = rng.pick(rest);
+  for (int dx = -1; dx <= 1; ++dx) {
+    for (int dy = -1; dy <= 1; ++dy) out.hazard.push_back(Point{c.x + dx, c.y + dy});
+  }
+  out.mission.freeze = out.hazard;
+}
+
+}  // namespace
+
+bool environment_plannable(const MissionData& m) {
+  const std::string& id = m.mission_id;
+  return id == "Mission_Airstrike" || id == "Mission_Lightning" || id == "Mission_LightningStorm" ||
+         id == "Mission_Crack" || id == "Mission_Cataclysm" || id == "Mission_Tides" || id == "Mission_Terratide" ||
+         id == "Mission_Wind" || id == "Mission_SnowStorm";
+}
+
+EnvPlan plan_next_environment(const Board& before, const Board& after, const MissionData& m, uint64_t seed) {
+  EnvPlan out;
+  out.mission = m;
+  if (!environment_plannable(m)) return out;
+  out.planned = true;
+  PlanRng rng(seed);
+  const std::string& id = m.mission_id;
+  if (id == "Mission_Airstrike") {
+    plan_airstrike(after, rng, out);
+  } else if (id == "Mission_Lightning" || id == "Mission_LightningStorm") {
+    plan_lightning(after, rng, out);
+  } else if (id == "Mission_Crack") {
+    out.mission.ordered_locations.clear();
+    plan_seismic(before, after, m, rng, out);
+  } else if (id == "Mission_Cataclysm") {
+    plan_cataclysm(after, m, out);
+  } else if (id == "Mission_Tides" || id == "Mission_Terratide") {
+    plan_tides(after, m, id == "Mission_Terratide", out);
+  } else if (id == "Mission_Wind") {
+    plan_wind(m, rng, out);
+  } else if (id == "Mission_SnowStorm") {
+    plan_snowstorm(m, rng, out);
+  }
+  // What the bridge would record: the marked tiles (the ice storm's block
+  // goes to environment_freeze instead).
+  out.mission.danger = id == "Mission_SnowStorm" ? std::vector<DangerTile>{} : danger_of(out.hazard);
+  return out;
 }
 
 }  // namespace itb

@@ -633,6 +633,7 @@ class PyEngine {
     const std::optional<LookaheadOptions::Fold> f = lookahead_fold_of(opt.value("lookahead_fold", std::string("worst")));
     if (!f) throw std::invalid_argument("lookahead_fold must be 'worst', 'sum' or 'worst_sum'");
     so.lookahead_options.fold = *f;
+    so.lookahead_options.plan_env = opt.value("lookahead_env", so.lookahead_options.plan_env);
     so.lookahead_options.repair_skills = l.repair_skills;
     so.grid_survival = opt.value("grid_survival", so.grid_survival);
     so.beam_width = opt.value("beam_width", so.beam_width);
@@ -679,7 +680,7 @@ PYBIND11_MODULE(itb_engine, m) {
       .def("solve", &PyEngine::solve, py::arg("bridge_json"), py::arg("options_json") = "{}",
            "Perfect-turn search. Options: time_limit, max_time, min_tiers, node_limit, threads, beam_width, "
            "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), mech_grid (default -1: off), mech_grid_turns, mech_grid_pilot, "
-           "lookahead, lookahead_samples, lookahead_reply ('greedy' | 'idle' | 'search'), lookahead_search_nodes, lookahead_fold ('worst' | 'sum' | 'worst_sum'), grid_survival, "
+           "lookahead, lookahead_samples, lookahead_reply ('greedy' | 'idle' | 'search'), lookahead_search_nodes, lookahead_fold ('worst' | 'sum' | 'worst_sum'), lookahead_env, grid_survival, "
            "simulate (default true).")
       .def("simulate", &PyEngine::simulate_plan, py::arg("bridge_json"), py::arg("plan_json"),
            py::call_guard<py::gil_scoped_release>(),

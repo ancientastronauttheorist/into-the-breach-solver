@@ -174,7 +174,8 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   `--objectives-first`, `--mech-grid N [--mech-grid-turns]
   [--mech-grid-pilot]` and `--lookahead [--lookahead-samples K]
   [--lookahead-reply greedy|idle|search] [--lookahead-search-nodes N]
-  [--lookahead-fold worst|sum|worst_sum]` ("Turn score" below), and
+  [--lookahead-fold worst|sum|worst_sum] [--lookahead-env]` ("Turn score"
+  below), and
   `--grid-survival` ("Grid survival" below). With
   `--lookahead` the plan line adds the next-turn estimate of the plan's end
   board, and the tier counts of `--min-tiers` include NextTurn (with
@@ -348,7 +349,7 @@ budget `max_time` and `min_tiers`; the ranking options are `threat_tier`,
 `mech_grid_pilot` (then also `mech_rates` by uid), `lookahead`
 (`lookahead_samples`, `lookahead_reply` "greedy" | "idle" | "search",
 `lookahead_search_nodes` (search; default 200), `lookahead_fold` "worst" |
-"sum" | "worst_sum", `lookahead_seed`;
+"sum" | "worst_sum", `lookahead_seed`, `lookahead_env`;
 then `worst_case` has `next_turn`, `stats` has `lookahead_evals`,
 `lookahead_hits` and `lookahead_s`, and `next_turn` gives the plan's own
 end board's estimate: worst grid, mechs and building HP lost and each AI
@@ -360,7 +361,8 @@ probability, and the reply has `grid_defense`: the `percent` used and its
 `survey_proof`, `m`, `k`, `bound`, `proven`, `proofs`, `time_s`, `share`).
 CLI: `--mech-grid-pilot`, `--lookahead
 [--lookahead-samples K] [--lookahead-reply greedy|idle|search]
-[--lookahead-search-nodes N] [--lookahead-fold worst|sum|worst_sum]`, `--grid-survival`,
+[--lookahead-search-nodes N] [--lookahead-fold worst|sum|worst_sum]
+[--lookahead-env]`, `--grid-survival`,
 `--survival-cap`, `--survival-cap-share F`, `--survival-cap-strict`. The
 simulation follows the plan's default chance outcome (no Grid Defense
 resist, first branch), reseeding Lua as the solver does. Boards are compact:
@@ -406,7 +408,8 @@ boards it pruned by their bound. `two_turn` plays plans (`plans`) through
 their enemy phase (default outcome) and judges the next turn on sampled AI
 seeds (`samples`, `seed`; `lookahead.hpp` `next_turn_start`): per plan its
 plain worst case (`now`), optionally its score under the request's ranking
-(`score`), and per seed the greedy, idle and Search replies' losses and,
+(`score`), and per seed (with `lookahead_env`, the environment's hazards
+planned for it, listed as `env_hazard`) the greedy, idle and Search replies' losses and,
 with `next` (a solve request's fields), a real solve of that board and its
 plan's plain worst case; `start_only` judges the state itself (e.g. the
 game's actual next turn). `live_tool.hpp` has the fields.
@@ -1238,6 +1241,32 @@ enumeration. Reply `search` (`--lookahead-reply search`,
 `lookahead_search_nodes`, default 200): the next turn solved with a node
 budget (plain tiers) instead of the greedy reply; "Next-turn fold and
 reply" below has the numbers.
+
+The environment's next turn (`LookaheadOptions::plan_env`,
+`lookahead_env`, `--lookahead-env`; off by default). In the game the
+environment plans its next strike in state 2 of the enemy phase, after the
+spawns and before the AI moves (`Mission:PlanEnvironment`). Off, the
+sampled next turn runs with this turn's mission data, so its hazards strike
+this turn's tiles again (an airstrike on the same cross, the same tide row,
+the seismic tiles that are already chasms): next turn looks safer than it
+is. On, `next_turn_mission` (environment.hpp `plan_next_environment`)
+plays the planning step on the end board and the next turn's enemy phase
+runs with what the bridge would record then: Env_Airstrike (a centre in
+x 3..5, y 1..6 whose cross has no building or pod), Env_Lightning (one tile
+per quarter, no building, pod or water), Env_Seismic (the next three path
+tiles), Env_Cataclysm (the next column), Env_Tides / Env_Terratide
+(Index + 1), Env_RandomWind (direction and two columns, not this turn's),
+Env_SnowStorm (another centre). Random picks are drawn from a stream seeded
+by the sample's AI seed (each sample is a board the game could produce).
+Only visible information goes in: the seismic path past the marked tiles is
+hidden, so its far end is sampled among the edge endpoints every marked
+step got closer to and the walk (closest neighbour, ties at random)
+continues from the last mark; the ice storm's unused centres are hidden,
+so any but this turn's. Env_Volcano, Env_Final and Env_Belt keep their data
+(Belt has nothing to plan). The greedy reply also answers the planned
+hazard tiles (a unit on one moves off, a Vek next to one can be pushed
+onto it); the Search reply and real solves see them through the enemy
+phase. "Next-turn environment" below has the numbers.
 
 Where it ranks: below this turn's grid, buildings, mechs lost and stars
 failed, which are certain and permanent, while NextTurn is an estimate (a
@@ -2620,6 +2649,19 @@ Findings:
 `live_play.py --lookahead-fold` now defaults to `worst_sum`, and
 `loadout_eval.py` mirrors it. The engine's `LookaheadOptions::fold` stays
 `Worst`.
+
+**Next-turn environment** (2026-10-19,
+`docs/agent/next-turn-env-2026-10-19.md`). With `lookahead_env` the
+game's actual next turn falls inside the live plan's 8 solved samples on
+10 of 13 environment-mission turns, against 8 without it (63 of 70 turns
+overall, against 61). The 3 left are AI-seed variance and hidden spawn
+types. On 40 environment-mission turn starts of runs 55-59, judged over two
+turns on 16 seeds with the planned hazards, `ws8e` against `ws8` scored
+30 / 17.38 against 37 / 17.88 at seed 7 and 37 / 18.81 against 34 / 19.00 at
+seed 11: within the seed-to-seed noise. On 68 turn starts it never changed
+grid survival, grid, buildings, mechs or stars, and the plans off env
+missions were identical. It costs 8-25% of the lookahead's samples. It
+stays opt-in (`live_play.py --lookahead-env`).
 
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state

@@ -14,7 +14,9 @@
 Findings of the first study: docs/agent/two-turn-oracle-2026-10-18.md;
 `arms` (new ranking arms judged on the confirmation seeds) and `tiers`
 (this turn's tiers under each arm, the regression check):
-docs/agent/next-turn-fold-2026-10-19.md.
+docs/agent/next-turn-fold-2026-10-19.md. The environment's next-turn
+hazards (--judge-env, arms ws8e, `validate`, `arms-turns`):
+docs/agent/next-turn-env-2026-10-19.md.
 
 The live solver ranks each turn by its own score (grid, buildings, mechs,
 stars, a sampled next-turn estimate, ...; README "Turn score"). This tool
@@ -117,7 +119,16 @@ ARMS = {
     "live_s2": dict(RANK, lookahead_seed=11),
     "sum8_s2": dict(RANK, lookahead_fold="sum", lookahead_seed=11),
     "ws8_s2": dict(RANK, lookahead_fold="worst_sum", lookahead_seed=11),
+    # Third study (docs/agent/next-turn-env-2026-10-19.md): the lookahead
+    # plans the environment's next-turn hazards (lookahead_env).
+    "ws8e": dict(RANK, lookahead_fold="worst_sum", lookahead_env=True),
+    "ws8e_s2": dict(RANK, lookahead_fold="worst_sum", lookahead_env=True, lookahead_seed=11),
+    "ws16e": dict(RANK, lookahead_fold="worst_sum", lookahead_env=True, lookahead_samples=16),
 }
+# Missions whose environment plans next-turn hazards (environment.hpp
+# environment_plannable): the only ones lookahead_env changes.
+ENV_MISSIONS = {"Mission_Airstrike", "Mission_Lightning", "Mission_LightningStorm", "Mission_Crack",
+                "Mission_Cataclysm", "Mission_Tides", "Mission_Terratide", "Mission_Wind", "Mission_SnowStorm"}
 # `arms` re-solves these under their own name: the first pass's arms again,
 # to measure the budget noise between two solves of one arm.
 ARM_ALIASES = {"live_r": "live", "sum8_r": "sum8"}
@@ -322,6 +333,19 @@ def first_diff(a: dict, b: dict) -> str | None:
     return None
 
 
+def judge_fields(args) -> dict:
+    """two_turn fields of a sampled next turn: with --judge-env the
+    environment's hazards are planned for it (lookahead_env)."""
+    return {"lookahead_env": True} if getattr(args, "judge_env", False) else {}
+
+
+def kind_ok(mission_id: str, args) -> bool:
+    """--kind: env (missions whose environment plans next-turn hazards),
+    other, or all."""
+    kind = getattr(args, "kind", "all")
+    return kind == "all" or (mission_id in ENV_MISSIONS) == (kind == "env")
+
+
 def next_request(args) -> dict:
     """A next-turn solve: the live ranking without its lookahead (it ranks
     below grid, buildings, mechs and stars, so it cannot change them; it
@@ -368,7 +392,7 @@ def oracle_turn(pool: Pool, ts: TurnStart, args) -> dict:
         """The next turn on args.seeds AI seeds, each board solved."""
         jobs = [(c, k) for c in cs for k in range(args.seeds)]
         reqs = [dict(cmd="two_turn", state=state, plan=c["plan"], samples=[k], seed=args.seed, greedy=True,
-                     search_nodes=args.search_nodes, next=next_request(args)) for c, k in jobs]
+                     search_nodes=args.search_nodes, next=next_request(args), **judge_fields(args)) for c, k in jobs]
         for (c, k), rep in zip(jobs, pool.map(reqs)):
             c.setdefault("samples", []).extend(rep["results"][0]["samples"])
         for c in cs:
@@ -449,7 +473,7 @@ def oracle_turn(pool: Pool, ts: TurnStart, args) -> dict:
     screened = [live] + named + pool_s
     step = max(1, -(-len(screened) // (2 * len(pool.all))))
     reqs = [dict(cmd="two_turn", state=state, plans=[c["plan"] for c in screened[i:i + step]],
-                 samples=args.screen_seeds, seed=args.screen_seed, greedy=True)
+                 samples=args.screen_seeds, seed=args.screen_seed, greedy=True, **judge_fields(args))
             for i in range(0, len(screened), step)]
     res = [r for rep in pool.map(reqs) for r in rep["results"]]
     for c, r in zip(screened, res):
@@ -622,7 +646,7 @@ def confirm_turn(pool: Pool, path: Path, root: Path, args) -> dict | None:
     jobs = [(c, p, k) for c, p in picks for k in ks]
     out = {"seeds": args.confirm_seeds, "seed": args.confirm_seed, "plans": []}
     reps = pool.map([dict(cmd="two_turn", state=str(state), plan=p, samples=[k], seed=args.confirm_seed, greedy=True,
-                          next=next_request(args)) for _, p, k in jobs])
+                          next=next_request(args), **judge_fields(args)) for _, p, k in jobs])
     per = {}
     for (c, _, _), rep in zip(jobs, reps):
         per.setdefault(c["end_hash"], []).extend(rep["results"][0]["samples"])
@@ -690,7 +714,27 @@ def arms_turn(pool: Pool, path: Path, root: Path, out_dir: Path, args) -> dict |
     if len(conf) != len(picks):
         raise OracleError(f"{path.name}: the confirmation's plans do not match the candidates")
     judged = res["judged"]  # end hash -> {"now", "two", "next", "from"}
-    if not res.get("confirm_hashes"):
+    if args.judge_env:
+        # The confirmation judged its next turns without the environment's
+        # hazards: nothing of it is reused; the recorded live plan is judged
+        # anew with them.
+        res["judge_env"] = True
+    elif res.get("judge_env"):
+        raise OracleError(f"{path.name}: {out_dir.name} was judged with --judge-env")
+    live_fresh = {}
+    if args.judge_env and not res.get("live_hash"):
+        lp = next(p for c, p in picks if "live" in c["sources"])
+        e = stable_hashes(pool, state, [lp])[0]
+        if not e.get("ok"):
+            raise OracleError(f"{path.name}: the live plan does not replay")
+        res["live_hash"] = e["end_hash"]
+        if e["end_hash"] not in judged:
+            if e["mission_over"] or r["turn"] >= r["total_turns"]:
+                judged[e["end_hash"]] = {"now": e["now"], "two": two(e["now"]["grid"], []), "next": [],
+                                         "from": "no_next"}
+            else:
+                live_fresh[e["end_hash"]] = (lp, e["now"])
+    if not args.judge_env and not res.get("confirm_hashes"):
         hs = stable_hashes(pool, state, [p for _, p in picks])
         res["confirm_hashes"] = []
         for (c, _), cp, e in zip(picks, conf, hs):
@@ -703,7 +747,7 @@ def arms_turn(pool: Pool, path: Path, root: Path, out_dir: Path, args) -> dict |
     replies = pool.map([dict(cmd="solve", state=str(state), **budget, **arm_options(a)) for a in todo])
     plans = [rep.get("plan") or [] for rep in replies]
     evals = stable_hashes(pool, state, plans)
-    fresh = {}
+    fresh = dict(live_fresh)
     for a, rep, plan, e in zip(todo, replies, plans, evals):
         if not e.get("ok"):
             raise OracleError(f"{path.name}: arm {a}'s plan does not replay")
@@ -718,13 +762,13 @@ def arms_turn(pool: Pool, path: Path, root: Path, out_dir: Path, args) -> dict |
             judged[e["end_hash"]] = {"now": e["now"], "two": two(e["now"]["grid"], []), "next": [], "from": "no_next"}
     jobs = [(h, plan, k) for h, (plan, _) in fresh.items() for k in range(r["confirm"]["seeds"])]
     reps = pool.map([dict(cmd="two_turn", state=str(state), plan=plan, samples=[k], seed=r["confirm"]["seed"],
-                          greedy=True, next=next_request(args)) for _, plan, k in jobs])
+                          greedy=True, next=next_request(args), **judge_fields(args)) for _, plan, k in jobs])
     per = {}
     for (h, _, _), rep in zip(jobs, reps):
         per.setdefault(h, []).extend(rep["results"][0]["samples"])
     for h, (_, now) in fresh.items():
         ss = sorted(per[h], key=lambda s: s["k"])
-        judged[h] = {"now": now, "two": two(now["grid"], ss), "from": "arms",
+        judged[h] = {"now": now, "two": two(now["grid"], ss), "from": "arms" if h not in live_fresh else "live",
                      "next": [s["solve"]["plain"]["grid"] if (s.get("solve") or {}).get("plain") else None for s in ss]}
     res["judged"] = judged
     f.write_text(json.dumps(res, indent=1))
@@ -740,7 +784,9 @@ def arms_report(tags: list, out_root: Path, arms_dir: str = "arms") -> str:
     for tag in tags:
         for f in sorted((out_root / tag / arms_dir).glob("*.json")):
             a = json.loads(f.read_text())
-            r = json.loads((out_root / tag / f.name).read_text())
+            rf = out_root / tag / f.name
+            # arms-turns results stand alone (no first-pass turn file).
+            r = json.loads(rf.read_text()) if rf.exists() and not a.get("standalone") else {}
             rows.append((tag, r, a))
     names = sorted({n for _, _, a in rows for n in a["arms"]})
     first = ["live", "base", "la32", "sum8", "idle8", "plain"]
@@ -758,10 +804,16 @@ def arms_report(tags: list, out_root: Path, arms_dir: str = "arms") -> str:
 
     cost = {}
     for tag, r, a in rows:
-        conf = r["confirm"]["plans"]
-        live = next(p for p in conf if "live" in p["sources"])
-        add("recorded live", live["two"], live["now"], live["two"])
-        for arm in first:
+        conf = (r.get("confirm") or {}).get("plans", [])
+        live = next((p for p in conf if "live" in p["sources"]), None)
+        if a.get("judge_env") or a.get("standalone"):
+            # Judged with the environment's hazards: the first pass's arms
+            # were not, so only this directory's arms compare.
+            live = a["judged"][a["live_hash"]]
+            add("recorded live", live["two"], live["now"], live["two"])
+        else:
+            add("recorded live", live["two"], live["now"], live["two"])
+        for arm in ([] if a.get("judge_env") else first):
             p = next((p for p in conf if "arm:" + arm in p["sources"]), None)
             if p:
                 add("arm:" + arm + " (first pass)", p["two"], p["now"], live["two"])
@@ -782,6 +834,63 @@ def arms_report(tags: list, out_root: Path, arms_dir: str = "arms") -> str:
         lines.append(f"| {name} | {x['n']} | {x['worst']} | {x['mean']:.2f} | {x['mechs']} | {x['better']} / "
                      f"{x['worse']} | " + (f"{c[0]:.0f} | {c[1]} | {c[2]} |" if c else "- | - | - |"))
     return "\n".join(lines)
+
+
+def arms_turns_turn(pool: Pool, ts: TurnStart, out_dir: Path, args) -> dict | None:
+    """Ranking arms on any turn start (no first-pass oracle file): each arm
+    solves turn T at the first pass's budget, and the recorded live plan and
+    every arm's plan are judged over two turns on --confirm-seeds seeds from
+    --confirm-seed (with --judge-env's planned hazards). Same format as
+    arms_turn's, so arms-report reads it. Writes out_dir/<key>.json."""
+    if not ts.solve or not ts.solve.get("engine_plan"):
+        return None
+    f = out_dir / f"{ts.key}.json"
+    res = json.loads(f.read_text()) if f.exists() else {"key": ts.key, "arms": {}, "judged": {}, "standalone": True,
+                                                         "judge_env": bool(args.judge_env),
+                                                         "mission_id": ts.mission_id, "turn": ts.turn}
+    if res.get("judge_env") != bool(args.judge_env):
+        raise OracleError(f"{f.name}: judged with judge_env={res.get('judge_env')}")
+    todo = [a for a in args.arms if a not in res["arms"]]
+    if not todo and res.get("live_hash"):
+        return res
+    state = ts.state
+    judged = res["judged"]
+    budget = dict(time_limit=args.time, max_time=args.max_time, min_tiers=args.min_tiers, threads=1)
+    replies = pool.map([dict(cmd="solve", state=str(state), **budget, **arm_options(a)) for a in todo])
+    plans = [ts.solve["engine_plan"]] + [rep.get("plan") or [] for rep in replies]
+    evals = stable_hashes(pool, state, plans)
+    if not evals[0].get("ok"):
+        raise OracleError(f"{f.name}: the live plan does not replay")
+    res["live_hash"] = evals[0]["end_hash"]
+    fresh = {}
+    no_next = ts.last
+    for name, rep, plan, e in zip(["<live>"] + todo, [None] + replies, plans, evals):
+        if not e.get("ok"):
+            raise OracleError(f"{f.name}: arm {name}'s plan does not replay")
+        if rep is not None:
+            res["arms"][name] = {"end_hash": e["end_hash"], "now": e["now"], "worst_case": rep.get("worst_case"),
+                                 "proven_optimal": rep.get("proven_optimal"),
+                                 "proven_components": rep.get("proven_components"), "time_s": rep["stats"]["time_s"],
+                                 "lookahead_evals": rep["stats"].get("lookahead_evals"),
+                                 "lookahead_s": rep["stats"].get("lookahead_s"), "plan": plan_text(plan)}
+        if e["end_hash"] in judged:
+            continue
+        if e["mission_over"] or no_next:
+            judged[e["end_hash"]] = {"now": e["now"], "two": two(e["now"]["grid"], []), "next": [], "from": "no_next"}
+        else:
+            fresh.setdefault(e["end_hash"], (plan, e["now"]))
+    jobs = [(h, plan, k) for h, (plan, _) in fresh.items() for k in range(args.confirm_seeds)]
+    reps = pool.map([dict(cmd="two_turn", state=str(state), plan=plan, samples=[k], seed=args.confirm_seed,
+                          greedy=True, next=next_request(args), **judge_fields(args)) for _, plan, k in jobs])
+    per = {}
+    for (h, _, _), rep in zip(jobs, reps):
+        per.setdefault(h, []).extend(rep["results"][0]["samples"])
+    for h, (_, now) in fresh.items():
+        ss = sorted(per[h], key=lambda s: s["k"])
+        judged[h] = {"now": now, "two": two(now["grid"], ss), "from": "arms-turns",
+                     "next": [s["solve"]["plain"]["grid"] if (s.get("solve") or {}).get("plain") else None for s in ss]}
+    f.write_text(json.dumps(res, indent=1))
+    return res
 
 
 # The tiers above NextTurn (itb_live score names): a ranking change below
@@ -854,6 +963,82 @@ def worst_sample(value: int, opts: dict) -> int:
     if fold == "sum":
         return value // max(1, opts.get("lookahead_samples", 8))
     return value
+
+
+# ---------------------------------------------------------------- validation
+
+def validate_turn(pool: Pool, path: Path, root: Path, out_dir: Path, args) -> dict | None:
+    """The live plan's next turn on the first pass's seeds again, judged as
+    there (each next-turn board solved), with --judge-env's planned
+    hazards: where the game's actual next turn (the first pass's
+    "actual_next") falls in the new sampled range. Writes out_dir/<key>.json."""
+    r = json.loads(path.read_text())
+    an = ((r.get("actual_next") or {}).get("solve") or {}).get("plain")
+    live = next((c for c in r.get("candidates", []) if "live" in c["sources"]), None)
+    if an is None or live is None or not live.get("samples"):
+        return None
+    f = out_dir / path.name
+    if f.exists():
+        return json.loads(f.read_text())
+    plan = json.loads((root / r["run"] / f"m{r['mission']:02d}_turn_{r['turn']:02d}_solve.json").read_text()
+                      )["data"]["engine_plan"]
+    state = root / r["run"] / f"m{r['mission']:02d}_turn_{r['turn']:02d}_solve_input.json"
+    ks = sorted(s["k"] for s in live["samples"])
+    reps = pool.map([dict(cmd="two_turn", state=str(state), plan=plan, samples=[k], seed=args.seed, greedy=True, next=next_request(args),
+                          **judge_fields(args)) for k in ks])
+    new = [rep["results"][0]["samples"][0] for rep in reps]
+    old = sorted(live["samples"], key=lambda s: s["k"])
+
+    def grid(s):
+        return ((s.get("solve") or {}).get("plain") or {}).get("grid")
+    out = {"key": r["key"], "mission_id": r["mission_id"], "turn": r["turn"], "actual": an["grid"],
+           "judge_env": bool(args.judge_env), "old": [grid(s) for s in old], "new": [grid(s) for s in new],
+           "old_greedy": [s["greedy"]["grid"] for s in old], "new_greedy": [s["greedy"]["grid"] for s in new],
+           "hazard": [s.get("env_hazard") for s in new]}
+    f.write_text(json.dumps(out, indent=1))
+    return out
+
+
+def validate_report(tags: list, out_root: Path, vdir: str) -> str:
+    """Where the game's actual next turn falls in the live plan's sampled
+    range (below / inside / above), first pass ("old") against the samples
+    judged again ("new"), for the environment missions and the others."""
+    rows = []
+    for tag in tags:
+        rows += [json.loads(f.read_text()) for f in sorted((out_root / tag / vdir).glob("*.json"))]
+
+    def place(a, gs):
+        gs = [g for g in gs if g is not None]
+        if not gs:
+            return None
+        return "below" if a < min(gs) else ("above" if a > max(gs) else "inside")
+
+    lines = ["| set | turns | old below / inside / above | new below / inside / above | old mean next | new mean next "
+             "| actual sum |", "|---|---|---|---|---|---|---|"]
+    detail = []
+    for name, sel in (("env missions", lambda r: r["mission_id"] in ENV_MISSIONS),
+                      ("other missions", lambda r: r["mission_id"] not in ENV_MISSIONS), ("all", lambda r: True)):
+        rs = [r for r in rows if sel(r)]
+        if not rs:
+            continue
+        cnt = {"old": {"below": 0, "inside": 0, "above": 0}, "new": {"below": 0, "inside": 0, "above": 0}}
+        means = {"old": 0.0, "new": 0.0}
+        for r in rs:
+            for k in ("old", "new"):
+                pl = place(r["actual"], r[k])
+                if pl:
+                    cnt[k][pl] += 1
+                gs = [g for g in r[k] if g is not None]
+                means[k] += statistics.mean(gs) if gs else 0
+        lines.append(f"| {name} | {len(rs)} | {cnt['old']['below']} / {cnt['old']['inside']} / {cnt['old']['above']} | "
+                     f"{cnt['new']['below']} / {cnt['new']['inside']} / {cnt['new']['above']} | {means['old']:.2f} | "
+                     f"{means['new']:.2f} | {sum(r['actual'] for r in rs)} |")
+    for r in rows:
+        if r["mission_id"] in ENV_MISSIONS or r["old"] != r["new"]:
+            detail.append(f"- {r['key']} {r['mission_id'].replace('Mission_', '')} t{r['turn']}: actual {r['actual']}, "
+                          f"old {r['old']} ({place(r['actual'], r['old'])}), new {r['new']} "
+                          f"({place(r['actual'], r['new'])})")
+    return "\n".join(lines + [""] + detail)
 
 
 # ---------------------------------------------------------------- report
@@ -1025,7 +1210,9 @@ def report(rows: list) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["select", "run", "confirm", "report", "arms", "arms-report", "tiers",
+    ap.add_argument("cmd", choices=["select", "run", "confirm", "report", "arms", "arms-report", "tiers", "validate",
+                                    "arms-turns",
+                                    "validate-report",
                                     "tiers-report"])
     ap.add_argument("--root", default=str(LIVE_ROOT), help="recordings/live directory")
     ap.add_argument("--run", action="append", default=[], help="run directory name (repeatable)")
@@ -1035,6 +1222,13 @@ def main(argv=None) -> int:
     ap.add_argument("--out-root", default=str(OUT_ROOT), help="recordings/oracle directory")
     ap.add_argument("--arms-dir", default="arms", help="arms: the subdirectory of each tag for the results "
                                                        "(e.g. one per budget)")
+    ap.add_argument("--judge-env", action="store_true",
+                    help="judge each sampled next turn with the environment's hazards planned for it "
+                         "(two_turn lookahead_env; docs/agent/next-turn-env-2026-10-19.md)")
+    ap.add_argument("--kind", choices=("all", "env", "other"), default="all",
+                    help="arms / confirm / tiers / validate: only missions whose environment plans next-turn hazards "
+                         "(env), only the others, or all")
+    ap.add_argument("--validate-dir", default="validate", help="validate: the subdirectory of each tag")
     ap.add_argument("--all-turns", action="store_true", help="tiers: every turn start, not only the loss turns")
     ap.add_argument("--every", type=int, default=1, help="tiers: every Nth turn start")
     ap.add_argument("--base-arm", default="live", help="tiers-report: the arm the others are compared with")
@@ -1073,6 +1267,31 @@ def main(argv=None) -> int:
     if args.cmd == "arms-report":
         print(arms_report(args.tag or ["default"], out_root, args.arms_dir))
         return 0
+    if args.cmd == "validate-report":
+        print(validate_report(args.tag or ["default"], out_root, args.validate_dir))
+        return 0
+    if args.cmd == "validate":
+        tags = args.tag or ["default"]
+        pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, out_root / tags[0] / "validate.log")
+        try:
+            for tag in tags:
+                out_dir = out_root / tag / args.validate_dir
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for f in sorted((out_root / tag).glob("*.json")):
+                    if not kind_ok(json.loads(f.read_text()).get("mission_id", ""), args):
+                        continue
+                    t0 = time.time()
+                    try:
+                        v = validate_turn(pool, f, root, out_dir, args)
+                    except OracleError as e:
+                        print(f"{f.name}: error: {e}", flush=True)
+                        continue
+                    if v:
+                        print(f"{f.name}: actual {v['actual']} old {v['old']} new {v['new']} ({time.time() - t0:.0f}s)",
+                              flush=True)
+        finally:
+            pool.close()
+        return 0
     if args.cmd == "tiers-report":
         print(tiers_report((args.tag or ["default"])[0], out_root, args.base_arm))
         return 0
@@ -1084,6 +1303,8 @@ def main(argv=None) -> int:
                 out_dir = out_root / tag / args.arms_dir
                 out_dir.mkdir(parents=True, exist_ok=True)
                 for f in sorted((out_root / tag).glob("*.json")):
+                    if not kind_ok(json.loads(f.read_text()).get("mission_id", ""), args):
+                        continue
                     t0 = time.time()
                     try:
                         res = arms_turn(pool, f, root, out_dir, args)
@@ -1119,12 +1340,13 @@ def main(argv=None) -> int:
     turns = []
     for run in args.run:
         starts = turn_starts(root, run)
-        if args.cmd == "tiers" and args.all_turns:
+        if args.cmd in ("tiers", "arms-turns") and args.all_turns:
             sel = [t for t in starts if args.mission is None or t.mission in args.mission][::max(1, args.every)]
         else:
             sel = select_turns(starts, set(args.mission) if args.mission else None)
         if args.turn:
             sel = [t for t in sel if t.turn in args.turn]
+        sel = [t for t in sel if kind_ok(t.mission_id, args)]
         turns += sel
     if args.cmd == "select":
         for t in turns:
@@ -1133,6 +1355,26 @@ def main(argv=None) -> int:
         print(f"{len(turns)} turns")
         return 0
     out_dir = out_root / (args.tag[0] if args.tag else "default")
+    if args.cmd == "arms-turns":
+        (out_dir / args.arms_dir).mkdir(parents=True, exist_ok=True)
+        pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, out_dir / "arms_turns.log")
+        try:
+            for t in turns:
+                t0 = time.time()
+                try:
+                    res = arms_turns_turn(pool, t, out_dir / args.arms_dir, args)
+                except OracleError as e:
+                    print(f"{t.key}: error: {e}", flush=True)
+                    continue
+                if res:
+                    j = res["judged"]
+                    print(f"{t.key} {t.mission_id} t{t.turn}: live {j[res['live_hash']]['two']['worst']}/"
+                          f"{j[res['live_hash']]['two']['mean']:.2f}, " + ", ".join(
+                              f"{a} {j[i['end_hash']]['two']['worst']}/{j[i['end_hash']]['two']['mean']:.2f}"
+                              for a, i in res["arms"].items()) + f" ({time.time() - t0:.0f}s)", flush=True)
+        finally:
+            pool.close()
+        return 0
     if args.cmd == "tiers":
         (out_dir / "tiers").mkdir(parents=True, exist_ok=True)
         pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, out_dir / "tiers.log")

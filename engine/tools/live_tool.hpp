@@ -59,7 +59,7 @@
 //       itself was refused at that step ("refused_reason")
 //   {"cmd": "two_turn", "state": "...", "plans": [[actions], ...] (or "plan"),
 //    "samples": N | [k, ...], "seed": 101, "greedy": true, "idle": false,
-//    "search_nodes": 0,
+//    "search_nodes": 0, "lookahead_env": false,
 //    "next": {solve request fields: "time_limit", "max_time", "min_tiers",
 //             ranking options, "survival_cap", ...} | absent,
 //    "threads": 1, "score": false (+ ranking options), "boards": false,
@@ -75,7 +75,9 @@
 //       outcome), "after_hash", "mission_over" (no next turn), and
 //       "samples": for each AI seed k (lookahead.hpp next_turn_start from
 //       the default outcome's end board with lookahead_seed(seed, k), hidden
-//       spawns sampled as visible types) the next turn's "greedy" (and
+//       spawns sampled as visible types; with "lookahead_env", the
+//       environment's hazards planned for that turn, next_turn_mission)
+//       the next turn's "greedy" (and
 //       "idle"; with "search_nodes" N, "search": the lookahead's Search
 //       reply with that node budget) reply loss and, with "next", "solve": a real solve of that
 //       board ("worst_case", "proven_optimal", "proven_components",

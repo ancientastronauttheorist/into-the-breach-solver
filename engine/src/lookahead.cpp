@@ -11,6 +11,7 @@
 #include "itb/ai_phase.hpp"
 #include "itb/deploy.hpp"
 #include "itb/engine.hpp"
+#include "itb/environment.hpp"
 #include "itb/game_data.hpp"
 #include "itb/movement.hpp"
 #include "itb/solver.hpp"
@@ -58,6 +59,12 @@ class Greedy {
   Greedy(Engine& e, const TurnContext& ctx, const LookaheadOptions& o) : e_(e), ctx_(ctx), o_(o) {
     ao_ = action_options(ctx_);
     ao_.check_legal = true;
+    // The environment's planned hazards are answers too: a unit standing on
+    // one moves off, a Vek next to one is pushed onto it.
+    if (o_.plan_env && environment_plannable(ctx_.mission)) {
+      for (const DangerTile& d : ctx_.mission.danger) hazard_.push_back(d.p);
+      hazard_.insert(hazard_.end(), ctx_.mission.freeze.begin(), ctx_.mission.freeze.end());
+    }
   }
 
   // Rounds: the unit turn (of a unit that has not played) with the best
@@ -154,6 +161,7 @@ class Greedy {
       add(p);
       for (int d = 0; d < 4; ++d) add(step(p, static_cast<Dir>(d)));
     };
+    for (Point p : hazard_) add(p);
     for (const Pawn& p : b.pawns()) {
       if (p.team != Team::Enemy || !p.alive() || !p.pos.valid() || !p.queued.active()) continue;
       add_around(p.pos);
@@ -339,6 +347,7 @@ class Greedy {
   const LookaheadOptions& o_;
   ActionOptions ao_;
   std::vector<Point> relevant_;
+  std::vector<Point> hazard_;  // planned environment hazards (plan_env)
   std::unordered_map<Symbol, bool> passive_;
 };
 
@@ -432,6 +441,15 @@ Board next_turn_start(Engine& engine, const Board& root, const Board& after, con
   return b;
 }
 
+MissionData next_turn_mission(const Board& root, const Board& after, const TurnContext& ctx, uint32_t ai_seed,
+                              const LookaheadOptions& options) {
+  if (!options.plan_env) return ctx.mission;
+  // The environment's stream: a function of the sample's AI seed (not the
+  // AI's own stream, which the planning does not draw from in game either:
+  // the Lua environment draws from Lua's random).
+  return plan_next_environment(root, after, ctx.mission, (static_cast<uint64_t>(ai_seed) << 32) ^ 0x454e56ULL).mission;
+}
+
 NextTurnLoss idle_loss(Engine& engine, const Board& start, const TurnContext& ctx) {
   Board end = start;
   engine.lua().seed(kLuaSeed);
@@ -489,7 +507,9 @@ NextTurnLoss lookahead_sample(Engine& engine, const Board& root, const Board& af
   next.death_seed = nullptr;
   next.spider_egg = nullptr;
   next.stop_early = nullptr;
-  const Board start = next_turn_start(engine, root, after, phase, next, lookahead_seed(options, k), options);
+  const uint32_t ai_seed = lookahead_seed(options, k);
+  if (options.plan_env) next.mission = next_turn_mission(root, after, ctx, ai_seed, options);
+  const Board start = next_turn_start(engine, root, after, phase, next, ai_seed, options);
   return reply_loss(engine, start, next, options);
 }
 

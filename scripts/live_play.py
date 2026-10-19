@@ -546,7 +546,8 @@ class Engine:
               mech_grid: int = -1, mech_grid_turns: bool = False, mech_grid_pilot: bool = False,
               lookahead: bool = False, lookahead_samples: int | None = None,
               lookahead_reply: str | None = None, lookahead_fold: str | None = None,
-              lookahead_search_nodes: int | None = None, grid_survival: bool = False, survival_cap: float = 0, survival_cap_strict: bool = False) -> dict:
+              lookahead_search_nodes: int | None = None, lookahead_env: bool = False, grid_survival: bool = False,
+              survival_cap: float = 0, survival_cap_strict: bool = False) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
         min_tiers score tiers are proven, up to max_time. threat_tier: rank by
@@ -557,7 +558,8 @@ class Engine:
         the next-turn loss estimate (SolveOptions::lookahead: sampled AI
         plans, a greedy reply; lookahead_samples AI seeds, lookahead_reply
         'greedy', 'idle' or 'search' (lookahead_search_nodes), lookahead_fold
-        'worst', 'sum' or 'worst_sum'). grid_survival:
+        'worst', 'sum' or 'worst_sum'; lookahead_env: plan the environment's
+        next-turn hazards). grid_survival:
         when every line can lose the grid, rank by the odds that Grid Defense
         keeps it (SolveOptions::grid_survival). survival_cap > 0 (with
         grid_survival): on such a turn first prove a ceiling on those odds
@@ -589,6 +591,8 @@ class Engine:
                 req["lookahead_fold"] = lookahead_fold
             if lookahead_search_nodes:
                 req["lookahead_search_nodes"] = int(lookahead_search_nodes)
+            if lookahead_env:
+                req["lookahead_env"] = True
         if grid_survival:
             req["grid_survival"] = True
             if survival_cap and survival_cap > 0:
@@ -1913,6 +1917,8 @@ def ranking_options(args) -> dict:
             extra["lookahead_fold"] = args.lookahead_fold
         if getattr(args, "lookahead_search_nodes", None):
             extra["lookahead_search_nodes"] = args.lookahead_search_nodes
+        if getattr(args, "lookahead_env", False):
+            extra["lookahead_env"] = True
     if getattr(args, "grid_survival", False):
         extra["grid_survival"] = True
     return extra
@@ -3194,6 +3200,10 @@ def build_parser() -> argparse.ArgumentParser:
                          help="with --lookahead: rank by the worst AI sample, by their sum, or by the worst with "
                               "ties broken by the sum (default worst_sum since 2026-10-19: "
                               "docs/agent/next-turn-fold-2026-10-19.md; the engine's own default is worst)")
+    ranking.add_argument("--lookahead-env", action=argparse.BooleanOptionalAction, default=False,
+                         help="with --lookahead: the sampled next turn also plans the environment's hazards for it "
+                              "(airstrike, lightning, seismic, tides, wind, ...; random picks sampled per AI seed) and "
+                              "the reply answers them (docs/agent/next-turn-env-2026-10-19.md)")
     ranking.add_argument("--grid-survival", action="store_true",
                          help="when every line can lose the grid, rank lines by the odds that Grid Defense keeps "
                               "it through the turn (the game's Grid Defense chance from the bridge or the save); "

@@ -231,4 +231,38 @@ std::unique_ptr<Environment> make_native_environment(const MissionData& mission)
 // fast path of every player action on a mission without a per-frame hook).
 bool native_environment_has_update(const MissionData& mission);
 
+// ---- Next-turn planning (the lookahead) ----------------------------------------
+//
+// In state 2 of the enemy phase, after the spawns and before the AI moves,
+// the game polls Mission:PlanEnvironment(): the environment picks the tiles
+// it will hit in the next enemy phase and marks them (what the player sees
+// at the start of the next turn). plan_next_environment plays that step for
+// the lookahead: from the board at the end of this turn's enemy phase
+// (`after`; `before` is this turn's start, where the marks being resolved
+// now were shown), it returns the mission data the next turn's enemy phase
+// runs with (danger tiles, tides index, wind direction, ...), as the bridge
+// would record it then.
+//
+// Only player-visible information goes in. Where the game draws at random
+// (airstrike centre, lightning tiles, wind, ice storm) the draw is sampled
+// from `seed`; hidden instance state is sampled too (the seismic path beyond
+// the marked tiles: its far end is drawn among the edge tiles the marked
+// path is heading for; the ice storm's remaining centres: any but this
+// turn's). Each sample is one board the game could produce.
+//
+// Planned: Env_Airstrike, Env_Lightning, Env_Seismic, Env_Cataclysm,
+// Env_Tides, Env_Terratide, Env_RandomWind, Env_SnowStorm. Every other
+// mission keeps its data unchanged (planned = false): Env_Belt has nothing
+// to plan, Env_Volcano / Env_Final are not planned (their recorded locations
+// are kept, so they strike this turn's tiles again).
+struct EnvPlan {
+  MissionData mission;        // the next turn's mission data
+  bool planned = false;       // the environment's planning step was played
+  bool sampled = false;       // a random draw or hidden state was sampled
+  std::vector<Point> hazard;  // tiles the next environment step can change
+};
+EnvPlan plan_next_environment(const Board& before, const Board& after, const MissionData& mission, uint64_t seed);
+// Whether plan_next_environment plans this mission's environment.
+bool environment_plannable(const MissionData& mission);
+
 }  // namespace itb

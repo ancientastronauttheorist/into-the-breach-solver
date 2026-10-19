@@ -471,7 +471,8 @@ json stats_json(const SolveStats& s) {
 // The lookahead's request fields: "lookahead" (bool), "lookahead_samples",
 // "lookahead_reply" ("greedy" | "idle" | "search"), "lookahead_search_nodes"
 // (search), "lookahead_fold" ("worst" | "sum" | "worst_sum"),
-// "lookahead_seed".
+// "lookahead_seed", "lookahead_env" (plan the environment's next-turn
+// hazards, LookaheadOptions::plan_env).
 LookaheadOptions lookahead_options(const json& request, const std::vector<std::pair<int32_t, std::string>>& repair) {
   LookaheadOptions o;
   o.samples = std::max(1, request.value("lookahead_samples", o.samples));
@@ -484,6 +485,7 @@ LookaheadOptions lookahead_options(const json& request, const std::vector<std::p
   if (!reply) throw std::invalid_argument("lookahead_reply must be 'greedy', 'idle' or 'search'");
   o.reply = *reply;
   o.search_nodes = std::max<uint64_t>(1, request.value("lookahead_search_nodes", o.search_nodes));
+  o.plan_env = request.value("lookahead_env", o.plan_env);
   o.repair_skills = repair;
   return o;
 }
@@ -638,6 +640,7 @@ json judge_start(Engine& engine, const Board& start, const TurnContext& ctx,
   if (request.value("greedy", true)) {
     LookaheadOptions lo;
     lo.repair_skills = repair;
+    lo.plan_env = request.value("lookahead_env", false);  // the reply answers the planned hazards too
     const auto t0 = std::chrono::steady_clock::now();
     j["greedy"] = loss_json(reply_loss(engine, start, ctx, lo));
     j["greedy"]["time_s"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -715,6 +718,9 @@ json two_turn_request(Engine& engine, const Loaded& l, const json& request, cons
   LookaheadOptions lo;
   lo.seed = request.value("seed", 101u);
   lo.repair_skills = l.repair_skills;
+  // "lookahead_env": each sample's next turn runs with the environment's
+  // hazards planned for it (lookahead.hpp next_turn_mission).
+  lo.plan_env = request.value("lookahead_env", false);
   // "score": also the plan's worst case under the request's ranking options
   // (as the live solve ranks it, lookahead included).
   const bool ranked = request.value("score", false);
@@ -772,10 +778,19 @@ json two_turn_request(Engine& engine, const Loaded& l, const json& request, cons
     if (!over) {
       for (int k : ks) {
         const uint32_t ai_seed = lookahead_seed(lo, k);
-        const Board start = next_turn_start(engine, l.board, played.after, &played.pr, next_ctx, ai_seed, lo);
-        json s = judge_start(engine, start, next_ctx, l.repair_skills, request, next ? &*next : nullptr);
+        TurnContext sample_ctx = next_ctx;
+        if (lo.plan_env) sample_ctx.mission = next_turn_mission(l.board, played.after, next_ctx, ai_seed, lo);
+        const Board start = next_turn_start(engine, l.board, played.after, &played.pr, sample_ctx, ai_seed, lo);
+        json s = judge_start(engine, start, sample_ctx, l.repair_skills, request, next ? &*next : nullptr);
         s["k"] = k;
         s["ai_seed"] = ai_seed;
+        if (lo.plan_env) {
+          // The planned hazard tiles (danger marks, ice storm block).
+          json hz = json::array();
+          for (const DangerTile& d : sample_ctx.mission.danger) hz.push_back(json::array({d.p.x, d.p.y}));
+          for (Point p : sample_ctx.mission.freeze) hz.push_back(json::array({p.x, p.y}));
+          s["env_hazard"] = hz;
+        }
         s["start_hash"] = hash_hex(hash_board_stable(start, HashMode::Search));
         if (boards) s["board"] = live_board_json(start);
         samples.push_back(std::move(s));
@@ -1486,7 +1501,7 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
                "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] "
-               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle|search] [--lookahead-search-nodes N] [--lookahead-fold worst|sum|worst_sum]] [--grid-survival [--survival-cap] [--survival-cap-share F] [--survival-cap-strict]] | "
+               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle|search] [--lookahead-search-nodes N] [--lookahead-fold worst|sum|worst_sum] [--lookahead-env]] [--grid-survival [--survival-cap] [--survival-cap-share F] [--survival-cap-strict]] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | "
                "actions <state.json> [--plan JSON|@FILE] [--no-effects] | "
                "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
@@ -1597,6 +1612,8 @@ int run_live(int argc, char** argv) {
         request["lookahead_fold"] = args[++i];
       } else if (args[i] == "--lookahead-search-nodes" && more && ranked) {
         request["lookahead_search_nodes"] = std::stoi(args[++i]);
+      } else if (args[i] == "--lookahead-env" && ranked) {
+        request["lookahead_env"] = true;
       } else if (args[i] == "--grid-survival" && ranked) {
         request["grid_survival"] = true;
       } else if (args[i] == "--survival-cap" && cmd == "solve") {
