@@ -1128,6 +1128,30 @@ TEST_CASE("v85 Thick pilots ignore fire and ACID") {
   CHECK_FALSE(w.tile().acid);
 }
 
+TEST_CASE("v85b acid ice that breaks under a mech: acid water coats it unless Thick (live 20261019_153338 m18 t3)") {
+  // The pool is inert on ice; the hit that breaks the ice leaves acid water,
+  // which coats a ground pawn on the next settle (CheckAcidFire), but not a
+  // Thick Skin pilot's mech (Pawn::SetAcid refuses). The pool stays.
+  for (bool thick : {false, true}) {
+    CAPTURE(thick);
+    World w;
+    make_ice(w.tile(), 1);
+    w.tile().acid = true;
+    Pawn m = mech(10, 2);
+    m.massive = true;
+    if (thick) m.pilot_abilities = kPilotThick;
+    w.add(m);
+    w.settle();
+    CHECK_FALSE(w.pawn(10).acid);
+    w.hit(World::sd_at(1));
+    CHECK(w.tile().terrain == Terrain::Water);
+    w.settle();
+    CHECK(w.pawn(10).hp == 1);
+    CHECK(w.pawn(10).acid == !thick);
+    CHECK(w.tile().acid);
+  }
+}
+
 // ---- Items and pods ----------------------------------------------------------------
 
 TEST_CASE("v86 stepping on a mine kills, through a shield") {

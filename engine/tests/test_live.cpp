@@ -1104,3 +1104,87 @@ TEST_CASE("live: solve lists end states and excludes outcomes; two_turn judges p
   CHECK(start["start"]["solve"]["plain"].contains("grid"));
   CHECK(S.handle({{"cmd", "two_turn"}, {"state", kCaveT2.string()}})["ok"] == false);
 }
+
+TEST_CASE("live: a level-up earned this turn is in the boards; Thick Skin keeps acid water off (live 20261019_153338 m18 t3)") {
+  NEED_SESSION();
+  // Mission_CentipedeBoss turn 3. GravMech#2 stands on acid ice at D3
+  // (5,4); its pilot is level 0 with 24 XP, first skill Thick Skin (7: no
+  // ACID, no fire). Its Gravwell kills the Centipede leader (max HP 7): 7 XP,
+  // level 1, Thick Skin learned. In the enemy phase Crab1's second tile
+  // breaks the ice (D3 is acid water now) and hits the mech (2 -> 1): the
+  // game left it without ACID. The bridge reads levels from the turn-start
+  // save, so its End Turn state still has level 0; read so, the acid water
+  // gives the mech ACID. live_play carries the engine's level instead.
+  const std::string start = std::string(ITB_FIXTURE_DIR) + "/live_centipede_t3_solve_input.json";
+  const json plan = json::array({{{"uid", 1}, {"kind", "weapon"}, {"move", {5, 5}}, {"weapon", "Ranged_Ice"},
+                                  {"target", {3, 5}}},
+                                 {{"uid", 0}, {"kind", "weapon"}, {"move", {6, 6}}, {"weapon", "Prime_ShieldBash"},
+                                  {"target", {5, 6}}},
+                                 {{"uid", 2}, {"kind", "weapon"}, {"weapon", "Science_Gravwell"},
+                                  {"target", {5, 6}}}});
+  const json r = S.handle({{"cmd", "predict"}, {"state", start}, {"plan", plan}});
+  REQUIRE_MESSAGE(r["ok"].get<bool>(), r.dump());
+  const json* before = board_unit(r["start"], 2);
+  REQUIRE(before);
+  CHECK((*before)["pilot_level"] == 0);
+  CHECK((*before)["pilot_xp"] == 24);
+  CHECK((*before)["max_hp"] == 3);
+  const json& last = r["steps"].back()["board"];
+  CHECK(board_unit(last, 6583) == nullptr);  // the Centipede leader
+  const json* grav = board_unit(last, 2);
+  REQUIRE(grav);
+  CHECK((*grav)["pilot_level"] == 1);
+  CHECK((*grav)["pilot_xp"] == 0);
+  const json* crab = board_unit(last, 6584);
+  REQUIRE(crab);
+  CHECK_FALSE(crab->contains("pilot_level"));  // Vek have no pilot
+
+  // The game's board after the enemy phase.
+  const json game = S.handle(
+      {{"cmd", "board"}, {"state", std::string(ITB_FIXTURE_DIR) + "/live_centipede_t4_after_enemy.json"}});
+  REQUIRE_MESSAGE(game["ok"].get<bool>(), game.dump());
+  const json* g = board_unit(game["board"], 2);
+  REQUIRE(g);
+  CHECK((*g)["hp"] == 1);
+  CHECK((*g)["acid"] == false);
+  CHECK((*g)["pilot_level"] == 1);
+  const json& acid_tiles = game["board"]["acid_tiles"];
+  CHECK(std::count(acid_tiles.begin(), acid_tiles.end(), json::array({5, 4})) == 1);
+  auto mechs_match = [&](const json& board) {
+    for (int uid : {0, 1, 2}) {
+      const json* e = board_unit(board, uid);
+      const json* w = board_unit(game["board"], uid);
+      REQUIRE(e);
+      REQUIRE(w);
+      INFO(e->dump());
+      CHECK((*e)["x"] == (*w)["x"]);
+      CHECK((*e)["y"] == (*w)["y"]);
+      CHECK((*e)["hp"] == (*w)["hp"]);
+      CHECK((*e)["acid"] == (*w)["acid"]);
+    }
+  };
+  // The whole turn from its start: the engine's own level-up.
+  mechs_match(r["after_enemy"]);
+
+  // End Turn from the bridge's state: level 0, so ACID from the acid water.
+  const std::string end = std::string(ITB_FIXTURE_DIR) + "/live_centipede_t3_end_turn.json";
+  const json stale = S.handle({{"cmd", "predict"}, {"state", end}, {"plan", json::array()}});
+  REQUIRE_MESSAGE(stale["ok"].get<bool>(), stale.dump());
+  const json* stale_grav = board_unit(stale["after_enemy"], 2);
+  REQUIRE(stale_grav);
+  CHECK((*stale_grav)["acid"] == true);
+
+  // With the engine's level carried in (live_play apply_pilots): as the game.
+  json state = json::parse(std::ifstream(end));
+  for (json& u : state["data"]["bridge_state"]["units"]) {
+    if (u["uid"] != 2) continue;
+    u["pilot"]["level"] = (*grav)["pilot_level"];
+    u["pilot"]["xp"] = (*grav)["pilot_xp"];
+    u["pilot_level"] = (*grav)["pilot_level"];
+  }
+  const fs::path path = temp_file("itb_live_test_pilot_level.json", state);
+  const json carried = S.handle({{"cmd", "predict"}, {"state", path.string()}, {"plan", json::array()}});
+  fs::remove(path);
+  REQUIRE_MESSAGE(carried["ok"].get<bool>(), carried.dump());
+  mechs_match(carried["after_enemy"]);
+}

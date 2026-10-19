@@ -776,6 +776,20 @@ class Run:
                                        "tiles": sorted(list(p) for p in tiles)}
         self.save_meta()
 
+    def engine_pilots(self, state: dict) -> dict:
+        """The engine's pilot levels ahead of the bridge at this state's turn
+        ({uid: {"level", "xp", "max_hp"}}; see track_pilots), kept across
+        commands in the manifest; {} for another mission or turn."""
+        rec = self.meta.get("engine_pilots") or {}
+        if rec.get("mission") != self.mission_index(state) or rec.get("turn") != int(state.get("turn") or 0):
+            return {}
+        return {int(uid): dict(p) for uid, p in (rec.get("units") or {}).items()}
+
+    def save_engine_pilots(self, state: dict, pilots: dict) -> None:
+        self.meta["engine_pilots"] = {"mission": self.mission_index(state), "turn": int(state.get("turn") or 0),
+                                      "units": {str(uid): p for uid, p in sorted(pilots.items())}}
+        self.save_meta()
+
     def grid_start(self, state: dict) -> dict | None:
         """The grid and grid buildings at this state's player-turn start
         ({"grid", "buildings"}; see grid_since_turn_start), kept across
@@ -1361,7 +1375,7 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
                 notes: list | None = None, underground: dict | None = None,
                 history: dict | None = None, reactivation: list | None = None,
                 shields: list | None = None, grid_start: dict | None = None,
-                teleporter_save=None) -> tuple[dict, dict]:
+                teleporter_save=None, pilots: dict | None = None) -> tuple[dict, dict]:
     """The solver's input: the live state, plus --loadout weapons for units
     the bridge gives no exact ids, plus moved flags the bridge does not
     export, plus the engine's queued shots (`queued`, see track_queued) where
@@ -1385,9 +1399,10 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
     "reactivation_visible_list", plus the structures the engine has shielded
     (`shields`, see confirmed_shields) as the tiles' "shield" (a record,
     not None, also clears the bridge's stale turn-start marks the engine
-    does not have, see clear_stale_shields). Returns
-    (state, patches); queued-shot, underground, reactivation and shield
-    notes go to `notes`."""
+    does not have, see clear_stale_shields), plus the pilot levels and XP
+    the engine has ahead of the bridge's turn-start save (`pilots`, see
+    track_pilots). Returns (state, patches); queued-shot, underground,
+    reactivation, shield and pilot notes go to `notes`."""
     out = json.loads(json.dumps(state))
     patches = {}
     # The bridge's "web" passes through a legacy guess that clears a web when
@@ -1484,6 +1499,12 @@ def patch_state(state: dict, loadout: dict, moved: set, queued: dict | None = No
             if notes is not None:
                 notes.append("unshielded (engine; the bridge's turn-start map keeps a popped shield): "
                              + ", ".join(visual(x, y) for x, y in cleared))
+    for u in apply_pilots(out, pilots or {}):
+        p = u["pilot"]
+        patches[f"{u['uid']}.pilot"] = {"level": p["level"], "xp": p["xp"], "max_hp": u.get("max_hp")}
+        if notes is not None:
+            notes.append(f"{u.get('type')}#{u['uid']} pilot level {p['level']}, {p['xp']} XP (engine; the "
+                         "bridge reads the save's turn-start level)")
     return out, patches
 
 
@@ -1696,6 +1717,77 @@ def clear_stale_shields(state: dict, shields: list) -> list:
             del t["shield"]
             cleared.append([t["x"], t["y"]])
     return sorted(cleared)
+
+
+# ------------------------------------------------------------------ pilot levels
+#
+# The bridge reads each pilot's level and XP from the save, written at the
+# start of the turn (Lua has no live pilot XP), so a level-up earned during
+# the player's turn (a kill's XP) is missing from every later snapshot of the
+# turn, and with it the skill it unlocks. The engine's predictions carry each
+# mech pilot's level, XP and max HP ("pilot_level", "pilot_xp", "max_hp" in
+# itb_live's boards); the driver keeps the engine's for every mech whose
+# pilot it has ahead of the live board and gives the engine those instead
+# (re-solves and the end-of-turn prediction). Live 20261019_153338 m18
+# (Mission_CentipedeBoss) turn 3: GravMech#2's pilot (level 0, 24 XP,
+# first skill Thick Skin) killed the Centipede leader (7 XP) with its
+# Gravwell: level 1, immune to ACID. In the enemy phase a Crab broke the
+# acid ice under it; read at level 0, the end-of-turn prediction had the
+# acid water give it ACID, the game did not. The next turn's save has the
+# level, so a record lasts one turn.
+
+def _pilot_rank(level, xp) -> tuple | None:
+    if not isinstance(level, int) or not isinstance(xp, int):
+        return None
+    return (level, xp)
+
+
+def track_pilots(pilots: dict, predicted: dict, live: dict) -> dict:
+    """`pilots` ({uid: {"level", "xp", "max_hp"}}, the engine's pilots ahead
+    of the bridge) updated from a step: each mech in both boards whose
+    predicted pilot level and XP are ahead of the live board's (the save's)
+    gets the engine's; one the live board has caught up with, or that is
+    gone, is dropped. A board without "pilot_level" (an older itb_live)
+    changes nothing. Returns the new record."""
+    now = {u["uid"]: u for u in live.get("units", [])}
+    out = {}
+    for u in predicted.get("units", []):
+        uid = u.get("uid")
+        mine = _pilot_rank(u.get("pilot_level"), u.get("pilot_xp"))
+        if mine is None:
+            if uid in pilots and uid in now:
+                out[uid] = pilots[uid]
+            continue
+        b = now.get(uid)
+        if b is None:
+            continue
+        theirs = _pilot_rank(b.get("pilot_level"), b.get("pilot_xp"))
+        if theirs is not None and mine <= theirs:
+            continue
+        out[uid] = {"level": mine[0], "xp": mine[1], "max_hp": u.get("max_hp")}
+    return out
+
+
+def apply_pilots(state: dict, pilots: dict) -> list:
+    """Gives (in place) each state unit with a record in `pilots` the
+    engine's pilot level and XP when they are ahead of the state's (the
+    bridge's "pilot" record from the save), and the engine's max HP when
+    higher (a Health / Skilled level-up). Returns the units it changed."""
+    changed = []
+    for u in units(state):
+        rec = pilots.get(u.get("uid"))
+        p = u.get("pilot")
+        if not rec or not isinstance(p, dict):
+            continue
+        mine, theirs = _pilot_rank(rec.get("level"), rec.get("xp")), _pilot_rank(p.get("level"), p.get("xp"))
+        if mine is None or theirs is None or mine <= theirs:
+            continue
+        p["level"], p["xp"] = mine
+        u["pilot_level"] = mine[0]
+        if isinstance(rec.get("max_hp"), int) and rec["max_hp"] > (u.get("max_hp") or 0):
+            u["max_hp"] = rec["max_hp"]
+        changed.append(u)
+    return changed
 
 
 # ------------------------------------------------------------------ queued shots
@@ -2071,6 +2163,7 @@ def play_step(ctx, step: dict, state: dict, known: set, n: int, tracked: dict, u
     run.save_engine_underground(state, under)
     shields = confirmed_shields(step["board"], live)
     run.save_engine_shields(state, shields)
+    run.save_engine_pilots(state, track_pilots(run.engine_pilots(state), step["board"], live))
     run.event("step", {"step": text, "state": path.name, "diffs": diffs})
     return state, path, live, diffs, shields
 
@@ -2118,7 +2211,8 @@ def play_turn(ctx) -> list:
     def solve(st: dict, label: str, plan: list | None = None) -> tuple[Path, dict]:
         notes: list = []
         solver_input, patches = patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react,
-                                            shields, grid_start, teleporter_save=run.mission_save(st))
+                                            shields, grid_start, teleporter_save=run.mission_save(st),
+                                            pilots=run.engine_pilots(st))
         # --grid-survival needs the game's Grid Defense chance: an older
         # bridge does not export it, the save has its overpower bonus.
         if getattr(args, "grid_survival", False) and "grid_overflow" not in solver_input \
@@ -2367,7 +2461,8 @@ def end_turn(ctx) -> list:
     react = run.reactivation_list(state)
     solver_input, patches = patch_state(state, ctx.loadout, set(), run.engine_queued(state), queued_notes,
                                         under, reactivation=react, shields=run.engine_shields(state),
-                                        grid_start=run.grid_start(state), teleporter_save=run.mission_save(state))
+                                        grid_start=run.grid_start(state), teleporter_save=run.mission_save(state),
+                                        pilots=run.engine_pilots(state))
     for n in queued_notes:
         say(f"  note: {n}")
     path = run.save_state(solver_input, "end_turn", {"patches": patches} if patches else None)

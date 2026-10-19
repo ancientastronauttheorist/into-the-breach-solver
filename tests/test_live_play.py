@@ -87,6 +87,9 @@ def compact(state: dict) -> dict:
         us.append({"uid": u["uid"], "type": u["type"], "x": u["x"], "y": u["y"], "hp": u["hp"],
                    "team": u["team"], "mech": u.get("mech", False),
                    **{f: bool(u.get(f)) for f in ("fire", "acid", "frozen", "shield", "web")}})
+        if u.get("mech") and isinstance(u.get("pilot"), dict):
+            p = u["pilot"]
+            us[-1].update(pilot_level=p.get("level"), pilot_xp=p.get("xp"), max_hp=u.get("max_hp"))
     us.sort(key=lambda u: u["uid"])
     bs = [{"x": t["x"], "y": t["y"], "hp": t["building_hp"]} for t in state["tiles"]
           if t["terrain"] == "building"]
@@ -156,8 +159,11 @@ PLAN = [
 
 class FakeEngine:
     def __init__(self, plan=PLAN, after_enemy=None, enemy_phase=None, clears=None, shields=None,
-                 enemy_shields=(), enemy_branches=(), resisted=None):
+                 enemy_shields=(), enemy_branches=(), resisted=None, levels=None):
         self.plan = plan
+        # (k, {uid: (level, xp, max_hp)}): from plan step k on, that mech's
+        # pilot in the boards (a level-up the engine has the step earn).
+        self.levels = levels
         # [(choices, after_enemy(board) -> compact, enemy_phase)]: the
         # "enemy_branches" a predict with "branches" returns.
         self.enemy_branches = list(enemy_branches)
@@ -214,6 +220,10 @@ class FakeEngine:
             if self.shields is not None:
                 k, tiles = self.shields
                 out[-1]["board"]["shield_tiles"] = [list(t) for t in tiles] if self.plan.index(s) >= k else []
+            if self.levels is not None and self.plan.index(s) >= self.levels[0]:
+                for u in out[-1]["board"]["units"]:
+                    if u["uid"] in self.levels[1]:
+                        u["pilot_level"], u["pilot_xp"], u["max_hp"] = self.levels[1][u["uid"]]
         after = compact(b)
         enemy = copy.deepcopy(self.after_enemy(b)) if self.after_enemy else compact(b)
         if self.shields is not None:
@@ -1364,6 +1374,54 @@ class LivePlayTest(unittest.TestCase):
         eng = FakeEngine()
         self.assertEqual(self.quiet(["turn", "--dry-run", "--run", str(self.run_dir())], eng)[0], 0)
         self.assertTrue(tile(eng.solves[0], 2, 2)["shield"])
+
+    # The bridge reads pilot levels and XP from the save (written at turn
+    # start); live 20261019_153338 m18 t3: GravMech#2's kill gave its pilot
+    # level 1 (Thick Skin) during the turn, the end-of-turn prediction read
+    # level 0 and had acid water give it ACID, the game did not.
+
+    def test_a_level_up_the_engine_predicted_reaches_the_end_of_turn_prediction(self):
+        st = base_state()
+        unit(st, 0)["pilot"] = {"id": "Pilot_Leader", "level": 0, "xp": 24, "skill1": 7, "skill2": 9}
+        unit(st, 0)["pilot_level"] = 0
+        self.bridge(st)
+        code, text = self.quiet(["turn"], FakeEngine(levels=(1, {0: (1, 0, 3)})))
+        self.assertEqual(code, 0, text)
+        manifest = json.loads((self.run_dir() / "manifest.json").read_text())
+        self.assertEqual(manifest["engine_pilots"],
+                         {"mission": 0, "turn": 1, "units": {"0": {"level": 1, "xp": 0, "max_hp": 3}}})
+        self.assertEqual(unit(self.fb.state, 0)["pilot"]["level"], 0)  # the save's
+        eng = FakeEngine(levels=(1, {0: (1, 0, 3)}))
+        code, text = self.quiet(["end-turn", "--run", str(self.run_dir())], eng)
+        self.assertEqual(code, 0, text)
+        got = unit(eng.predict_states[0], 0)
+        self.assertEqual((got["pilot"]["level"], got["pilot"]["xp"], got["pilot_level"]), (1, 0, 1))
+        self.assertIn("note: PunchMech#0 pilot level 1, 0 XP (engine; the bridge reads the save's turn-start "
+                      "level)", text)
+        saved = json.loads((self.run_dir() / "m00_turn_01_end_turn_01.json").read_text())
+        self.assertEqual(saved["data"]["patches"]["0.pilot"], {"level": 1, "xp": 0, "max_hp": 3})
+
+    def test_track_and_apply_pilots(self):
+        pred = {"units": [{"uid": 0, "pilot_level": 1, "pilot_xp": 0, "max_hp": 5},
+                          {"uid": 1, "pilot_level": 0, "pilot_xp": 10, "max_hp": 3},
+                          {"uid": 2, "pilot_level": 1, "pilot_xp": 3, "max_hp": 3},
+                          {"uid": 100}]}
+        live = {"units": [{"uid": 0, "pilot_level": 0, "pilot_xp": 24, "max_hp": 3},
+                          {"uid": 1, "pilot_level": 0, "pilot_xp": 10, "max_hp": 3},  # caught up
+                          {"uid": 100}]}  # uid 2 gone
+        rec = lp.track_pilots({1: {"level": 0, "xp": 9, "max_hp": 3}}, pred, live)
+        self.assertEqual(rec, {0: {"level": 1, "xp": 0, "max_hp": 5}})
+        # A board without pilots (an older itb_live) keeps the record.
+        self.assertEqual(lp.track_pilots(rec, {"units": [{"uid": 0}]}, live), rec)
+        st = base_state()
+        unit(st, 0).update(pilot={"level": 0, "xp": 24}, pilot_level=0)
+        unit(st, 1).update(pilot={"level": 1, "xp": 4}, pilot_level=1)
+        changed = lp.apply_pilots(st, {0: {"level": 1, "xp": 0, "max_hp": 5}, 1: {"level": 1, "xp": 2},
+                                       100: {"level": 1, "xp": 0}})
+        self.assertEqual([u["uid"] for u in changed], [0])
+        self.assertEqual((unit(st, 0)["pilot"], unit(st, 0)["pilot_level"], unit(st, 0)["max_hp"]),
+                         ({"level": 1, "xp": 0}, 1, 5))
+        self.assertEqual(unit(st, 1)["pilot"], {"level": 1, "xp": 4})  # the bridge is ahead
 
     def test_a_shield_is_not_carried_past_an_enemy_phase_that_differed(self):
         self.bridge()

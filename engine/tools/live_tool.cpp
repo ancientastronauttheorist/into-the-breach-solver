@@ -1254,6 +1254,16 @@ json live_board_json(const Board& b) {
            {"web", p->webbed}};
     // A psion's mutation (Leader: 1 Soldier = +1 HP to every Vek, ...).
     if (p->leader != Leader::None) u["leader"] = static_cast<int>(p->leader);
+    // A mech pilot's level and XP as the engine has them, with the max HP a
+    // Health / Skilled level-up raises. The bridge reads level and XP from
+    // the save (written at turn start), so it misses a level-up earned this
+    // turn and the skill it unlocks (Thick Skin: no ACID, no fire); the
+    // driver carries these forward from the predictions.
+    if (p->mech && p->pilot_level >= 0) {
+      u["pilot_level"] = static_cast<int>(p->pilot_level);
+      u["pilot_xp"] = static_cast<int>(p->pilot_xp);
+      u["max_hp"] = static_cast<int>(p->max_hp);
+    }
     // The queued shot as the engine has it. The bridge reads queued shots
     // from the save (written at turn start), so it cannot see one cleared
     // during the turn (smoke, freezing, water: Pawn::OnLoop) or retargeted

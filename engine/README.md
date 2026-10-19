@@ -274,6 +274,22 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   Mission_BeltRandom turn 1: the plan popped G4's and F6's shields, the
   end-of-turn prediction read them stale and kept G4 against Firefly2's
   shot, the game lost it and 1 grid).
+- **Pilot levels** earned during the player's turn come from the engine.
+  The bridge reads each pilot's level and XP from the save, written at the
+  turn start (Lua has no live pilot XP), so a kill's level-up and the skill
+  it unlocks are missing from every later snapshot of the turn. Live
+  20261019_153338 m18 (Mission_CentipedeBoss) turn 3: GravMech#2's pilot
+  (level 0, 24 XP, first skill Thick Skin) killed the Centipede leader
+  (7 XP) and learned Thick Skin; in the enemy phase a Crab broke the acid
+  ice under the mech, and the end-of-turn prediction, read at level 0, had
+  the acid water give it ACID (`CheckAcidFire`), which Thick Skin blocks in
+  the game (the solve's own forecast had it right). `itb_live` boards give
+  each mech pilot's `pilot_level`, `pilot_xp` and `max_hp`; after each step
+  the driver keeps the engine's for every mech it has ahead of the live
+  board (`engine_pilots` in `manifest.json`, that mission and turn) and
+  writes them into the `pilot` record, `pilot_level` and `max_hp` of every
+  re-solve's and the end-of-turn prediction's state (`<uid>.pilot` in
+  `patches`). The next turn's save has the level.
 - **Mission_Reactivation's thaw list** is kept from what a player sees,
   never from the mission's own `Enemies` list (hidden, like the AI seed).
   The driver starts it from the frozen enemies at deployment or at the
@@ -368,7 +384,8 @@ simulation follows the plan's default chance outcome (no Grid Defense
 resist, first branch), reseeding Lua as the solver does. Boards are compact:
 `grid_power`, `buildings` (x, y, hp) and living on-board `units` sorted by
 uid (uid, type, x, y, hp, team, mech, fire, acid, frozen, shield, web;
-`leader` for a psion: its mutation number), plus `underground`,
+`leader` for a psion: its mutation number; `pilot_level`, `pilot_xp` and
+`max_hp` for a mech with a pilot), plus `underground`,
 `acid_tiles`, `smoke_tiles` and `shield_tiles` (shielded buildings and
 mountains, [x, y]).
 

@@ -1415,7 +1415,7 @@ def live_turn(ctx, sess: Session, ts: TurnStart, sample: int, chooser: Chooser, 
     def solver_input(st: dict, label: str) -> Path:
         notes: list = []
         inp, patches = lp.patch_state(st, ctx.loadout, moved, tracked, notes, under, history, react, shields,
-                                      grid_start, teleporter_save=run.mission_save(st))
+                                      grid_start, teleporter_save=run.mission_save(st), pilots=run.engine_pilots(st))
         path = run.save_state(inp, label, {"patches": patches} if patches else None)
         if patches:
             run.save_state(st, label + "_raw")
