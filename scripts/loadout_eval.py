@@ -69,9 +69,10 @@ TIERS = ("grid_survival", "grid", "building_hp", "mechs", "objectives_failed", "
 # preferred its line; the sums stay on TIERS (concrete outcomes).
 RANKED = ("grid_survival", "grid", "building_hp", "mechs", "objectives_failed", "next_turn", "threat", "mech_hp",
           "objectives", "kills", "vek_hp", "position")
-# The live driver's ranking (scratchpad drive2.sh / live_play mission flags).
+# The live driver's ranking (scratchpad drive2.sh / live_play mission flags;
+# live_play's --lookahead-fold defaults to worst_sum since 2026-10-19).
 RANKING = dict(threat_tier=True, objectives_first=True, mech_grid=2, mech_grid_turns=True, mech_grid_pilot=True,
-               lookahead=True, grid_survival=True, survival_cap=0.3)
+               lookahead=True, lookahead_fold="worst_sum", grid_survival=True, survival_cap=0.3)
 
 
 class CandidateError(ValueError):

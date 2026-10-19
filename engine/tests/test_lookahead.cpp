@@ -3,7 +3,10 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -120,6 +123,71 @@ TEST_CASE("lookahead: packing and floor") {
   l.mechs = 99;
   l.building_hp = 999;
   CHECK(next_turn_value(l) == kNextTurnFloor);
+}
+
+TEST_CASE("lookahead: folds (worst, sum, worst then sum)") {
+  using Fold = LookaheadOptions::Fold;
+  auto fold = [](const std::vector<int32_t>& v, Fold f) {
+    int32_t acc = 0;
+    for (int32_t x : v) acc = lookahead_fold(acc, x, f);
+    return acc;
+  };
+  NextTurnLoss g1;
+  g1.grid = 1;
+  NextTurnLoss b1;
+  b1.building_hp = 1;
+  const int32_t G = next_turn_value(g1), B = next_turn_value(b1);
+  for (Fold f : {Fold::Worst, Fold::Sum, Fold::WorstSum}) {
+    CHECK(fold({}, f) == 0);  // the cap
+    CHECK(lookahead_fold_of(lookahead_fold_name(f)) == f);
+  }
+  CHECK(!lookahead_fold_of("mean"));
+  for (auto r : {LookaheadOptions::Reply::Idle, LookaheadOptions::Reply::Greedy, LookaheadOptions::Reply::Search}) {
+    CHECK(lookahead_reply_of(lookahead_reply_name(r)) == r);
+  }
+  // Worst then sum: the worst sample first, ties broken by the sum.
+  CHECK(fold({G, 0}, Fold::WorstSum) == fold({0, G}, Fold::WorstSum));  // order does not matter
+  CHECK(fold({G, G}, Fold::WorstSum) < fold({G, 0}, Fold::WorstSum));   // same worst, larger sum
+  CHECK(fold({G, B}, Fold::WorstSum) < fold({G, 0}, Fold::WorstSum));
+  CHECK(fold({G, 0}, Fold::WorstSum) < fold({B, B}, Fold::WorstSum));   // a worse worst beats any sum
+  CHECK(lookahead_fold_worst(fold({G, B}, Fold::WorstSum), Fold::WorstSum) == G);
+  CHECK(lookahead_fold_worst(fold({G, B}, Fold::Worst), Fold::Worst) == G);
+  // Monotone (each sample can only lower the value) and above the floor,
+  // the extremes included (no overflow).
+  std::mt19937 rng(7);
+  for (int samples : {1, 2, 8, 16, 32}) {
+    LookaheadOptions o;
+    o.samples = samples;
+    for (Fold f : {Fold::Worst, Fold::Sum, Fold::WorstSum}) {
+      o.fold = f;
+      const int32_t floor = lookahead_floor(o);
+      std::vector<int32_t> all(static_cast<size_t>(samples), kNextTurnFloor);
+      CHECK(fold(all, f) == floor);
+      for (int trial = 0; trial < 50; ++trial) {
+        int32_t acc = 0;
+        for (int k = 0; k < samples; ++k) {
+          const int32_t v = -static_cast<int32_t>(rng() % static_cast<uint32_t>(-kNextTurnFloor + 1));
+          const int32_t next = lookahead_fold(acc, v, f);
+          CHECK(next <= acc);
+          CHECK(next >= floor);
+          acc = next;
+        }
+      }
+    }
+  }
+  // Up to 8 samples the order is exactly lexicographic (worst, then sum).
+  for (int trial = 0; trial < 2000; ++trial) {
+    std::vector<int32_t> a, b;
+    for (int k = 0; k < 8; ++k) {
+      a.push_back(-static_cast<int32_t>(rng() % 4u) * (trial % 2 ? 1 : kNextTurnGrid));
+      b.push_back(-static_cast<int32_t>(rng() % 4u) * (trial % 3 ? 1 : kNextTurnGrid));
+    }
+    const int32_t wa = *std::min_element(a.begin(), a.end()), wb = *std::min_element(b.begin(), b.end());
+    int64_t sa = 0, sb = 0;
+    for (int k = 0; k < 8; ++k) sa += a[static_cast<size_t>(k)], sb += b[static_cast<size_t>(k)];
+    const bool lex = wa != wb ? wa < wb : sa < sb;
+    CHECK(lex == (fold(a, Fold::WorstSum) < fold(b, Fold::WorstSum)));
+  }
 }
 
 TEST_CASE("lookahead: the solver kills the Vek it could not answer next turn; off, nothing changes") {

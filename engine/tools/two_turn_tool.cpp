@@ -120,14 +120,17 @@ SolveOptions arm_options(const std::string& arm, const Repair& repair, double ti
   so.helper_engines = helpers;
   so.repair_skills = repair;
   auto number = [&](size_t from) { return std::max(1, std::atoi(arm.c_str() + from)); };
-  if (arm.rfind("la", 0) == 0 || arm.rfind("sum", 0) == 0 || arm.rfind("idle", 0) == 0) {
+  if (arm.rfind("la", 0) == 0 || arm.rfind("sum", 0) == 0 || arm.rfind("idle", 0) == 0 || arm.rfind("ws", 0) == 0) {
     so.lookahead = true;
     so.lookahead_options.repair_skills = repair;
     if (arm.rfind("la", 0) == 0) {
       so.lookahead_options.samples = number(2);
     } else if (arm.rfind("sum", 0) == 0) {
       so.lookahead_options.samples = number(3);
-      so.lookahead_options.sum = true;
+      so.lookahead_options.fold = LookaheadOptions::Fold::Sum;
+    } else if (arm.rfind("ws", 0) == 0) {
+      so.lookahead_options.samples = number(2);
+      so.lookahead_options.fold = LookaheadOptions::Fold::WorstSum;
     } else {
       so.lookahead_options.samples = number(4);
       so.lookahead_options.reply = LookaheadOptions::Reply::Idle;

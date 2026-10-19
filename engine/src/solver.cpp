@@ -183,7 +183,7 @@ int32_t sampled_next_turn(Engine& e, const Board& root, const Board& after, cons
       vals.push_back(next_turn_value(l));
       if (l.mission_over) vals.resize(static_cast<size_t>(samples), 0);  // no next turn: every sample is 0
     }
-    acc = lookahead_fold(acc, vals[static_cast<size_t>(k)], lo.sum);
+    acc = lookahead_fold(acc, vals[static_cast<size_t>(k)], lo.fold);
   }
   return acc;
 }
@@ -1117,9 +1117,10 @@ class Worker {
 
   // The NextTurn tier of one chance outcome of ending the turn: `s` is its
   // score with NextTurn at the cap (0), `after` the board after the enemy
-  // phase `pr` (lookahead.hpp). The value is the worst of the samples'
-  // next_turn_value; the samples run one at a time, and as soon as the worst
-  // so far puts `s` at or below `alpha` the rest are skipped (`cut`: then the
+  // phase `pr` (lookahead.hpp). The value is the samples' next_turn_value
+  // folded (LookaheadOptions::fold: each sample can only lower it); the
+  // samples run one at a time, and as soon as the fold so far puts `s` at or
+  // below `alpha` the rest are skipped (`cut`: then the
   // returned value is only an upper bound). Sample values are cached by the
   // end board (with what the phase result adds: unknown spawns, mission end),
   // so a later call resumes where an earlier one stopped.
@@ -1149,7 +1150,7 @@ class Worker {
           vals.resize(static_cast<size_t>(samples), 0);  // no next turn: every sample is 0
         }
       }
-      worst = lookahead_fold(worst, vals[static_cast<size_t>(k)], o_.lookahead_options.sum);
+      worst = lookahead_fold(worst, vals[static_cast<size_t>(k)], o_.lookahead_options.fold);
       t[ScoreKey::NextTurn] = worst;
       if (k + 1 < samples && t <= alpha) {
         cut = true;

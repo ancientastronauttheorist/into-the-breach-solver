@@ -173,7 +173,8 @@ python3 scripts/live_play.py restore --run 20261011_222439 --mission 0 --turn 1 
   re-solve of the turn): `--threat-tier`, `--threat-kills`,
   `--objectives-first`, `--mech-grid N [--mech-grid-turns]
   [--mech-grid-pilot]` and `--lookahead [--lookahead-samples K]
-  [--lookahead-reply greedy|idle]` ("Turn score" below), and
+  [--lookahead-reply greedy|idle|search] [--lookahead-search-nodes N]
+  [--lookahead-fold worst|sum|worst_sum]` ("Turn score" below), and
   `--grid-survival` ("Grid survival" below). With
   `--lookahead` the plan line adds the next-turn estimate of the plan's end
   board, and the tier counts of `--min-tiers` include NextTurn (with
@@ -345,7 +346,9 @@ base time), `contingent`, `stats` and `warnings`. Requests take
 budget `max_time` and `min_tiers`; the ranking options are `threat_tier`,
 `threat_kills`, `objectives_first`, `mech_grid`, `mech_grid_turns`,
 `mech_grid_pilot` (then also `mech_rates` by uid), `lookahead`
-(`lookahead_samples`, `lookahead_reply` "greedy" | "idle", `lookahead_seed`;
+(`lookahead_samples`, `lookahead_reply` "greedy" | "idle" | "search",
+`lookahead_search_nodes` (search; default 200), `lookahead_fold` "worst" |
+"sum" | "worst_sum", `lookahead_seed`;
 then `worst_case` has `next_turn`, `stats` has `lookahead_evals`,
 `lookahead_hits` and `lookahead_s`, and `next_turn` gives the plan's own
 end board's estimate: worst grid, mechs and building HP lost and each AI
@@ -356,7 +359,8 @@ probability, and the reply has `grid_defense`: the `percent` used and its
 `survival_cap_strict`; the reply then has `survival_cap` (`ran`,
 `survey_proof`, `m`, `k`, `bound`, `proven`, `proofs`, `time_s`, `share`).
 CLI: `--mech-grid-pilot`, `--lookahead
-[--lookahead-samples K] [--lookahead-reply greedy|idle]`, `--grid-survival`,
+[--lookahead-samples K] [--lookahead-reply greedy|idle|search]
+[--lookahead-search-nodes N] [--lookahead-fold worst|sum|worst_sum]`, `--grid-survival`,
 `--survival-cap`, `--survival-cap-share F`, `--survival-cap-strict`. The
 simulation follows the plan's default chance outcome (no Grid Defense
 resist, first branch), reseeding Lua as the solver does. Boards are compact:
@@ -1211,6 +1215,29 @@ the board a turn leaves costs on the next turn (`lookahead.hpp`):
    `-(1024 x grid + 64 x mechs + building HP)` (`next_turn_value`, clamped;
    floor `kNextTurnFloor`). No next turn (the mission's last turn, or the
    phase ended the mission): 0.
+
+The fold over the samples (`LookaheadOptions::fold`, `lookahead_fold`,
+`--lookahead-fold`): `worst` (the default, above), `sum` (K times the mean)
+or `worst_sum`: the worst sample, ties broken by the sum, in one int32:
+`-(2^17 x W + min(S, 2^17 - 1))` with W the worst sample's packed loss
+(at most 16383) and S the sum of all of them. W x 2^17 + 2^17 - 1 is at
+most 2^31 - 1, so the value never overflows, and a worse worst ranks below
+any sum. Up to 8 samples S stays below 2^17 - 1 (8 x 16383), so the order is
+exactly (worst, then sum); with more samples a very bad sum saturates (ties
+among them), still worst first. The tier stays one value because every
+argument the solver makes about it holds for any fold that starts at 0 and
+that each sample can only lower, and `worst_sum` is one: the cap stays 0
+(the lazy evaluation and `TierBounds`), `lookahead_floor` is the packed
+worst of K floor samples, the per-sample cut (the value so far <= alpha:
+the rest can only lower it) and the cached sample values (the fold is a
+function of the set of values) stay sound, and `--min-tiers` counts are
+unchanged (a separate tier would shift them and the tables' keys).
+`lookahead_fold_worst` gets the worst sample back. The tiny-board test
+checks all three folds (and the Search reply) against the naive
+enumeration. Reply `search` (`--lookahead-reply search`,
+`lookahead_search_nodes`, default 200): the next turn solved with a node
+budget (plain tiers) instead of the greedy reply; "Next-turn fold and
+reply" below has the numbers.
 
 Where it ranks: below this turn's grid, buildings, mechs lost and stars
 failed, which are certain and permanent, while NextTurn is an estimate (a
@@ -2562,6 +2589,37 @@ winners were re-checked on 16 fresh seeds. Findings:
 
 Next step suggested there: fold the samples worst-then-sum, use a more
 accurate reply, and plan the environment's next turn in `next_turn_start`.
+
+**Next-turn fold and reply** (2026-10-19,
+`docs/agent/next-turn-fold-2026-10-19.md`). The setup was the oracle's
+53 confirmed loss turns and 16 confirmation seeds. Each new arm solved
+turn T at the oracle's budget (1 thread, 8-24 s) and at 3x that budget,
+and its plan was judged over two turns. The numbers are sums over the
+turns of the two-turn grid loss, worst case / mean:
+
+| arm | 1x | 3x |
+|---|---|---|
+| worst fold | 121 / 75.3 (seed 11: 126 / 77.0) | 120 / 73.9 |
+| `worst_sum`, 8 samples | 119 / 72.1 (seed 11: 122 / 72.6) | 116 / 69.3 |
+| `worst_sum`, 16 samples | 120 / 71.0 | 112 / 67.4 |
+| `sum`, 8 samples | 120 / 70.8 | 113 / 68.4 |
+| `worst_sum` with the Search reply | 129 / 73.4 | 118 / 67.9 |
+
+Findings:
+- Changing the fold is the gain. Sum and worst_sum are within noise of
+  each other.
+- The Search reply is more accurate: its grid loss equals a real solve's
+  on 86% of 800 next-turn boards, against 81% for greedy, almost
+  independent of its node budget (50-400). But a sample costs 4.2x as
+  much (78 ms against 18 ms in a solve), and the reply only pays at the
+  larger budget.
+- On 272 turn starts of runs 55-59, `worst_sum` (8 and 16 samples) never
+  changed grid survival, grid, buildings, mechs or stars against the worst
+  fold.
+
+`live_play.py --lookahead-fold` now defaults to `worst_sum`, and
+`loadout_eval.py` mirrors it. The engine's `LookaheadOptions::fold` stays
+`Worst`.
 
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state

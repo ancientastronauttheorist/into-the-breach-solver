@@ -6,8 +6,15 @@
     python3 scripts/two_turn_oracle.py run --run 20261018_151438 --mission 4 --tag control
     python3 scripts/two_turn_oracle.py confirm --tag lost --workers 2
     python3 scripts/two_turn_oracle.py report --tag lost --tag control
+    python3 scripts/two_turn_oracle.py arms --tag lost --arms ws8,wssr8 --workers 6
+    python3 scripts/two_turn_oracle.py arms-report --tag lost
+    python3 scripts/two_turn_oracle.py tiers --all-turns --run 20261018_121230 --tag regress --arms live,ws8
+    python3 scripts/two_turn_oracle.py tiers-report --tag regress
 
-Findings of the first study: docs/agent/two-turn-oracle-2026-10-18.md.
+Findings of the first study: docs/agent/two-turn-oracle-2026-10-18.md;
+`arms` (new ranking arms judged on the confirmation seeds) and `tiers`
+(this turn's tiers under each arm, the regression check):
+docs/agent/next-turn-fold-2026-10-19.md.
 
 The live solver ranks each turn by its own score (grid, buildings, mechs,
 stars, a sampled next-turn estimate, ...; README "Turn score"). This tool
@@ -97,7 +104,23 @@ ARMS = {
     "sum8": dict(RANK, lookahead_fold="sum"),
     "idle8": dict(RANK, lookahead_reply="idle"),
     "plain": {},
+    # Second study (docs/agent/next-turn-fold-2026-10-19.md): the worst
+    # sample with ties broken by the sum, and the Search reply.
+    "ws8": dict(RANK, lookahead_fold="worst_sum"),
+    "srch8": dict(RANK, lookahead_reply="search"),
+    "wssr8": dict(RANK, lookahead_fold="worst_sum", lookahead_reply="search"),
+    "sumsr8": dict(RANK, lookahead_fold="sum", lookahead_reply="search"),
+    "ws16": dict(RANK, lookahead_fold="worst_sum", lookahead_samples=16),
+    "sum16": dict(RANK, lookahead_fold="sum", lookahead_samples=16),
+    # The same arms with other lookahead sample seeds (the estimate's own
+    # sampling noise; the solver's default seed is 7).
+    "live_s2": dict(RANK, lookahead_seed=11),
+    "sum8_s2": dict(RANK, lookahead_fold="sum", lookahead_seed=11),
+    "ws8_s2": dict(RANK, lookahead_fold="worst_sum", lookahead_seed=11),
 }
+# `arms` re-solves these under their own name: the first pass's arms again,
+# to measure the budget noise between two solves of one arm.
+ARM_ALIASES = {"live_r": "live", "sum8_r": "sum8"}
 # The ranking tiers in order (itb_live score names), for "which tier
 # decided".
 RANKED = ("grid_survival", "grid", "building_hp", "mechs", "objectives_failed", "next_turn", "threat", "mech_hp",
@@ -556,14 +579,10 @@ def parse_plan_text(text: str, units: dict) -> list:
     return plan
 
 
-def confirm_turn(pool: Pool, path: Path, root: Path, args) -> dict | None:
-    """Re-judges a turn's live plan, its best alternative and the arms' and
-    K-best plans on --confirm-seeds fresh AI seeds (the full evaluation's
-    budget): the alternative was picked as the best of several on the first
-    seeds, so its value there is biased low (the winner's curse)."""
-    r = json.loads(path.read_text())
-    if r.get("settled_by_proof") or r["verdict"] == "last_turn" or "confirm" in r:
-        return None
+def confirm_picks(r: dict, root: Path) -> tuple:
+    """The turn's state file and the plans `confirm` judges, in order: the
+    live plan, the arms' and K-best plans and the best alternatives, as
+    (candidate, actions)."""
     state = root / r["run"] / f"m{r['mission']:02d}_turn_{r['turn']:02d}_solve_input.json"
     units = {u["uid"]: [u["x"], u["y"]] for u in bridge_state(state).get("units", [])}
     solve = json.loads((root / r["run"] / f"m{r['mission']:02d}_turn_{r['turn']:02d}_solve.json").read_text())["data"]
@@ -574,6 +593,18 @@ def confirm_turn(pool: Pool, path: Path, root: Path, args) -> dict | None:
         if named or is_best:
             plan = solve["engine_plan"] if "live" in c["sources"] else (c.get("actions") or parse_plan_text(c["plan"], units))
             picks.append((c, plan))
+    return state, picks
+
+
+def confirm_turn(pool: Pool, path: Path, root: Path, args) -> dict | None:
+    """Re-judges a turn's live plan, its best alternative and the arms' and
+    K-best plans on --confirm-seeds fresh AI seeds (the full evaluation's
+    budget): the alternative was picked as the best of several on the first
+    seeds, so its value there is biased low (the winner's curse)."""
+    r = json.loads(path.read_text())
+    if r.get("settled_by_proof") or r["verdict"] == "last_turn" or "confirm" in r:
+        return None
+    state, picks = confirm_picks(r, root)
     reqs = [dict(cmd="two_turn", state=str(state), plans=[p for _, p in picks], samples=0, greedy=False,
                  describe=True)]
     check = pool.map(reqs)[0]["results"]
@@ -625,12 +656,212 @@ def confirmed_verdict(r: dict) -> str | None:
     return "forced" if lw["worst"] > 0 else "optimal"
 
 
-# ---------------------------------------------------------------- report
+# ---------------------------------------------------------------- arms
 
-def load_results(tags: list) -> list:
+def arm_options(name: str) -> dict:
+    return ARMS[ARM_ALIASES.get(name, name)]
+
+
+def stable_hashes(pool: Pool, state: Path, plans: list) -> list:
+    """Each plan's end board hash (hash_board_stable) and turn-T loss, from
+    this build (the first pass's hashes were not stable across processes)."""
+    out = []
+    for i in range(0, len(plans), 200):
+        out += pool.one(dict(cmd="two_turn", state=str(state), plans=plans[i:i + 200], samples=0,
+                             greedy=False))["results"]
+    return out
+
+
+def arms_turn(pool: Pool, path: Path, root: Path, out_dir: Path, args) -> dict | None:
+    """New ranking arms on a confirmed turn: each arm solves turn T with the
+    first pass's budget, and its plan is judged on the confirmation seeds
+    (reusing the confirmation of a plan with the same end board, and the
+    judgement of an earlier arm's). Writes out_dir/<key>.json."""
+    r = json.loads(path.read_text())
+    if not r.get("confirm"):
+        return None
+    f = out_dir / path.name
+    res = json.loads(f.read_text()) if f.exists() else {"key": r["key"], "arms": {}, "judged": {}}
+    todo = [a for a in args.arms if a not in res["arms"]]
+    if not todo:
+        return res
+    state, picks = confirm_picks(r, root)
+    conf = r["confirm"]["plans"]
+    if len(conf) != len(picks):
+        raise OracleError(f"{path.name}: the confirmation's plans do not match the candidates")
+    judged = res["judged"]  # end hash -> {"now", "two", "next", "from"}
+    if not res.get("confirm_hashes"):
+        hs = stable_hashes(pool, state, [p for _, p in picks])
+        res["confirm_hashes"] = []
+        for (c, _), cp, e in zip(picks, conf, hs):
+            if not e.get("ok") or e["now"] != cp["now"]:
+                raise OracleError(f"{path.name}: the confirmed plan '{cp['plan']}' does not replay as recorded")
+            res["confirm_hashes"].append(e["end_hash"])
+            judged.setdefault(e["end_hash"], {"now": cp["now"], "two": cp["two"], "next": cp.get("next"),
+                                              "from": "confirm:" + ",".join(cp["sources"])})
+    budget = dict(time_limit=args.time, max_time=args.max_time, min_tiers=args.min_tiers, threads=1)
+    replies = pool.map([dict(cmd="solve", state=str(state), **budget, **arm_options(a)) for a in todo])
+    plans = [rep.get("plan") or [] for rep in replies]
+    evals = stable_hashes(pool, state, plans)
+    fresh = {}
+    for a, rep, plan, e in zip(todo, replies, plans, evals):
+        if not e.get("ok"):
+            raise OracleError(f"{path.name}: arm {a}'s plan does not replay")
+        res["arms"][a] = {"end_hash": e["end_hash"], "now": e["now"], "worst_case": rep.get("worst_case"),
+                          "proven_optimal": rep.get("proven_optimal"),
+                          "proven_components": rep.get("proven_components"), "time_s": rep["stats"]["time_s"],
+                          "lookahead_evals": rep["stats"].get("lookahead_evals"),
+                          "lookahead_s": rep["stats"].get("lookahead_s"), "plan": plan_text(plan)}
+        if e["end_hash"] not in judged and not e["mission_over"] and not (r["turn"] >= r["total_turns"]):
+            fresh.setdefault(e["end_hash"], (plan, e["now"]))
+        elif e["end_hash"] not in judged:
+            judged[e["end_hash"]] = {"now": e["now"], "two": two(e["now"]["grid"], []), "next": [], "from": "no_next"}
+    jobs = [(h, plan, k) for h, (plan, _) in fresh.items() for k in range(r["confirm"]["seeds"])]
+    reps = pool.map([dict(cmd="two_turn", state=str(state), plan=plan, samples=[k], seed=r["confirm"]["seed"],
+                          greedy=True, next=next_request(args)) for _, plan, k in jobs])
+    per = {}
+    for (h, _, _), rep in zip(jobs, reps):
+        per.setdefault(h, []).extend(rep["results"][0]["samples"])
+    for h, (_, now) in fresh.items():
+        ss = sorted(per[h], key=lambda s: s["k"])
+        judged[h] = {"now": now, "two": two(now["grid"], ss), "from": "arms",
+                     "next": [s["solve"]["plain"]["grid"] if (s.get("solve") or {}).get("plain") else None for s in ss]}
+    res["judged"] = judged
+    f.write_text(json.dumps(res, indent=1))
+    return res
+
+
+def arms_report(tags: list, out_root: Path, arms_dir: str = "arms") -> str:
+    """Per arm, over the turns every listed arm was judged on: the sums of
+    the two-turn worst / mean on the confirmation seeds (as the first
+    study's "ranking arms" table), mechs lost over the two turns (worst),
+    turns better / worse than the recorded live plan, and the search cost."""
     rows = []
     for tag in tags:
-        for f in sorted((OUT_ROOT / tag).glob("*.json")):
+        for f in sorted((out_root / tag / arms_dir).glob("*.json")):
+            a = json.loads(f.read_text())
+            r = json.loads((out_root / tag / f.name).read_text())
+            rows.append((tag, r, a))
+    names = sorted({n for _, _, a in rows for n in a["arms"]})
+    first = ["live", "base", "la32", "sum8", "idle8", "plain"]
+    agg = {}
+
+    def add(name, two_, now, live_two):
+        x = agg.setdefault(name, {"worst": 0, "mean": 0.0, "mechs": 0, "n": 0, "better": 0, "worse": 0})
+        x["worst"] += two_["worst"]
+        x["mean"] += two_["mean"]
+        x["mechs"] += now["mechs"] + two_["mechs_worst"]
+        x["n"] += 1
+        k, lk = (two_["worst"], round(two_["mean"], 3)), (live_two["worst"], round(live_two["mean"], 3))
+        x["better"] += k < lk
+        x["worse"] += k > lk
+
+    cost = {}
+    for tag, r, a in rows:
+        conf = r["confirm"]["plans"]
+        live = next(p for p in conf if "live" in p["sources"])
+        add("recorded live", live["two"], live["now"], live["two"])
+        for arm in first:
+            p = next((p for p in conf if "arm:" + arm in p["sources"]), None)
+            if p:
+                add("arm:" + arm + " (first pass)", p["two"], p["now"], live["two"])
+        for name in names:
+            info = a["arms"].get(name)
+            if not info:
+                continue
+            j = a["judged"][info["end_hash"]]
+            add(name, j["two"], j["now"], live["two"])
+            c = cost.setdefault(name, [0.0, 0, 0])
+            c[0] += info["time_s"]
+            c[1] += info.get("lookahead_evals") or 0
+            c[2] += int(bool(info.get("proven_optimal")))
+    lines = ["| arm | turns | two-turn worst | two-turn mean | mechs (worst) | better / worse than live | "
+             "solve s (sum) | lookahead samples | proven |", "|---|---|---|---|---|---|---|---|---|"]
+    for name, x in sorted(agg.items(), key=lambda kv: (kv[1]["mean"], kv[0])):
+        c = cost.get(name)
+        lines.append(f"| {name} | {x['n']} | {x['worst']} | {x['mean']:.2f} | {x['mechs']} | {x['better']} / "
+                     f"{x['worse']} | " + (f"{c[0]:.0f} | {c[1]} | {c[2]} |" if c else "- | - | - |"))
+    return "\n".join(lines)
+
+
+# The tiers above NextTurn (itb_live score names): a ranking change below
+# them must never make them worse.
+TOP_TIERS = ("grid_survival", "grid", "building_hp", "mechs", "objectives_failed")
+
+
+def tiers_turn(pool: Pool, ts: TurnStart, arms: list, args) -> dict:
+    """Turn T solved by each arm (the regression check: this turn's grid,
+    buildings, mechs and stars under each ranking)."""
+    budget = dict(time_limit=args.time, max_time=args.max_time, min_tiers=args.min_tiers, threads=1)
+    reps = pool.map([dict(cmd="solve", state=str(ts.state), **budget, **arm_options(a)) for a in arms])
+    out = {"key": ts.key, "mission_id": ts.mission_id, "turn": ts.turn, "total_turns": ts.total, "arms": {}}
+    for a, rep in zip(arms, reps):
+        out["arms"][a] = {"worst_case": rep.get("worst_case"), "proven_optimal": rep.get("proven_optimal"),
+                          "proven_components": rep.get("proven_components"), "time_s": rep["stats"]["time_s"],
+                          "base_proven_components": rep["stats"].get("base_proven_components"),
+                          "plan": plan_text(rep.get("plan") or [])}
+    return out
+
+
+def tiers_report(tag: str, out_root: Path, base: str) -> str:
+    """Per arm against `base`: turns where a tier above NextTurn is worse /
+    better (lexicographically over TOP_TIERS), the first such tier, and
+    whether both solves proved those tiers."""
+    rows = [json.loads(f.read_text()) for f in sorted((out_root / tag / "tiers").glob("*.json"))]
+    names = sorted({n for r in rows for n in r["arms"]} - {base})
+    lines = [f"{len(rows)} turn starts; against `{base}`:", "",
+             "| arm | turns | same plan | top tiers worse | better | worse with both proven | next_turn worse | "
+             "next_turn better |", "|---|---|---|---|---|---|---|---|"]
+    detail = []
+    for n in names:
+        same = worse = better = proven_worse = nt_w = nt_b = cnt = 0
+        for r in rows:
+            b, x = r["arms"].get(base), r["arms"].get(n)
+            if not b or not x or not b.get("worst_case") or not x.get("worst_case"):
+                continue
+            cnt += 1
+            same += b["plan"] == x["plan"]
+            kb = tuple(b["worst_case"].get(t, 0) for t in TOP_TIERS)
+            kx = tuple(x["worst_case"].get(t, 0) for t in TOP_TIERS)
+            if kx < kb:
+                worse += 1
+                both = (b.get("proven_components") or 0) >= 5 and (x.get("proven_components") or 0) >= 5
+                proven_worse += both
+                tier = next(t for t, u, v in zip(TOP_TIERS, kb, kx) if u != v)
+                detail.append(f"- {n} worse on {r['key']} {r['mission_id']} t{r['turn']}: {tier} {kb} -> {kx} "
+                              f"(proven {b.get('proven_components')} / {x.get('proven_components')})")
+            elif kx > kb:
+                better += 1
+                tier = next(t for t, u, v in zip(TOP_TIERS, kb, kx) if u != v)
+                detail.append(f"- {n} better on {r['key']} {r['mission_id']} t{r['turn']}: {tier} {kb} -> {kx} "
+                              f"(proven {b.get('proven_components')} / {x.get('proven_components')})")
+            elif "next_turn" in b["worst_case"] and "next_turn" in x["worst_case"]:
+                nb = (b["worst_case"]["next_turn"], x["worst_case"]["next_turn"])
+                # Different folds have different scales: compare the worst sample (lookahead_fold_worst).
+                wb, wx = worst_sample(nb[0], arm_options(base)), worst_sample(nb[1], arm_options(n))
+                nt_w += wx < wb
+                nt_b += wx > wb
+        lines.append(f"| {n} | {cnt} | {same} | {worse} | {better} | {proven_worse} | {nt_w} | {nt_b} |")
+    return "\n".join(lines + [""] + detail)
+
+
+def worst_sample(value: int, opts: dict) -> int:
+    """The worst sample's next_turn_value inside a folded NextTurn value
+    (lookahead.hpp lookahead_fold_worst; the sum fold has none: the mean)."""
+    fold = opts.get("lookahead_fold", "worst")
+    if fold == "worst_sum":
+        return -((-value) // (1 << 17))
+    if fold == "sum":
+        return value // max(1, opts.get("lookahead_samples", 8))
+    return value
+
+
+# ---------------------------------------------------------------- report
+
+def load_results(tags: list, out_root: Path = OUT_ROOT) -> list:
+    rows = []
+    for tag in tags:
+        for f in sorted((out_root / tag).glob("*.json")):
             r = json.loads(f.read_text())
             r["tag"] = tag
             rows.append(r)
@@ -794,12 +1025,19 @@ def report(rows: list) -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("cmd", choices=["select", "run", "confirm", "report"])
+    ap.add_argument("cmd", choices=["select", "run", "confirm", "report", "arms", "arms-report", "tiers",
+                                    "tiers-report"])
     ap.add_argument("--root", default=str(LIVE_ROOT), help="recordings/live directory")
     ap.add_argument("--run", action="append", default=[], help="run directory name (repeatable)")
     ap.add_argument("--mission", type=int, action="append", help="only these mission indices (repeatable)")
     ap.add_argument("--turn", type=int, action="append", help="only these turns (repeatable)")
     ap.add_argument("--tag", action="append", default=[], help="output subdirectory (run: the first)")
+    ap.add_argument("--out-root", default=str(OUT_ROOT), help="recordings/oracle directory")
+    ap.add_argument("--arms-dir", default="arms", help="arms: the subdirectory of each tag for the results "
+                                                       "(e.g. one per budget)")
+    ap.add_argument("--all-turns", action="store_true", help="tiers: every turn start, not only the loss turns")
+    ap.add_argument("--every", type=int, default=1, help="tiers: every Nth turn start")
+    ap.add_argument("--base-arm", default="live", help="tiers-report: the arm the others are compared with")
     ap.add_argument("--workers", type=int, default=2, help="itb_live processes, one thread each")
     ap.add_argument("--itb-live", default=str(ITB_LIVE))
     ap.add_argument("--game", default=None)
@@ -825,18 +1063,47 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     args.arms = [a for a in args.arms.split(",") if a]
     for a in args.arms:
-        if a not in ARMS:
+        if a not in ARMS and a not in ARM_ALIASES:
             ap.error(f"unknown arm {a}")
     root = Path(args.root)
+    out_root = Path(args.out_root)
     if args.cmd == "report":
-        print(report(load_results(args.tag or ["default"])))
+        print(report(load_results(args.tag or ["default"], out_root)))
+        return 0
+    if args.cmd == "arms-report":
+        print(arms_report(args.tag or ["default"], out_root, args.arms_dir))
+        return 0
+    if args.cmd == "tiers-report":
+        print(tiers_report((args.tag or ["default"])[0], out_root, args.base_arm))
+        return 0
+    if args.cmd == "arms":
+        tags = args.tag or ["default"]
+        pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, out_root / tags[0] / "arms.log")
+        try:
+            for tag in tags:
+                out_dir = out_root / tag / args.arms_dir
+                out_dir.mkdir(parents=True, exist_ok=True)
+                for f in sorted((out_root / tag).glob("*.json")):
+                    t0 = time.time()
+                    try:
+                        res = arms_turn(pool, f, root, out_dir, args)
+                    except OracleError as e:
+                        print(f"{f.name}: error: {e}", flush=True)
+                        continue
+                    if res:
+                        print(f"{f.name}: " + ", ".join(
+                            f"{a} {res['judged'][i['end_hash']]['two']['worst']}/"
+                            f"{res['judged'][i['end_hash']]['two']['mean']:.2f}" for a, i in res["arms"].items())
+                              + f" ({time.time() - t0:.0f}s)", flush=True)
+        finally:
+            pool.close()
         return 0
     if args.cmd == "confirm":
         tags = args.tag or ["default"]
-        pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, OUT_ROOT / tags[0] / "itb_live.log")
+        pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, out_root / tags[0] / "itb_live.log")
         try:
             for tag in tags:
-                for f in sorted((OUT_ROOT / tag).glob("*.json")):
+                for f in sorted((out_root / tag).glob("*.json")):
                     t0 = time.time()
                     try:
                         r = confirm_turn(pool, f, root, args)
@@ -851,7 +1118,11 @@ def main(argv=None) -> int:
         return 0
     turns = []
     for run in args.run:
-        sel = select_turns(turn_starts(root, run), set(args.mission) if args.mission else None)
+        starts = turn_starts(root, run)
+        if args.cmd == "tiers" and args.all_turns:
+            sel = [t for t in starts if args.mission is None or t.mission in args.mission][::max(1, args.every)]
+        else:
+            sel = select_turns(starts, set(args.mission) if args.mission else None)
         if args.turn:
             sel = [t for t in sel if t.turn in args.turn]
         turns += sel
@@ -861,7 +1132,23 @@ def main(argv=None) -> int:
                   f"predicted {t.predicted_grid_loss()}")
         print(f"{len(turns)} turns")
         return 0
-    out_dir = OUT_ROOT / (args.tag[0] if args.tag else "default")
+    out_dir = out_root / (args.tag[0] if args.tag else "default")
+    if args.cmd == "tiers":
+        (out_dir / "tiers").mkdir(parents=True, exist_ok=True)
+        pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, out_dir / "tiers.log")
+        try:
+            # Turns in parallel: each arm of a turn on its own process.
+            per_batch = max(1, args.workers // max(1, len(args.arms)))
+            todo = [t for t in turns if not (out_dir / "tiers" / f"{t.key}.json").exists()]
+            exe = cf.ThreadPoolExecutor(max_workers=per_batch)
+            for t, res in zip(todo, exe.map(lambda t: tiers_turn(pool, t, args.arms, args), todo)):
+                (out_dir / "tiers" / f"{t.key}.json").write_text(json.dumps(res, indent=1))
+                print(f"{t.key}: " + ", ".join(f"{a} {json.dumps({k: (x['worst_case'] or {}).get(k) for k in TOP_TIERS})}"
+                                               for a, x in res["arms"].items()), flush=True)
+            exe.shutdown()
+        finally:
+            pool.close()
+        return 0
     out_dir.mkdir(parents=True, exist_ok=True)
     pool = Pool(args.workers, Path(args.itb_live), args.game, args.nice, out_dir / "itb_live.log")
     try:

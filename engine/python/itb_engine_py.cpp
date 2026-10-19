@@ -624,10 +624,15 @@ class PyEngine {
     so.mech_grid_pilot = opt.value("mech_grid_pilot", so.mech_grid_pilot);
     so.lookahead = opt.value("lookahead", so.lookahead);
     so.lookahead_options.samples = std::max(1, opt.value("lookahead_samples", so.lookahead_options.samples));
-    if (opt.value("lookahead_reply", std::string("greedy")) == "idle") {
-      so.lookahead_options.reply = LookaheadOptions::Reply::Idle;
-    }
-    so.lookahead_options.sum = opt.value("lookahead_fold", std::string("worst")) == "sum";
+    const std::string reply = opt.value("lookahead_reply", std::string("greedy"));
+    const std::optional<LookaheadOptions::Reply> r = lookahead_reply_of(reply);
+    if (!r) throw std::invalid_argument("lookahead_reply must be 'greedy', 'idle' or 'search'");
+    so.lookahead_options.reply = *r;
+    so.lookahead_options.search_nodes =
+        std::max<uint64_t>(1, opt.value("lookahead_search_nodes", so.lookahead_options.search_nodes));
+    const std::optional<LookaheadOptions::Fold> f = lookahead_fold_of(opt.value("lookahead_fold", std::string("worst")));
+    if (!f) throw std::invalid_argument("lookahead_fold must be 'worst', 'sum' or 'worst_sum'");
+    so.lookahead_options.fold = *f;
     so.lookahead_options.repair_skills = l.repair_skills;
     so.grid_survival = opt.value("grid_survival", so.grid_survival);
     so.beam_width = opt.value("beam_width", so.beam_width);
@@ -674,7 +679,7 @@ PYBIND11_MODULE(itb_engine, m) {
       .def("solve", &PyEngine::solve, py::arg("bridge_json"), py::arg("options_json") = "{}",
            "Perfect-turn search. Options: time_limit, max_time, min_tiers, node_limit, threads, beam_width, "
            "extra_death_seeds, max_chance_leaves, tt_max_entries, threat_tier, threat_kills, objectives_first (default false), mech_grid (default -1: off), mech_grid_turns, mech_grid_pilot, "
-           "lookahead, lookahead_samples, lookahead_reply ('greedy' | 'idle'), grid_survival, "
+           "lookahead, lookahead_samples, lookahead_reply ('greedy' | 'idle' | 'search'), lookahead_search_nodes, lookahead_fold ('worst' | 'sum' | 'worst_sum'), grid_survival, "
            "simulate (default true).")
       .def("simulate", &PyEngine::simulate_plan, py::arg("bridge_json"), py::arg("plan_json"),
            py::call_guard<py::gil_scoped_release>(),

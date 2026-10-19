@@ -355,6 +355,44 @@ NextTurnLoss turn_loss(const Board& before, const Board& after, const TurnContex
 
 uint32_t lookahead_seed(const LookaheadOptions& options, int k) { return deploy_sample_seed(options.seed, k); }
 
+const char* lookahead_fold_name(LookaheadOptions::Fold fold) {
+  switch (fold) {
+    case LookaheadOptions::Fold::Worst:
+      return "worst";
+    case LookaheadOptions::Fold::Sum:
+      return "sum";
+    case LookaheadOptions::Fold::WorstSum:
+      return "worst_sum";
+  }
+  return "worst";
+}
+
+std::optional<LookaheadOptions::Fold> lookahead_fold_of(const std::string& name) {
+  if (name == "worst") return LookaheadOptions::Fold::Worst;
+  if (name == "sum") return LookaheadOptions::Fold::Sum;
+  if (name == "worst_sum") return LookaheadOptions::Fold::WorstSum;
+  return std::nullopt;
+}
+
+const char* lookahead_reply_name(LookaheadOptions::Reply reply) {
+  switch (reply) {
+    case LookaheadOptions::Reply::Idle:
+      return "idle";
+    case LookaheadOptions::Reply::Greedy:
+      return "greedy";
+    case LookaheadOptions::Reply::Search:
+      return "search";
+  }
+  return "greedy";
+}
+
+std::optional<LookaheadOptions::Reply> lookahead_reply_of(const std::string& name) {
+  if (name == "idle") return LookaheadOptions::Reply::Idle;
+  if (name == "greedy") return LookaheadOptions::Reply::Greedy;
+  if (name == "search") return LookaheadOptions::Reply::Search;
+  return std::nullopt;
+}
+
 Board next_turn_start(Engine& engine, const Board& root, const Board& after, const PhaseResult* phase,
                       const TurnContext& ctx, uint32_t ai_seed, const LookaheadOptions& options, AiPhaseResult* ai) {
   Board b = after;
@@ -479,7 +517,7 @@ int32_t lookahead_value(Engine& engine, const Board& root, const Board& after, c
   for (int k = 0; k < std::max(1, options.samples); ++k) {
     const NextTurnLoss l = lookahead_sample(engine, root, after, phase, ctx, options, k);
     if (per_sample) per_sample->push_back(l);
-    acc = lookahead_fold(acc, next_turn_value(l), options.sum);
+    acc = lookahead_fold(acc, next_turn_value(l), options.fold);
   }
   return acc;
 }

@@ -1003,14 +1003,23 @@ class LivePlayTest(unittest.TestCase):
         self.run_cmd(["turn", "--lookahead", "--lookahead-samples", "4", "--lookahead-reply", "idle",
                       "--mech-grid", "2", "--mech-grid-turns", "--mech-grid-pilot"], eng)
         want = {"mech_grid": 2, "mech_grid_turns": True, "mech_grid_pilot": True, "lookahead": True,
-                "lookahead_samples": 4, "lookahead_reply": "idle"}
+                "lookahead_samples": 4, "lookahead_reply": "idle", "lookahead_fold": "worst_sum"}
         self.assertEqual(eng.tiers, [want] * 2)
+
+    def test_lookahead_fold_and_search_reply_are_passed(self):
+        self.bridge()
+        eng = FakeEngine()
+        self.run_cmd(["turn", "--lookahead", "--lookahead-fold", "worst_sum", "--lookahead-reply", "search",
+                      "--lookahead-search-nodes", "150"], eng)
+        self.assertEqual(eng.tiers, [{"lookahead": True, "lookahead_fold": "worst_sum", "lookahead_reply": "search",
+                                      "lookahead_search_nodes": 150}])
 
     def test_lookahead_defaults_send_only_the_switch(self):
         self.bridge()
         eng = FakeEngine()
         self.run_cmd(["turn", "--lookahead"], eng)
-        self.assertEqual(eng.tiers, [{"lookahead": True}])
+        # The fold's default is worst_sum (the engine's own is worst).
+        self.assertEqual(eng.tiers, [{"lookahead": True, "lookahead_fold": "worst_sum"}])
 
     def test_grid_survival_is_passed_with_the_saves_overflow(self):
         """--grid-survival goes to every solve; a bridge without grid_overflow
@@ -1970,7 +1979,7 @@ class LivePlayTest(unittest.TestCase):
         self.assertEqual(self.run_cmd(args, engine=engine), 0)
         self.assertEqual(engine.deploy_rankings, [{"threat_tier": True, "objectives_first": True, "mech_grid": 2,
                                                    "mech_grid_turns": True, "mech_grid_pilot": True,
-                                                   "lookahead": True}])
+                                                   "lookahead": True, "lookahead_fold": "worst_sum"}])
 
     def test_deploy_engine_search_swaps_through_a_free_tile(self):
         self.bridge(self.deploy_state())

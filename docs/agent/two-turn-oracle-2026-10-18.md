@@ -221,3 +221,11 @@ python3 scripts/two_turn_oracle.py report --tag lost --tag control --tag optiona
   `hash_board_stable` existed, so the K-best chain sometimes returned an
   outcome already found. That only reduced diversity, and the confirmation
   pass used the fixed keys.
+
+**Follow-up (2026-10-19):** recommendation 1 was measured in
+`next-turn-fold-2026-10-19.md`. On the same 53 confirmed turns the
+worst-then-sum fold lowers the two-turn mean by 3.2-4.6 grid against the
+worst fold, at both budgets tried, and never changed this turn's tiers on
+272 turn starts. It is now live_play's default (`--lookahead-fold
+worst_sum`). The Search reply stays opt-in: per board it is more accurate,
+but each sample costs 4x as much.

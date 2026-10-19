@@ -546,7 +546,7 @@ class Engine:
               mech_grid: int = -1, mech_grid_turns: bool = False, mech_grid_pilot: bool = False,
               lookahead: bool = False, lookahead_samples: int | None = None,
               lookahead_reply: str | None = None, lookahead_fold: str | None = None,
-              grid_survival: bool = False, survival_cap: float = 0, survival_cap_strict: bool = False) -> dict:
+              lookahead_search_nodes: int | None = None, grid_survival: bool = False, survival_cap: float = 0, survival_cap_strict: bool = False) -> dict:
         """max_time / min_tiers: the adaptive budget (SolveOptions::max_time_s,
         min_proven_tiers): past time_limit, keep searching until the first
         min_tiers score tiers are proven, up to max_time. threat_tier: rank by
@@ -556,7 +556,8 @@ class Engine:
         mech_grid_pilot never below its pilot's level). lookahead: rank by
         the next-turn loss estimate (SolveOptions::lookahead: sampled AI
         plans, a greedy reply; lookahead_samples AI seeds, lookahead_reply
-        'greedy' or 'idle', lookahead_fold 'worst' or 'sum'). grid_survival:
+        'greedy', 'idle' or 'search' (lookahead_search_nodes), lookahead_fold
+        'worst', 'sum' or 'worst_sum'). grid_survival:
         when every line can lose the grid, rank by the odds that Grid Defense
         keeps it (SolveOptions::grid_survival). survival_cap > 0 (with
         grid_survival): on such a turn first prove a ceiling on those odds
@@ -586,6 +587,8 @@ class Engine:
                 req["lookahead_reply"] = lookahead_reply
             if lookahead_fold:
                 req["lookahead_fold"] = lookahead_fold
+            if lookahead_search_nodes:
+                req["lookahead_search_nodes"] = int(lookahead_search_nodes)
         if grid_survival:
             req["grid_survival"] = True
             if survival_cap and survival_cap > 0:
@@ -1908,6 +1911,8 @@ def ranking_options(args) -> dict:
             extra["lookahead_reply"] = args.lookahead_reply
         if getattr(args, "lookahead_fold", None):
             extra["lookahead_fold"] = args.lookahead_fold
+        if getattr(args, "lookahead_search_nodes", None):
+            extra["lookahead_search_nodes"] = args.lookahead_search_nodes
     if getattr(args, "grid_survival", False):
         extra["grid_survival"] = True
     return extra
@@ -3180,10 +3185,15 @@ def build_parser() -> argparse.ArgumentParser:
                               "reply) right after objectives failed; it adds a tier to --min-tiers counts")
     ranking.add_argument("--lookahead-samples", type=int, default=None, metavar="K",
                          help="with --lookahead: AI seeds per end board, worst case taken (engine default 8)")
-    ranking.add_argument("--lookahead-reply", choices=("greedy", "idle"), default=None,
-                         help="with --lookahead: the next-turn reply policy (default greedy)")
-    ranking.add_argument("--lookahead-fold", choices=("worst", "sum"), default=None,
-                         help="with --lookahead: rank by the worst AI sample or by their sum (default worst)")
+    ranking.add_argument("--lookahead-reply", choices=("greedy", "idle", "search"), default=None,
+                         help="with --lookahead: the next-turn reply policy (default greedy; search: a node-budget "
+                              "solve, closer to a real one, about 3.6x the cost)")
+    ranking.add_argument("--lookahead-search-nodes", type=int, default=None, metavar="N",
+                         help="with --lookahead-reply search: the reply's node budget (engine default 200)")
+    ranking.add_argument("--lookahead-fold", choices=("worst", "sum", "worst_sum"), default="worst_sum",
+                         help="with --lookahead: rank by the worst AI sample, by their sum, or by the worst with "
+                              "ties broken by the sum (default worst_sum since 2026-10-19: "
+                              "docs/agent/next-turn-fold-2026-10-19.md; the engine's own default is worst)")
     ranking.add_argument("--grid-survival", action="store_true",
                          help="when every line can lose the grid, rank lines by the odds that Grid Defense keeps "
                               "it through the turn (the game's Grid Defense chance from the bridge or the save); "

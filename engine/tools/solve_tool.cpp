@@ -240,8 +240,9 @@ int run_solve(const SolveToolOptions& opt) {
     so.survival_cap_share = opt.grid_survival ? opt.survival_cap : 0;
     so.survival_cap_strict = opt.survival_cap_strict;
     so.lookahead_options.samples = std::max(1, opt.lookahead_samples);
-    if (opt.lookahead_idle) so.lookahead_options.reply = LookaheadOptions::Reply::Idle;
-    so.lookahead_options.sum = opt.lookahead_sum;
+    so.lookahead_options.reply = opt.lookahead_reply;
+    so.lookahead_options.fold = opt.lookahead_fold;
+    so.lookahead_options.search_nodes = std::max<uint64_t>(1, opt.lookahead_search_nodes);
     so.helper_engines = helper_ptrs;
     if (opt.beam >= 0) so.beam_width = opt.beam;
     if (opt.tt_entries > 0) so.tt_max_entries = opt.tt_entries;

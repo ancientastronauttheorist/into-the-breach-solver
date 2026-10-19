@@ -18,11 +18,13 @@
 //        - Greedy: unit by unit, the unit turn (move, then weapon or repair)
 //          that lowers the loss most, until no unit turn helps (an
 //          achievable reply, so again an upper bound on what is forced);
-//        - Search: solve_turn with a node budget (study reference; slow).
+//        - Search: solve_turn with a node budget (plain tiers; about 3.6x
+//          the greedy reply's cost, closer to a real solve).
 //      The loss is the next turn's grid power lost, then mechs lost, then
 //      building HP lost (score_turn's plain tiers), packed into one value.
 //   4. The worst loss over the sampled seeds (chance is taken worst case, as
-//      everywhere in the solver).
+//      everywhere in the solver); LookaheadOptions::fold can instead take
+//      their sum, or the worst with ties broken by the sum (WorstSum).
 //
 // The result is a function of the end board alone (and fixed options), so
 // the solver can score it as one more tier (ScoreKey::NextTurn) and keep its
@@ -30,6 +32,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -61,9 +64,11 @@ struct LookaheadOptions {
   // ... extended (adaptive budget) up to this share of the whole budget while
   // the tiers above NextTurn (grid, buildings, mechs, stars) are unproven.
   double base_max_share = 0.75;
-  // How the samples combine into the tier: false = the worst sample (chance
-  // taken worst case), true = their sum (K times the mean loss).
-  bool sum = false;
+  // How the samples combine into the tier (lookahead_fold): Worst = the
+  // worst sample (chance taken worst case), Sum = their sum (K times the
+  // mean loss), WorstSum = the worst sample, ties broken by the sum.
+  enum class Fold : uint8_t { Worst, Sum, WorstSum };
+  Fold fold = Fold::Worst;
   // Repair skill per unit uid (as SolveOptions::repair_skills).
   std::vector<std::pair<int32_t, std::string>> repair_skills;
 };
@@ -86,9 +91,51 @@ inline int32_t next_turn_value(const NextTurnLoss& l) {
 }
 // The lowest value next_turn_value can take.
 inline constexpr int32_t kNextTurnFloor = -(kNextTurnGrid * 15 + kNextTurnMech * 15 + 63);
-// Folding sample values into the tier (LookaheadOptions::sum); the fold of
-// no sample is 0, and each sample can only lower it.
-inline int32_t lookahead_fold(int32_t acc, int32_t v, bool sum) { return sum ? acc + v : (v < acc ? v : acc); }
+// Folding sample values into the tier (LookaheadOptions::fold). The fold of
+// no sample is 0 (the tier's cap), and each sample can only lower it: the
+// solver relies on both (NextTurn at its cap is an upper bound, and its
+// samples run one at a time, cut as soon as the value so far is <= alpha).
+// The fold is a function of the set of sample values (their order does not
+// matter), so cached samples resume a value exactly.
+//
+// WorstSum packs (worst, sum) into one int32, lexicographically:
+// -(kWorstSumScale * W + min(S, kWorstSumScale - 1)) with W = -worst and
+// S = -sum (both >= 0). W <= -kNextTurnFloor = 16383 and the sum part is
+// below kWorstSumScale = 2^17, so the value stays >= -(2^31 - 1) (no
+// overflow) and a worse worst always ranks below any sum. With up to 8
+// samples the sum part never saturates (8 x 16383 < 2^17 - 1): exact
+// lexicographic order; with more samples a sum past 2^17 - 1 saturates
+// (ties among very bad sums), still monotone and still worst first.
+inline constexpr int32_t kWorstSumScale = 1 << 17;
+inline constexpr int32_t worst_sum_pack(int32_t worst_loss, int32_t sum_loss) {
+  return -(kWorstSumScale * worst_loss + (sum_loss < kWorstSumScale - 1 ? sum_loss : kWorstSumScale - 1));
+}
+inline int32_t lookahead_fold(int32_t acc, int32_t v, LookaheadOptions::Fold fold) {
+  switch (fold) {
+    case LookaheadOptions::Fold::Worst:
+      return v < acc ? v : acc;
+    case LookaheadOptions::Fold::Sum:
+      return acc + v;
+    case LookaheadOptions::Fold::WorstSum: {
+      const int32_t q = -acc;  // >= 0: kWorstSumScale * W + S
+      const int32_t w = q / kWorstSumScale, s = q % kWorstSumScale, l = -v;
+      return worst_sum_pack(l > w ? l : w, s + l);
+    }
+  }
+  return acc;
+}
+// The worst sample's next_turn_value inside a folded value (Worst and
+// WorstSum; for Sum, the value itself).
+inline int32_t lookahead_fold_worst(int32_t value, LookaheadOptions::Fold fold) {
+  return fold == LookaheadOptions::Fold::WorstSum ? -((-value) / kWorstSumScale) : value;
+}
+// The fold's name as the tools spell it ("worst", "sum", "worst_sum"), and
+// back (std::nullopt for anything else).
+const char* lookahead_fold_name(LookaheadOptions::Fold fold);
+std::optional<LookaheadOptions::Fold> lookahead_fold_of(const std::string& name);
+// The reply's name ("idle", "greedy", "search"), and back.
+const char* lookahead_reply_name(LookaheadOptions::Reply reply);
+std::optional<LookaheadOptions::Reply> lookahead_reply_of(const std::string& name);
 
 // Step 1-2: the board the player faces at the start of the next turn.
 // `root` is the board at the start of this turn, `after` the board at the
@@ -126,13 +173,25 @@ NextTurnLoss idle_loss(Engine& engine, const Board& start, const TurnContext& ct
 NextTurnLoss turn_loss(const Board& before, const Board& after, const TurnContext& ctx, const PhaseResult& pr);
 
 // The NextTurn tier itself: the samples' next_turn_value folded
-// (LookaheadOptions::sum), 0 without a next turn.
+// (LookaheadOptions::fold), 0 without a next turn.
 int32_t lookahead_value(Engine& engine, const Board& root, const Board& after, const PhaseResult* phase,
                         const TurnContext& ctx, const LookaheadOptions& options,
                         std::vector<NextTurnLoss>* per_sample = nullptr);
 // The lowest value lookahead_value can take with these options.
 inline int32_t lookahead_floor(const LookaheadOptions& o) {
-  return o.sum ? kNextTurnFloor * (o.samples < 1 ? 1 : o.samples) : kNextTurnFloor;
+  const int32_t k = o.samples < 1 ? 1 : o.samples;
+  switch (o.fold) {
+    case LookaheadOptions::Fold::Worst:
+      return kNextTurnFloor;
+    case LookaheadOptions::Fold::Sum:
+      return kNextTurnFloor * k;
+    case LookaheadOptions::Fold::WorstSum:
+    {
+      const int64_t sum = static_cast<int64_t>(-kNextTurnFloor) * k;  // clamped by worst_sum_pack
+      return worst_sum_pack(-kNextTurnFloor, sum > kWorstSumScale ? kWorstSumScale : static_cast<int32_t>(sum));
+    }
+  }
+  return kNextTurnFloor;
 }
 
 // The AI seed of lookahead sample k.

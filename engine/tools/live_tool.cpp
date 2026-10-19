@@ -469,20 +469,21 @@ json stats_json(const SolveStats& s) {
 }
 
 // The lookahead's request fields: "lookahead" (bool), "lookahead_samples",
-// "lookahead_reply" ("greedy" | "idle"), "lookahead_seed".
+// "lookahead_reply" ("greedy" | "idle" | "search"), "lookahead_search_nodes"
+// (search), "lookahead_fold" ("worst" | "sum" | "worst_sum"),
+// "lookahead_seed".
 LookaheadOptions lookahead_options(const json& request, const std::vector<std::pair<int32_t, std::string>>& repair) {
   LookaheadOptions o;
   o.samples = std::max(1, request.value("lookahead_samples", o.samples));
   o.seed = request.value("lookahead_seed", o.seed);
-  o.sum = request.value("lookahead_fold", std::string("worst")) == "sum";
-  const std::string reply = request.value("lookahead_reply", std::string("greedy"));
-  if (reply == "idle") {
-    o.reply = LookaheadOptions::Reply::Idle;
-  } else if (reply == "greedy") {
-    o.reply = LookaheadOptions::Reply::Greedy;
-  } else {
-    throw std::invalid_argument("lookahead_reply must be 'greedy' or 'idle'");
-  }
+  const std::optional<LookaheadOptions::Fold> fold = lookahead_fold_of(request.value("lookahead_fold", std::string("worst")));
+  if (!fold) throw std::invalid_argument("lookahead_fold must be 'worst', 'sum' or 'worst_sum'");
+  o.fold = *fold;
+  const std::optional<LookaheadOptions::Reply> reply =
+      lookahead_reply_of(request.value("lookahead_reply", std::string("greedy")));
+  if (!reply) throw std::invalid_argument("lookahead_reply must be 'greedy', 'idle' or 'search'");
+  o.reply = *reply;
+  o.search_nodes = std::max<uint64_t>(1, request.value("lookahead_search_nodes", o.search_nodes));
   o.repair_skills = repair;
   return o;
 }
@@ -1485,7 +1486,7 @@ namespace {
 int usage() {
   std::cerr << "usage: itb_live [--game DIR] (solve <state.json> [--time S] [--max-time S --min-tiers K] [--nodes N] "
                "[--threads N] [--beam W] [--threat-tier] [--threat-kills] [--objectives-first] [--mech-grid N [--mech-grid-turns] [--mech-grid-pilot]] "
-               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle] [--lookahead-fold worst|sum]] [--grid-survival [--survival-cap] [--survival-cap-share F] [--survival-cap-strict]] | "
+               "[--lookahead [--lookahead-samples N] [--lookahead-reply greedy|idle|search] [--lookahead-search-nodes N] [--lookahead-fold worst|sum|worst_sum]] [--grid-survival [--survival-cap] [--survival-cap-share F] [--survival-cap-strict]] | "
                "predict <state.json> --plan JSON|@FILE | board <state.json> | "
                "actions <state.json> [--plan JSON|@FILE] [--no-effects] | "
                "deploy <state.json> [--time S] [--threads N] [--samples N] [--finalists N] [--screen-samples N] "
@@ -1594,6 +1595,8 @@ int run_live(int argc, char** argv) {
         request["lookahead_reply"] = args[++i];
       } else if (args[i] == "--lookahead-fold" && more && ranked) {
         request["lookahead_fold"] = args[++i];
+      } else if (args[i] == "--lookahead-search-nodes" && more && ranked) {
+        request["lookahead_search_nodes"] = std::stoi(args[++i]);
       } else if (args[i] == "--grid-survival" && ranked) {
         request["grid_survival"] = true;
       } else if (args[i] == "--survival-cap" && cmd == "solve") {

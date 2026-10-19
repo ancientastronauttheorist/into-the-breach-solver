@@ -1088,11 +1088,16 @@ TEST_CASE("solver: tiny boards with the lookahead match a naive exhaustive enume
   // still give the exhaustive value.
   std::mt19937 rng(20261013);
   int checked = 0, nonzero = 0;
-  constexpr int kTrials = 24;
+  constexpr int kTrials = 30;
   LookaheadOptions la;
   la.samples = 2;
   for (int trial = 0; trial < kTrials; ++trial) {
-    la.sum = trial % 2 == 1;  // both folds
+    // Every fold: worst, sum, worst then sum.
+    la.fold = trial % 3 == 0 ? LookaheadOptions::Fold::Worst
+                             : (trial % 3 == 1 ? LookaheadOptions::Fold::Sum : LookaheadOptions::Fold::WorstSum);
+    // and the Search reply (a nested node-budget solve) on some.
+    la.reply = trial % 5 == 4 ? LookaheadOptions::Reply::Search : LookaheadOptions::Reply::Greedy;
+    la.search_nodes = 60;
     Board b = tiny_board(rng);
     // Fewer answers, so that next turns lose something: one more Vek, no
     // queued attack yet, and the first mech done for this turn.
