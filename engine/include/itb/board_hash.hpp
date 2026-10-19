@@ -48,4 +48,11 @@ enum class HashMode : uint8_t {
 
 BoardHash hash_board(const Board& board, HashMode mode = HashMode::Exact);
 
+// The same equality, but the same value in every process: hash_board folds
+// in symbol ids, which depend on the order a process interned the names, so
+// its values only compare within one process (the search's tables). This
+// one hashes the names (slower: it copies the board). For keys that cross
+// processes (itb_live replies and requests: outcome keys, end hashes).
+BoardHash hash_board_stable(const Board& board, HashMode mode = HashMode::Exact);
+
 }  // namespace itb

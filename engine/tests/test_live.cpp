@@ -1028,3 +1028,79 @@ TEST_CASE("live: a Sidestep move onto a teleporter pad ends on the partner pad (
     CHECK((*p)["hp"] == u["hp"]);
   }
 }
+
+TEST_CASE("live: solve lists end states and excludes outcomes; two_turn judges plans over two turns") {
+  NEED_SESSION();
+  const json budget = {{"cmd", "solve"}, {"state", kCaveT2.string()}, {"time_limit", 0}, {"node_limit", 300}};
+  json req = budget;
+  req["end_states"] = 40;
+  const json solved = S.handle(req);
+  REQUIRE_MESSAGE(solved["ok"].get<bool>(), solved.dump());
+  const std::string key = solved["outcome_key"];
+  CHECK(key.size() == 32);
+  const json& states = solved["end_states"];
+  REQUIRE(states.is_array());
+  REQUIRE_FALSE(states.empty());
+  CHECK(states.size() <= 40);
+  CHECK(solved["end_states_offered"].get<size_t>() >= states.size());
+  for (const json& e : states) {
+    for (const char* k : {"plan", "key", "exact", "end_hash"}) CHECK_MESSAGE(e.contains(k), k);
+  }
+  // Without the sink the reply has no list (and the same plan: the sink is passive).
+  const json bare = S.handle(budget);
+  REQUIRE(bare["ok"] == true);
+  CHECK_FALSE(bare.contains("end_states"));
+  CHECK(bare["plan"] == solved["plan"]);
+  CHECK(bare["outcome_key"] == key);
+  // Excluding the plan's outcome gives another one.
+  req = budget;
+  req["exclude_outcomes"] = json::array({key});
+  const json other = S.handle(req);
+  REQUIRE_MESSAGE(other["ok"].get<bool>(), other.dump());
+  CHECK(other["outcome_key"] != key);
+  req["exclude_outcomes"] = json::array({"not a hash"});
+  CHECK(S.handle(req)["ok"] == false);
+
+  // two_turn: the solve's plan and a listed end state.
+  const json plans = json::array({solved["plan"], states[0]["plan"]});
+  const json next = {{"node_limit", 200}, {"time_limit", 0}};
+  const json two = S.handle({{"cmd", "two_turn"}, {"state", kCaveT2.string()}, {"plans", plans}, {"samples", 2},
+                             {"idle", true}, {"search_nodes", 50}, {"next", next}, {"score", true},
+                             {"threat_tier", true}});
+  REQUIRE_MESSAGE(two["ok"].get<bool>(), two.dump());
+  const json& results = two["results"];
+  REQUIRE(results.size() == 2);
+  for (const json& r : results) {
+    REQUIRE(r["ok"] == true);
+    CHECK(r["refused"] == -1);
+    for (const char* k : {"grid", "building_hp", "mechs", "stars", "mech_hp", "kills"}) CHECK(r["now"].contains(k));
+    CHECK(r["score"].contains("threat"));
+    CHECK(r["mission_over"] == false);
+    REQUIRE(r["samples"].size() == 2);
+    for (const json& s : r["samples"]) {
+      for (const char* k : {"greedy", "idle", "search", "solve", "k", "ai_seed", "start_hash"}) {
+        CHECK_MESSAGE(s.contains(k), k);
+      }
+      CHECK(s["solve"]["plain"].contains("grid"));
+      CHECK(s["greedy"]["grid"].get<int>() >= 0);
+    }
+  }
+  // The solve's own plan: the same outcome key; the end state: its listed board.
+  CHECK(results[0]["outcome_key"] == key);
+  CHECK(results[1]["end_hash"] == states[0]["end_hash"]);
+  // Deterministic: the same AI seeds give the same next turns.
+  const json again = S.handle({{"cmd", "two_turn"}, {"state", kCaveT2.string()}, {"plan", solved["plan"]},
+                               {"samples", json::array({1})}});
+  REQUIRE(again["ok"] == true);
+  const json& s1 = again["results"][0]["samples"][0];
+  CHECK(s1["k"] == 1);
+  CHECK(s1["start_hash"] == results[0]["samples"][1]["start_hash"]);
+  CHECK(s1["greedy"]["grid"] == results[0]["samples"][1]["greedy"]["grid"]);
+  CHECK_FALSE(s1.contains("solve"));
+  // start_only judges the state itself.
+  const json start = S.handle({{"cmd", "two_turn"}, {"state", kCaveT2.string()}, {"start_only", true}, {"next", next}});
+  REQUIRE(start["ok"] == true);
+  CHECK(start["start"].contains("greedy"));
+  CHECK(start["start"]["solve"]["plain"].contains("grid"));
+  CHECK(S.handle({{"cmd", "two_turn"}, {"state", kCaveT2.string()}})["ok"] == false);
+}

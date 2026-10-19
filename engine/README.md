@@ -329,6 +329,7 @@ engine/build/itb_live actions state.json [--plan @prefix.json] [--no-effects]   
 engine/build/itb_live deploy state.json [--time 45] [--threads 8] [--samples 12] [--finalists 3]
           [--screen-samples 3] [--solve-time 0.5] [--seed 1] [--placements @p.json] [--always @p.json]
 engine/build/itb_live serve --threads 8   # one JSON request per stdin line (what live_play.py uses)
+python3 scripts/two_turn_oracle.py run --run <run> --tag lost --workers 2   # recorded loss turns over two turns
 ```
 
 `solve` returns the plan (`Plan::actions`), `steps` (one per move, weapon
@@ -380,6 +381,31 @@ writes, mission hooks. Refused and empty ones are only counted
 (`rejected`, by status). The reply also has `board` (after the prefix) and
 `units` (`can_move` / `can_act` per controllable unit); `refused` >= 0 if
 the prefix itself was refused.
+
+Study requests (serve only; `scripts/two_turn_oracle.py`). Solve and
+predict replies carry `outcome_key`, the board after the enemy phase with
+the mechs' tiles left out (`solver.hpp` `outcome_key`). These keys and the
+`end_hash`es below use `hash_board_stable`, which hashes symbol names: plain
+`hash_board` folds in symbol ids, which depend on the order a process
+interned them, so its values do not compare across processes. A solve request's
+`exclude_outcomes` (a list of such keys, `SolveOptions::exclude_outcomes`)
+scores every chance outcome that reaches one of them below anything real,
+so solving again with each new plan's key added gives the best plans of
+the K best distinct outcomes under any ranking. `end_states: N` lists up
+to N end-of-turn boards the search reached (`SolveOptions::end_states`,
+an `EndStateSink`: one per End Turn board, exact keys first, then upper
+bounds; passive, the search is unchanged), each with its plan, key and
+`end_hash`. It is a sample of what the search looked at, not the K best
+plans: the search cuts most ends short once it has a good incumbent (on
+Crack turn 2 of run 55, 3 of 2000 kept ends were exact) and never offers
+boards it pruned by their bound. `two_turn` plays plans (`plans`) through
+their enemy phase (default outcome) and judges the next turn on sampled AI
+seeds (`samples`, `seed`; `lookahead.hpp` `next_turn_start`): per plan its
+plain worst case (`now`), optionally its score under the request's ranking
+(`score`), and per seed the greedy, idle and Search replies' losses and,
+with `next` (a solve request's fields), a real solve of that board and its
+plan's plain worst case; `start_only` judges the state itself (e.g. the
+game's actual next turn). `live_tool.hpp` has the fields.
 
 ### Fuzzing
 
@@ -2513,6 +2539,29 @@ and 0.04 mechs; lower grid + 2 x mechs over the two turns 9 against 5. The
 0.5 s turn-1 solves leave the lookahead search little time, and trading
 certain turn-1 losses for estimated turn-2 ones does not pay: the option
 stays off.
+
+**Two-turn oracle** (`scripts/two_turn_oracle.py`, 2026-10-18, after the
+Unfair runs 55-57 were lost with every turn proven optimal;
+`docs/agent/two-turn-oracle-2026-10-18.md`). The study took 86 loss turns
+from 8 runs (lost and won). For each turn the candidates were the live plan,
+six ranking arms, the K best distinct outcomes (`exclude_outcomes`) and end
+states sampled from the search (`end_states`). Each was played through its
+enemy phase. Its next turn was solved for real on 8 AI seeds, and the
+winners were re-checked on 16 fresh seeds. Findings:
+
+- 71 turns (83%) were two-turn optimal among the candidates, and 15 could be
+  improved. The improvements total 6.25 grid in the mean over all 86 turns,
+  or 24 in the worst case.
+- Twelve of the 15 were ties or misranks of the NextTurn tier (the 8-sample
+  worst case of the greedy reply). Only 3 were horizon trades: giving 1 grid
+  or a star now for more on the next turn.
+- On the next-turn boards, the greedy reply's grid loss equals the solve's
+  on 78% and the Search reply's (200 nodes) on 86%.
+- At equal budget, the sum fold beat the worst fold by 4.7 grid of mean over
+  53 turns. Removing the lookahead cost 8.
+
+Next step suggested there: fold the samples worst-then-sum, use a more
+accurate reply, and plan the environment's next turn in `next_turn_start`.
 
 
 The Lua bridge (`src/bridge/modloader.lua`, `ITBX`) adds to every state

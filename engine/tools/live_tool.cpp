@@ -20,9 +20,11 @@
 #include "live_tool.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <functional>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -76,6 +78,23 @@ json score_json(const Score& s, TierSet threat = 0) {
     j[kTierNames[i]] = v == INT32_MAX ? json(nullptr) : json(v);
   }
   return j;
+}
+
+// A BoardHash as 32 hex digits (hi, then lo), and back.
+std::string hash_hex(const BoardHash& h) {
+  char b[40];
+  std::snprintf(b, sizeof b, "%016llx%016llx", static_cast<unsigned long long>(h.hi),
+                static_cast<unsigned long long>(h.lo));
+  return b;
+}
+BoardHash parse_hash_hex(const std::string& s) {
+  if (s.size() != 32 || s.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+    throw std::invalid_argument("a board hash is 32 hex digits, got '" + s + "'");
+  }
+  BoardHash h;
+  h.hi = std::stoull(s.substr(0, 16), nullptr, 16);
+  h.lo = std::stoull(s.substr(16), nullptr, 16);
+  return h;
 }
 
 json point_json(Point p) { return p.valid() ? json::array({p.x, p.y}) : json(nullptr); }
@@ -357,6 +376,7 @@ void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
   engine.lua().seed(kLuaSeed);
   const PhaseResult pr = engine.end_turn(b, ctx);
   out["after_enemy"] = live_board_json(b);
+  out["outcome_key"] = hash_hex(outcome_key(b));
   out["enemy_phase"] = phase_json(l.board, b, pr);
   if (branches > 0) {
     // The other outcomes of the enemy phase's hidden choices (a random
@@ -484,6 +504,287 @@ SolveOptions ranking_options(const json& request, const std::vector<std::pair<in
   if (tiers.lookahead) tiers.lookahead_options = lookahead_options(request, repair);
   tiers.grid_survival = request.value("grid_survival", false);
   return tiers;
+}
+
+// A solve request's budget and search fields on top of its ranking options
+// (`tiers`, ranking_options): "time_limit", "node_limit", "max_time",
+// "min_tiers", "beam_width", the survival cap ("survival_cap",
+// "survival_cap_share", "survival_cap_strict"). Helper engines are the
+// caller's.
+SolveOptions solve_options_of(const json& request, const SolveOptions& tiers,
+                              const std::vector<std::pair<int32_t, std::string>>& repair) {
+  SolveOptions so;
+  so.time_limit_s = request.value("time_limit", so.time_limit_s);
+  so.node_limit = request.value("node_limit", so.node_limit);
+  so.max_time_s = request.value("max_time", so.max_time_s);
+  so.min_proven_tiers = request.value("min_tiers", so.min_proven_tiers);
+  so.threat_tier = tiers.threat_tier;
+  so.threat_kills = tiers.threat_kills;
+  so.objectives_first = tiers.objectives_first;
+  so.mech_grid = tiers.mech_grid;
+  so.mech_grid_turns = tiers.mech_grid_turns;
+  so.mech_grid_pilot = tiers.mech_grid_pilot;
+  so.lookahead = tiers.lookahead;
+  so.lookahead_options = tiers.lookahead_options;
+  so.grid_survival = tiers.grid_survival;
+  // The survival cap pre-pass (README "Grid survival"): "survival_cap"
+  // true, its share of the budget "survival_cap_share" (default 0.5),
+  // "survival_cap_strict" (only after the survey's own proof).
+  if (so.grid_survival && request.value("survival_cap", false)) {
+    so.survival_cap_share = std::clamp(request.value("survival_cap_share", 0.5), 0.0, 1.0);
+    so.survival_cap_strict = request.value("survival_cap_strict", false);
+  }
+  const int beam = request.value("beam_width", -1);
+  if (beam >= 0) so.beam_width = beam;
+  // "exclude_outcomes": [hex, ...] (SolveOptions::exclude_outcomes; a
+  // reply's "outcome_key").
+  if (auto it = request.find("exclude_outcomes"); it != request.end() && it->is_array()) {
+    for (const json& k : *it) so.exclude_outcomes.push_back(parse_hash_hex(k.get<std::string>()));
+  }
+  so.repair_skills = repair;
+  return so;
+}
+
+
+// ---- two_turn ----------------------------------------------------------------------
+//
+// A plan's turn and the next one (live_tool.hpp, the "two_turn" request).
+
+json loss_json(const NextTurnLoss& l) {
+  return json{{"grid", l.grid}, {"mechs", l.mechs}, {"building_hp", l.building_hp}};
+}
+
+// score_turn's plain tiers of a worst case (no ranking options): losses as
+// positive numbers, kills and enemy HP removed as gains.
+json plain_json(const Score& s) {
+  return json{{"grid", std::max(0, -s[ScoreKey::GridLost])},
+              {"building_hp", std::max(0, -s[ScoreKey::BuildingHpLost])},
+              {"mechs", std::max(0, -s[ScoreKey::MechsLost])},
+              {"stars", std::max(0, -s[ScoreKey::ObjectivesFailed])},
+              {"mech_hp", -s[ScoreKey::MechHpLost]},
+              {"objectives", s[ScoreKey::ObjectiveProgress]},
+              {"kills", s[ScoreKey::VekKilled]},
+              {"vek_hp", s[ScoreKey::VekHpRemoved]}};
+}
+
+json turn_loss_json(const Board& before, const Board& after, const TurnContext& ctx, const PhaseResult& pr) {
+  return plain_json(score_turn(before, after, &ctx, &pr));
+}
+
+// The context of the turn after `ctx`'s, as the lookahead plays it
+// (lookahead.cpp lookahead_sample): no hidden spawn types, every chance node
+// at its default outcome, no logs.
+TurnContext next_context(const TurnContext& ctx) {
+  TurnContext next = ctx;
+  next.spawn_types.clear();
+  next.events = nullptr;
+  next.log = nullptr;
+  next.grid_resist = nullptr;
+  next.choose = nullptr;
+  next.death_seed = nullptr;
+  next.spider_egg = nullptr;
+  next.stop_early = nullptr;
+  return next;
+}
+
+// A plan played as predict plays it (Lua reseeded before every sub-action
+// and the enemy phase): its default chance outcome.
+struct Played {
+  int refused = -1;  // the action the engine refused (no enemy phase), else -1
+  Board after_player;
+  Board after;
+  PhaseResult pr;
+};
+Played play_seeded(Engine& engine, const Board& start, const TurnContext& ctx, const std::vector<PlayerAction>& plan) {
+  Played out;
+  Board b = start;
+  ActionOptions opts = action_options(ctx);
+  opts.check_legal = true;
+  for (size_t i = 0; i < plan.size() && out.refused < 0; ++i) {
+    const PlayerAction& a = plan[i];
+    const Pawn* p = b.find_pawn(a.uid);
+    if (a.move.valid() && p && a.move != p->pos) {
+      engine.lua().seed(kLuaSeed);
+      if (refused(engine.move(b, a.uid, a.move, opts))) out.refused = static_cast<int>(i);
+    }
+    if (out.refused >= 0 || a.kind == PlayerAction::Kind::None) continue;
+    engine.lua().seed(kLuaSeed);
+    const ActionResult r =
+        a.kind == PlayerAction::Kind::Weapon
+            ? engine.fire_weapon(b, a.uid, a.weapon, a.target, a.target2, opts)
+            : engine.repair(b, a.uid, a.target, a.weapon.empty() ? std::string("Skill_Repair") : a.weapon, opts);
+    if (refused(r)) out.refused = static_cast<int>(i);
+  }
+  out.after_player = b;
+  if (out.refused >= 0) return out;
+  engine.lua().seed(kLuaSeed);
+  out.pr = engine.end_turn(b, ctx);
+  out.after = std::move(b);
+  return out;
+}
+
+using AddHelpers = std::function<void(SolveOptions&, int threads)>;
+
+std::vector<PlayerAction> parse_plan(const json& j);
+
+// What a turn-start board forces: the greedy and idle replies' losses
+// (lookahead.hpp reply_loss) and, with `next`, a real solve of it and the
+// plain worst case of its plan.
+json judge_start(Engine& engine, const Board& start, const TurnContext& ctx,
+                 const std::vector<std::pair<int32_t, std::string>>& repair, const json& request,
+                 const SolveOptions* next) {
+  json j = json::object();
+  if (request.value("greedy", true)) {
+    LookaheadOptions lo;
+    lo.repair_skills = repair;
+    const auto t0 = std::chrono::steady_clock::now();
+    j["greedy"] = loss_json(reply_loss(engine, start, ctx, lo));
+    j["greedy"]["time_s"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  }
+  if (request.value("idle", false)) j["idle"] = loss_json(idle_loss(engine, start, ctx));
+  if (const int nodes = request.value("search_nodes", 0); nodes > 0) {
+    // The lookahead's Search reply (a node-budget solve, plain tiers).
+    LookaheadOptions lo;
+    lo.repair_skills = repair;
+    lo.reply = LookaheadOptions::Reply::Search;
+    lo.search_nodes = static_cast<uint64_t>(nodes);
+    const auto t0 = std::chrono::steady_clock::now();
+    j["search"] = loss_json(reply_loss(engine, start, ctx, lo));
+    j["search"]["time_s"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  }
+  if (next) {
+    bool active = false;
+    for (const Pawn& p : start.pawns()) active = active || (p.controlled() && p.alive() && p.active);
+    json s = json::object();
+    std::vector<PlayerAction> plan;
+    if (active) {
+      const SolveResult r = solve_turn(engine, start, ctx, *next);
+      plan = r.best.actions;
+      s["worst_case"] = score_json(r.best.worst_case, next->tiers());
+      s["proven_optimal"] = r.proven_optimal;
+      s["proven_components"] = r.proven_components;
+      s["timed_out"] = r.timed_out;
+      s["time_s"] = r.stats.time_s;
+    }
+    SolveOptions plain;
+    plain.repair_skills = repair;
+    if (std::optional<Score> v = evaluate_plan(engine, start, ctx, plan, plain)) {
+      s["plain"] = plain_json(*v);
+    } else {
+      s["plain"] = nullptr;
+    }
+    if (request.value("next_plans", false)) {
+      json pj = json::array();
+      for (const PlayerAction& a : plan) pj.push_back(action_json(start, a));
+      s["plan"] = pj;
+    }
+    j["solve"] = s;
+  }
+  return j;
+}
+
+// The "two_turn" request (live_tool.hpp).
+json two_turn_request(Engine& engine, const Loaded& l, const json& request, const AddHelpers& add_helpers) {
+  json out = json::object();
+  const int threads = request.value("threads", 1);
+  std::optional<SolveOptions> next;
+  if (auto it = request.find("next"); it != request.end() && it->is_object()) {
+    next = solve_options_of(*it, ranking_options(*it, l.repair_skills), l.repair_skills);
+    add_helpers(*next, threads);
+  }
+  const bool boards = request.value("boards", false);
+  if (request.value("start_only", false)) {
+    // The state is itself the turn to judge (e.g. the game's actual next
+    // turn, to compare with the sampled ones).
+    out["start"] = judge_start(engine, l.board, l.ctx, l.repair_skills, request, next ? &*next : nullptr);
+    out["start"]["start_hash"] = hash_hex(hash_board_stable(l.board, HashMode::Search));
+    return out;
+  }
+  // The AI seeds of the next turn: "samples" N (0..N-1) or a list of
+  // sample indices, from the base "seed" (deploy_sample_seed, as the
+  // lookahead's own samples; default 101, independent of the solver's 7).
+  std::vector<int> ks;
+  if (auto it = request.find("samples"); it != request.end()) {
+    if (it->is_number_integer()) {
+      for (int k = 0; k < it->get<int>(); ++k) ks.push_back(k);
+    } else if (it->is_array()) {
+      for (const json& k : *it) ks.push_back(k.get<int>());
+    }
+  }
+  LookaheadOptions lo;
+  lo.seed = request.value("seed", 101u);
+  lo.repair_skills = l.repair_skills;
+  // "score": also the plan's worst case under the request's ranking options
+  // (as the live solve ranks it, lookahead included).
+  const bool ranked = request.value("score", false);
+  const SolveOptions rank = ranked ? solve_options_of(request, ranking_options(request, l.repair_skills), l.repair_skills)
+                                   : SolveOptions{};
+  SolveOptions plain;
+  plain.repair_skills = l.repair_skills;
+  const TurnContext next_ctx = next_context(l.ctx);
+  std::vector<std::vector<PlayerAction>> plans;
+  if (auto it = request.find("plans"); it != request.end() && it->is_array()) {
+    for (const json& p : *it) plans.push_back(parse_plan(p));
+  } else if (request.contains("plan")) {
+    plans.push_back(parse_plan(request["plan"]));
+  } else {
+    throw std::invalid_argument("two_turn needs 'plans', 'plan' or 'start_only'");
+  }
+  json results = json::array();
+  for (const std::vector<PlayerAction>& plan : plans) {
+    json r = json::object();
+    const Played played = play_seeded(engine, l.board, l.ctx, plan);
+    r["refused"] = played.refused;
+    if (request.value("describe", false)) {
+      json pj = json::array();
+      for (const PlayerAction& a : plan) pj.push_back(describe_action(l.board, a));
+      r["plan"] = pj;
+    }
+    r["end_hash"] = hash_hex(hash_board_stable(played.after_player, HashMode::EndTurn));
+    if (played.refused >= 0) {
+      r["ok"] = false;
+      results.push_back(std::move(r));
+      continue;
+    }
+    std::string why;
+    const std::optional<Score> now = evaluate_plan(engine, l.board, l.ctx, plan, plain, &why);
+    r["ok"] = now.has_value();
+    if (!now) {
+      r["refused_reason"] = why;
+      results.push_back(std::move(r));
+      continue;
+    }
+    r["now"] = plain_json(*now);
+    if (ranked) {
+      const std::optional<Score> v = evaluate_plan(engine, l.board, l.ctx, plan, rank);
+      r["score"] = v ? score_json(*v, rank.tiers()) : json(nullptr);
+    }
+    // The default outcome's end of the enemy phase: the board the next turn
+    // starts from (Grid Defense never resists: the worst case for buildings).
+    r["after_hash"] = hash_hex(hash_board_stable(played.after, HashMode::Search));
+    r["outcome_key"] = hash_hex(outcome_key(played.after));
+    r["default_outcome"] = turn_loss_json(l.board, played.after, l.ctx, played.pr);
+    if (boards) r["after_enemy"] = live_board_json(played.after);
+    const bool over = played.pr.mission_ended || l.board.turn >= l.board.total_turns;
+    r["mission_over"] = over;
+    json samples = json::array();
+    if (!over) {
+      for (int k : ks) {
+        const uint32_t ai_seed = lookahead_seed(lo, k);
+        const Board start = next_turn_start(engine, l.board, played.after, &played.pr, next_ctx, ai_seed, lo);
+        json s = judge_start(engine, start, next_ctx, l.repair_skills, request, next ? &*next : nullptr);
+        s["k"] = k;
+        s["ai_seed"] = ai_seed;
+        s["start_hash"] = hash_hex(hash_board_stable(start, HashMode::Search));
+        if (boards) s["board"] = live_board_json(start);
+        samples.push_back(std::move(s));
+      }
+    }
+    r["samples"] = samples;
+    results.push_back(std::move(r));
+  }
+  out["results"] = results;
+  return out;
 }
 
 std::string read_text_arg(const std::string& arg) {
@@ -1000,13 +1301,22 @@ void LiveSession::ensure_threads(int threads) {
   }
 }
 
+void LiveSession::add_helpers(SolveOptions& so, int threads) {
+  ensure_threads(threads);
+  so.helper_engines.clear();
+  for (int i = 0; i < threads - 1 && i < static_cast<int>(helpers_.size()); ++i) {
+    so.helper_engines.push_back(helpers_[static_cast<size_t>(i)].get());
+  }
+}
+
 json LiveSession::handle(const json& request) {
   try {
     if (!request.is_object()) throw std::invalid_argument("a request must be a JSON object");
     const std::string cmd = request.value("cmd", std::string());
     if (cmd == "ping") return json{{"ok", true}, {"format", kLiveFormat}, {"cmd", cmd}, {"threads", threads()}};
-    if (cmd != "board" && cmd != "solve" && cmd != "predict" && cmd != "deploy" && cmd != "actions") {
-      throw std::invalid_argument("unknown cmd '" + cmd + "' (board, solve, predict, deploy, actions, ping)");
+    if (cmd != "board" && cmd != "solve" && cmd != "predict" && cmd != "deploy" && cmd != "actions" &&
+        cmd != "two_turn") {
+      throw std::invalid_argument("unknown cmd '" + cmd + "' (board, solve, predict, deploy, actions, two_turn, ping)");
     }
     if (!request.contains("state") || !request["state"].is_string()) {
       throw std::invalid_argument("'state' must be the path of a bridge state file");
@@ -1020,6 +1330,10 @@ json LiveSession::handle(const json& request) {
     }
     if (cmd == "actions") {
       list_actions(*main_, l, request, out);
+      return out;
+    }
+    if (cmd == "two_turn") {
+      out.update(two_turn_request(*main_, l, request, [this](SolveOptions& so, int want) { add_helpers(so, want); }));
       return out;
     }
     if (cmd == "deploy") {
@@ -1102,36 +1416,28 @@ json LiveSession::handle(const json& request) {
     } else {
       out["searched"] = l.active_units > 0;
       if (l.active_units > 0) {
-        SolveOptions so;
-        so.time_limit_s = request.value("time_limit", so.time_limit_s);
-        so.node_limit = request.value("node_limit", so.node_limit);
-        so.max_time_s = request.value("max_time", so.max_time_s);
-        so.min_proven_tiers = request.value("min_tiers", so.min_proven_tiers);
-        so.threat_tier = tiers.threat_tier;
-        so.threat_kills = tiers.threat_kills;
-        so.objectives_first = tiers.objectives_first;
-        so.mech_grid = tiers.mech_grid;
-        so.mech_grid_turns = tiers.mech_grid_turns;
-        so.mech_grid_pilot = tiers.mech_grid_pilot;
-        so.lookahead = tiers.lookahead;
-        so.lookahead_options = tiers.lookahead_options;
-        so.grid_survival = tiers.grid_survival;
-        // The survival cap pre-pass (README "Grid survival"): "survival_cap"
-        // true, its share of the budget "survival_cap_share" (default 0.5),
-        // "survival_cap_strict" (only after the survey's own proof).
-        if (so.grid_survival && request.value("survival_cap", false)) {
-          so.survival_cap_share = std::clamp(request.value("survival_cap_share", 0.5), 0.0, 1.0);
-          so.survival_cap_strict = request.value("survival_cap_strict", false);
-        }
-        const int beam = request.value("beam_width", -1);
-        if (beam >= 0) so.beam_width = beam;
-        so.repair_skills = l.repair_skills;
-        const int want = request.value("threads", threads());
-        ensure_threads(want);
-        for (int i = 0; i < want - 1 && i < static_cast<int>(helpers_.size()); ++i) {
-          so.helper_engines.push_back(helpers_[static_cast<size_t>(i)].get());
+        SolveOptions so = solve_options_of(request, tiers, l.repair_skills);
+        add_helpers(so, request.value("threads", threads()));
+        // "end_states": N > 0 collects up to N end-of-turn boards the search
+        // reached (SolveOptions::end_states), listed in the reply.
+        const int end_states = request.value("end_states", 0);
+        std::unique_ptr<EndStateSink> sink;
+        if (end_states > 0) {
+          sink = std::make_unique<EndStateSink>(static_cast<size_t>(end_states));
+          so.end_states = sink.get();
         }
         const SolveResult r = solve_turn(*main_, l.board, l.ctx, so);
+        if (sink) {
+          json list = json::array();
+          for (const EndState& e : sink->states()) {
+            json plan_j = json::array();
+            for (const PlayerAction& a : e.actions) plan_j.push_back(action_json(l.board, a));
+            list.push_back(json{{"plan", plan_j}, {"key", score_json(e.key, threat)}, {"exact", e.exact},
+                                {"end_hash", hash_hex(e.end_hash)}});
+          }
+          out["end_states"] = list;
+          out["end_states_offered"] = sink->offered();
+        }
         plan = r.best.actions;
         out["worst_case"] = score_json(r.best.worst_case, threat);
         out["upper_bound"] = r.upper_bound ? score_json(*r.upper_bound, threat) : json(nullptr);

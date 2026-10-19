@@ -1,8 +1,12 @@
 #include "itb/board_hash.hpp"
 
+#include <string_view>
+
 #include <array>
 #include <cstring>
 #include <type_traits>
+
+#include "itb/symbols.hpp"
 
 namespace itb {
 namespace {
@@ -199,6 +203,40 @@ BoardHash hash_board(const Board& b, HashMode mode) {
     if (p.reactivation_listed) h.word(0x52454143u);
   }
   return h.done();
+}
+
+// hash_board_stable: names instead of symbol ids (which depend on the
+// order a process interned them), folded in beside the ordinary hash of a
+// copy whose symbols are all kNoSymbol.
+BoardHash hash_board_stable(const Board& board, HashMode mode) {
+  Board b = board;
+  uint64_t names = 0xCBF29CE484222325ull;  // FNV-1a over the names, in board order
+  auto mix = [&names](Symbol& s) {
+    if (s != kNoSymbol) {
+      for (char c : symbol_name(s)) {
+        names ^= static_cast<unsigned char>(c);
+        names *= 0x100000001B3ull;
+      }
+    }
+    names ^= 0xFF;  // separator: an empty name still counts
+    names *= 0x100000001B3ull;
+    s = kNoSymbol;
+  };
+  for (int i = 0; i < kTileCount; ++i) {
+    Tile& t = b.tile(Point::from_index(i));
+    mix(t.item);
+    mix(t.unique_building);
+    mix(t.custom_tile);
+    mix(t.special_tag);
+  }
+  for (Pawn& p : b.pawns()) {
+    mix(p.type);
+    for (Symbol& w : p.weapons) mix(w);
+  }
+  BoardHash h = hash_board(b, mode);
+  h.lo = mix64(h.lo ^ names);
+  h.hi = mix64(h.hi ^ (names * 0x9E3779B97F4A7C15ull));
+  return h;
 }
 
 }  // namespace itb

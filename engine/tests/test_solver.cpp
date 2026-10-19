@@ -2046,3 +2046,160 @@ TEST_CASE("time budget: the survival cap pre-pass leaves the base time to the se
   if (!on.proven_optimal) CHECK(search_s >= o.time_limit_s - on.stats.survey_s - 0.005);
   CHECK(on.stats.time_s < 30);  // stopped near the base time, not at max_time_s
 }
+
+namespace {
+
+// The board a plan ends the turn on (its default outcome, no enemy phase).
+Board end_board(Engine& e, const Board& b, const TurnContext& ctx, const std::vector<PlayerAction>& plan) {
+  Board out = b;
+  ActionOptions o = action_options(ctx);
+  o.check_legal = true;
+  for (const PlayerAction& a : plan) {
+    const Pawn* p = out.find_pawn(a.uid);
+    if (a.move.valid() && p && a.move != p->pos) {
+      e.lua().seed(1);
+      e.move(out, a.uid, a.move, o);
+    }
+    if (a.kind == PlayerAction::Kind::Weapon) {
+      e.lua().seed(1);
+      e.fire_weapon(out, a.uid, a.weapon, a.target, a.target2, o);
+    }
+  }
+  return out;
+}
+
+Board two_threats(int32_t& a, int32_t& c) {
+  Board b;
+  a = place(b, "PunchMech", {3, 4}, true);
+  c = place(b, "PunchMech", {3, 6}, true);
+  P(b, a).move = 2;
+  P(b, c).move = 3;
+  const int32_t h1 = place(b, "Hornet1", {3, 3});
+  queue(b, h1, {3, 2});
+  set_building(b, {3, 2});
+  const int32_t h2 = place(b, "Hornet1", {5, 4});
+  queue(b, h2, {6, 4});
+  set_building(b, {6, 4});
+  return b;
+}
+
+}  // namespace
+
+TEST_CASE("solver: end states are a passive sample of the plans the search reached") {
+  NEED_ENGINE();
+  int32_t a = 0, c = 0;
+  const Board b = two_threats(a, c);
+  const TurnContext ctx = context();
+  SolveOptions o;
+  o.time_limit_s = 0;
+  o.node_limit = 400;  // deterministic: the same nodes with and without the sink
+  const SolveResult plain = solve_turn(E, b, ctx, o);
+  EndStateSink sink(64);
+  o.end_states = &sink;
+  const SolveResult with = solve_turn(E, b, ctx, o);
+  // Passive: the same search.
+  CHECK(with.best.worst_case == plain.best.worst_case);
+  CHECK(with.best.actions.size() == plain.best.actions.size());
+  CHECK(with.stats.nodes == plain.stats.nodes);
+  CHECK(with.proven_optimal == plain.proven_optimal);
+
+  const std::vector<EndState> states = sink.states();
+  REQUIRE_FALSE(states.empty());
+  CHECK(states.size() <= 64);
+  CHECK(sink.offered() >= states.size());
+  std::vector<BoardHash> seen;
+  bool has_empty = false;
+  for (size_t i = 0; i < states.size(); ++i) {
+    const EndState& s = states[i];
+    CHECK(std::find(seen.begin(), seen.end(), s.end_hash) == seen.end());
+    seen.push_back(s.end_hash);
+    if (s.actions.empty()) has_empty = true;
+    // The plan reaches the board the entry names, and its key is its value
+    // (exact) or an upper bound of it.
+    CHECK(hash_board_stable(end_board(E, b, ctx, s.actions), HashMode::EndTurn) == s.end_hash);
+    const auto v = evaluate_plan(E, b, ctx, s.actions);
+    REQUIRE(v);
+    if (s.exact) {
+      CHECK(*v == s.key);
+    } else {
+      CHECK(*v <= s.key);
+    }
+    // Exact keys first, then upper bounds, each best first.
+    if (i > 0) {
+      const EndState& p = states[i - 1];
+      CHECK(((p.exact && !s.exact) || (p.exact == s.exact && p.key >= s.key)));
+    }
+  }
+  // The root (ending the turn at once) is offered too; a sink large enough
+  // to keep everything has it.
+  EndStateSink all(1 << 20);
+  o.end_states = &all;
+  solve_turn(E, b, ctx, o);
+  CHECK(all.states().size() <= all.offered());
+  for (const EndState& s : all.states()) has_empty = has_empty || s.actions.empty();
+  CHECK(has_empty);
+  // A capacity of one keeps the best entry.
+  EndStateSink one(1);
+  o.end_states = &one;
+  solve_turn(E, b, ctx, o);
+  REQUIRE(one.states().size() == 1);
+  CHECK(one.states()[0].key == states[0].key);
+  CHECK(one.states()[0].exact == states[0].exact);
+}
+
+TEST_CASE("solver: outcome keys leave the mechs' tiles out; excluded outcomes give the next best") {
+  NEED_ENGINE();
+  int32_t a = 0, c = 0;
+  const Board b = two_threats(a, c);
+  // The key ignores where the mechs stand, nothing else.
+  Board moved = b;
+  P(moved, a).pos = {1, 1};
+  CHECK(outcome_key(moved) == outcome_key(b));
+  CHECK_FALSE(hash_board(moved, HashMode::Search) == hash_board(b, HashMode::Search));
+  Board hurt = b;
+  for (Pawn& p : hurt.pawns()) {
+    if (p.team == Team::Enemy) {
+      p.hp -= 1;
+      break;
+    }
+  }
+  CHECK_FALSE(outcome_key(hurt) == outcome_key(b));
+  // Keys cross processes, so they hash names, not symbol ids: a pawn of
+  // another type, or a weapon renamed, changes them; a copy does not.
+  const Board copy = b;
+  CHECK(hash_board_stable(copy, HashMode::Search) == hash_board_stable(b, HashMode::Search));
+  Board other = b;
+  P(other, a).type = intern("JudoMech");
+  CHECK_FALSE(hash_board_stable(other, HashMode::Search) == hash_board_stable(b, HashMode::Search));
+  Board rearmed = b;
+  P(rearmed, a).weapons[0] = intern("Prime_Shift");
+  CHECK_FALSE(outcome_key(rearmed) == outcome_key(b));
+
+  const TurnContext ctx = context();
+  const SolveResult best = solve_turn(E, b, ctx, quick());
+  REQUIRE(best.proven_optimal);
+  Board after = b;
+  REQUIRE(E.play_turn(after, best.best.actions, ctx).ok());
+  const BoardHash k1 = outcome_key(after);
+  SolveOptions o = quick();
+  o.exclude_outcomes = {k1};
+  // The best plan now scores as excluded, below doing nothing.
+  const auto v = evaluate_plan(E, b, ctx, best.best.actions, o);
+  REQUIRE(v);
+  CHECK(*v == excluded_score());
+  const auto idle = evaluate_plan(E, b, ctx, {});
+  REQUIRE(idle);
+  CHECK(excluded_score() < *idle);
+  const SolveResult next = solve_turn(E, b, ctx, o);
+  REQUIRE(next.proven_optimal);
+  CHECK(next.best.worst_case <= best.best.worst_case);
+  CHECK(next.best.worst_case > excluded_score());
+  Board after2 = b;
+  REQUIRE(E.play_turn(after2, next.best.actions, ctx).ok());
+  CHECK_FALSE(outcome_key(after2) == k1);
+  // Its value is its real value (exclusion off).
+  const auto again = evaluate_plan(E, b, ctx, next.best.actions);
+  REQUIRE(again);
+  CHECK(*again == next.best.worst_case);
+  (void)c;
+}

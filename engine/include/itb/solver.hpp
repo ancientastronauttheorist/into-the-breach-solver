@@ -53,12 +53,16 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <optional>
+#include <unordered_map>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "itb/board.hpp"
+#include "itb/board_hash.hpp"
 #include "itb/enemy_phase.hpp"
 #include "itb/lookahead.hpp"
 #include "itb/score.hpp"
@@ -66,6 +70,7 @@
 namespace itb {
 
 class Engine;
+class EndStateSink;
 
 struct SolveOptions {
   double time_limit_s = 10.0;  // <= 0: no limit
@@ -199,6 +204,19 @@ struct SolveOptions {
   bool skip_spent_turns = true;
   // Entries per table (transposition table, end-of-turn memo).
   size_t tt_max_entries = size_t{1} << 21;
+  // Diagnostic (studies such as scripts/two_turn_oracle.py): collect the
+  // distinct end-of-turn boards the search reaches, with the plan that got
+  // there (EndStateSink below). Passive: the search runs exactly as without
+  // it (only slower). nullptr (the default): off.
+  EndStateSink* end_states = nullptr;
+  // Study option (scripts/two_turn_oracle.py): outcomes the plan may not
+  // reach. A chance outcome whose board after the enemy phase has one of
+  // these outcome_key()s (below) scores excluded_score(), so the search
+  // returns the best plan of another outcome; solving again with the new
+  // plan's key added gives the K best distinct outcomes, each with the best
+  // plan the ranking finds for it. evaluate_plan applies it too. Empty (the
+  // default): off, results are unchanged.
+  std::vector<BoardHash> exclude_outcomes;
   // Beam pre-pass for a quick first plan: this many states kept per set of
   // units that have played (0 = off). With helper threads and a time limit,
   // thread 0 then widens it (x3 per round) for up to 40% of the time.
@@ -344,6 +362,63 @@ struct SolveResult {
   // SolveOptions::survival_cap_share. With a ceiling proven, upper_bound's
   // odds are at most the ceiling plus kSurvivalCapGuard units.
   SurvivalCap survival_cap;
+};
+
+// SolveOptions::exclude_outcomes: the key of the board after an enemy phase,
+// the player's mechs' tiles left out (hash_board_stable, HashMode::Search, of a
+// copy whose player-team mechs have no tile and no previous tile). Plans
+// that differ only in where the mechs end up share it; any other difference
+// (a unit's HP, an enemy's tile, a building, a status) separates them.
+BoardHash outcome_key(const Board& after);
+// What an excluded outcome scores: below every real outcome in every tier
+// (the grid survival odds 0), and far from INT32_MIN so that sums stay
+// finite.
+Score excluded_score();
+
+// SolveOptions::end_states: end-of-turn boards the search reached, each with
+// the plan that reached it. Every node the search expands is a candidate end
+// of the turn (ending the turn there); the sink keeps one entry per distinct
+// End Turn board (hash_board_stable(.., HashMode::EndTurn)) and, past its capacity,
+// the entries with the best keys. A key is the search's value of ending the
+// turn on that board: exact, or only an upper bound when the search cut the
+// evaluation short (alpha-beta, an enemy phase stopped by the tier bound);
+// with the lookahead, the base search's keys have NextTurn at its cap (0).
+// Entries rank exact keys first, then upper bounds, each by key. So the
+// sink is a sample of the plans the search considered, ranked roughly, not
+// the K best plans: boards the search pruned before expanding
+// them (by their tier bound) are never offered. Only plans with no chance
+// node in the player's actions are kept (a contingent line's end board
+// depends on the outcome), and none from the survival certificate's worlds
+// (SolveOptions::cert_roll_budget), whose values are not the turn's.
+struct EndState {
+  std::vector<PlayerAction> actions;  // ready for Engine::play_turn / evaluate_plan
+  Score key;
+  bool exact = false;  // key is the exact value (else an upper bound)
+  BoardHash end_hash;  // of the board the plan ends the turn on (hash_board_stable, EndTurn)
+};
+
+class EndStateSink {
+ public:
+  explicit EndStateSink(size_t capacity = 256) : capacity_(capacity < 1 ? 1 : capacity) {}
+  // The search's side (thread-safe). `line` is built only when the entry is
+  // kept.
+  bool wants(const Score& key, bool exact);
+  void offer(const BoardHash& end_hash, const Score& key, bool exact,
+             const std::function<std::vector<PlayerAction>()>& line);
+  // The entries kept, best first (exact keys, then upper bounds, each best
+  // key first), at most the capacity.
+  std::vector<EndState> states() const;
+  size_t offered() const { return offered_; }
+
+ private:
+  void prune();  // with mu_ held
+  size_t capacity_;
+  mutable std::mutex mu_;
+  std::unordered_map<BoardHash, EndState, BoardHashOf> pool_;
+  bool full_ = false;
+  Score floor_;  // with full_: offers not above (floor_exact_, floor_) are not kept
+  bool floor_exact_ = false;
+  size_t offered_ = 0;
 };
 
 SolveResult solve_turn(Engine& engine, const Board& board, const TurnContext& ctx,

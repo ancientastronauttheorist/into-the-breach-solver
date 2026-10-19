@@ -63,3 +63,5 @@ research_*.png
 .claude/worktrees/
 # scripts/loadout_eval.py reports.
 recordings/loadout_eval/
+# scripts/two_turn_oracle.py raw outputs.
+recordings/oracle/

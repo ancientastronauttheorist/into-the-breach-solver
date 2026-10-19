@@ -57,7 +57,45 @@
 //       nodes, timing flags, Lua errors, unmodelled writes). Refused or empty
 //       ones are counted in "rejected" by status. "refused" >= 0: the prefix
 //       itself was refused at that step ("refused_reason")
+//   {"cmd": "two_turn", "state": "...", "plans": [[actions], ...] (or "plan"),
+//    "samples": N | [k, ...], "seed": 101, "greedy": true, "idle": false,
+//    "search_nodes": 0,
+//    "next": {solve request fields: "time_limit", "max_time", "min_tiers",
+//             ranking options, "survival_cap", ...} | absent,
+//    "threads": 1, "score": false (+ ranking options), "boards": false,
+//    "next_plans": false, "describe": false}
+//       studies (scripts/two_turn_oracle.py): each plan over this turn and
+//       the next. Per plan ("results", in order): "ok", "refused" (the
+//       action the engine refused, -1), "plan" (with "describe": each action's description), "end_hash" (the board the plan ends
+//       the turn on, HashMode::EndTurn, as the solve's "end_states" list it),
+//       "now" (the plan's plain worst case over chance, evaluate_plan: grid,
+//       building_hp, mechs, stars, mech_hp lost; objectives, kills, vek_hp),
+//       "score" (with "score": its worst case under the request's ranking
+//       options), "default_outcome" (the plain losses of its default chance
+//       outcome), "after_hash", "mission_over" (no next turn), and
+//       "samples": for each AI seed k (lookahead.hpp next_turn_start from
+//       the default outcome's end board with lookahead_seed(seed, k), hidden
+//       spawns sampled as visible types) the next turn's "greedy" (and
+//       "idle"; with "search_nodes" N, "search": the lookahead's Search
+//       reply with that node budget) reply loss and, with "next", "solve": a real solve of that
+//       board ("worst_case", "proven_optimal", "proven_components",
+//       "timed_out", "time_s") and "plain", the plain worst case of its plan.
+//       "start_only": true judges the state itself the same way ("start"):
+//       e.g. the game's actual next turn
 //   {"cmd": "ping"}
+//
+// Solve and predict replies carry "outcome_key": the board after the enemy
+// phase with the mechs' tiles left out (solver.hpp outcome_key). A solve
+// request's "exclude_outcomes": [key, ...] makes the search skip plans that
+// reach one of those outcomes (SolveOptions::exclude_outcomes): solving
+// again with each new plan's key added lists the best plans of K distinct
+// outcomes. two_turn results carry "outcome_key" too.
+//
+// A solve request with "end_states": N > 0 also lists up to N end-of-turn
+// boards its search reached ("end_states": each {"plan", "key" (the search's
+// value of ending there, an upper bound unless "exact"), "exact",
+// "end_hash"}, best key first; SolveOptions::end_states) and how many the
+// search offered ("end_states_offered").
 //
 // The state is a bridge dump (bare, or a recording wrapper with
 // data.bridge_state), loaded by load_recording. The solver sees only what the
@@ -78,6 +116,7 @@
 
 namespace itb {
 class Engine;
+struct SolveOptions;
 }
 
 namespace itb::tools {
@@ -108,6 +147,8 @@ class LiveSession {
 
  private:
   void ensure_threads(int threads);
+  // The helper engines of a `threads`-thread search (SolveOptions::helper_engines).
+  void add_helpers(SolveOptions& so, int threads);
 
   std::filesystem::path game_;
   std::unique_ptr<Engine> main_;

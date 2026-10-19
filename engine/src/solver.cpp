@@ -156,6 +156,13 @@ BoardHash next_turn_key(const Board& after, const PhaseResult& pr) {
 }
 using SampleMap = std::unordered_map<BoardHash, std::vector<int32_t>, BoardHashOf>;
 
+// SolveOptions::exclude_outcomes.
+bool is_excluded(const SolveOptions& o, const Board& after) {
+  if (o.exclude_outcomes.empty()) return false;
+  const BoardHash k = outcome_key(after);
+  return std::find(o.exclude_outcomes.begin(), o.exclude_outcomes.end(), k) != o.exclude_outcomes.end();
+}
+
 // lookahead_value from the sample values in `vals` (those known, in order),
 // running the missing ones until `deadline` and appending them. Past it,
 // `exact` is cleared and the result is the tier's floor (a lower bound of
@@ -1257,10 +1264,12 @@ class Worker {
       }
       if (!pr.exact) sh_.note("enemy phase: the recorded data does not pin every step down (EnvInexact)");
       if (!pr.emerged_unknown.empty()) sh_.note("enemy phase: spawns of unknown type emerge without a pawn");
-      const Score s = score_turn(sh_.root, after, &tc_, &pr, sh_.score_options);
+      Score s = score_turn(sh_.root, after, &tc_, &pr, sh_.score_options);
       if (sh_.bounds.progress_cap() >= 0 && s[ScoreKey::ObjectiveProgress] > sh_.bounds.progress_cap()) {
         sh_.note("objective progress above its derived cap (objective_progress_cap is unsound here)");
       }
+      const bool excluded = is_excluded(o_, after);
+      if (excluded) s = excluded_score();
       worst = std::min(worst, s);
       if (surv) {
         if (s.v[kSurvival] >= kSurvivalOne) alive = std::min(alive, s);
@@ -1280,7 +1289,7 @@ class Worker {
         cut = true;
         return false;
       }
-      if (la) pending.push_back(Pending{s, std::move(after), pr});
+      if (la && !excluded) pending.push_back(Pending{s, std::move(after), pr});
       return true;
     });
     if (end == EnumEnd::Truncated) sh_.chance_exact = false;
@@ -1992,6 +2001,10 @@ class Worker {
 
     // End the turn here.
     const Interval end = leaf(b, alpha);
+    if (o_.end_states && chance_free && o_.cert_roll_budget < 0 && o_.end_states->wants(end.hi, end.exact())) {
+      o_.end_states->offer(hash_board_stable(b, HashMode::EndTurn), end.hi, end.exact(),
+                           [this] { return to_player_actions(path_); });
+    }
     Score lo = end.lo, hi = end.hi;
     std::vector<SubAction> best_pv;
     SubAction best_act;
@@ -2731,7 +2744,9 @@ std::optional<Score> evaluate_plan_with(Engine& engine, const Board& board, cons
     const PhaseResult pr = engine.end_turn(b, tc);
     d.mark_random(pr.chances);
     Score s = score_turn(board, b, &tc, &pr, options.score_options());
-    if (lazy) {
+    if (is_excluded(options, b)) {
+      s = excluded_score();
+    } else if (lazy) {
       later.push_back(Later{scores.size(), b, pr});  // NextTurn below, at its cap (0) until then
     } else if (options.lookahead) {
       s[ScoreKey::NextTurn] = lookahead_value(engine, board, b, &pr, tc, options.lookahead_options);
@@ -2803,6 +2818,94 @@ std::optional<Score> evaluate_plan(Engine& engine, const Board& board, const Tur
                                    const std::vector<PlayerAction>& plan, const SolveOptions& options,
                                    std::string* refused) {
   return evaluate_plan_with(engine, board, ctx, plan, options, refused, nullptr);
+}
+
+BoardHash outcome_key(const Board& after) {
+  Board b = after;
+  for (Pawn& p : b.pawns()) {
+    if (p.mech && p.team == Team::Player) {
+      p.pos = kInvalidPoint;
+      p.movement.prev_pos = kInvalidPoint;
+    }
+  }
+  return hash_board_stable(b, HashMode::Search);
+}
+
+Score excluded_score() {
+  Score s;
+  s.v.fill(INT32_MIN / 4);
+  s[ScoreKey::GridSurvival] = 0;
+  return s;
+}
+
+// ---- End states (SolveOptions::end_states) --------------------------------------
+//
+// One entry per End Turn board. Entries rank exact keys first (fully
+// evaluated ends: mostly plans that were the best so far somewhere in the
+// search), then upper bounds (ends the search cut short; their keys are
+// loose), each by key. An entry offered again keeps the better information:
+// an exact key over an upper bound, else the lower key (a tighter bound, or
+// the lookahead search's value below the base search's NextTurn at its cap).
+// The pool grows to twice the capacity, then keeps the `capacity` best; the
+// last one kept becomes the floor below which offers are not kept.
+
+namespace {
+bool end_state_before(bool ea, const Score& a, bool eb, const Score& b) {
+  if (ea != eb) return ea;
+  return a > b;
+}
+bool end_state_before(const EndState& a, const EndState& b) { return end_state_before(a.exact, a.key, b.exact, b.key); }
+}  // namespace
+
+bool EndStateSink::wants(const Score& key, bool exact) {
+  std::lock_guard lock(mu_);
+  ++offered_;
+  return !full_ || end_state_before(exact, key, floor_exact_, floor_);
+}
+
+void EndStateSink::offer(const BoardHash& end_hash, const Score& key, bool exact,
+                         const std::function<std::vector<PlayerAction>()>& line) {
+  std::lock_guard lock(mu_);
+  if (full_ && !end_state_before(exact, key, floor_exact_, floor_)) return;
+  auto it = pool_.find(end_hash);
+  if (it != pool_.end()) {
+    EndState& e = it->second;
+    if ((exact && !e.exact) || (exact == e.exact && key < e.key)) {
+      e.key = key;
+      e.exact = exact;
+    }
+    return;
+  }
+  pool_.emplace(end_hash, EndState{line(), key, exact, end_hash});
+  if (pool_.size() >= 2 * capacity_) prune();
+}
+
+void EndStateSink::prune() {
+  std::vector<EndState> all;
+  all.reserve(pool_.size());
+  for (auto& [h, e] : pool_) all.push_back(std::move(e));
+  std::sort(all.begin(), all.end(), [](const EndState& a, const EndState& b) { return end_state_before(a, b); });
+  if (all.size() > capacity_) all.resize(capacity_);
+  if (all.size() >= capacity_) {
+    full_ = true;
+    floor_ = all.back().key;
+    floor_exact_ = all.back().exact;
+  }
+  pool_.clear();
+  for (EndState& e : all) {
+    const BoardHash h = e.end_hash;
+    pool_.emplace(h, std::move(e));
+  }
+}
+
+std::vector<EndState> EndStateSink::states() const {
+  std::lock_guard lock(mu_);
+  std::vector<EndState> all;
+  all.reserve(pool_.size());
+  for (const auto& [h, e] : pool_) all.push_back(e);
+  std::sort(all.begin(), all.end(), [](const EndState& a, const EndState& b) { return end_state_before(a, b); });
+  if (all.size() > capacity_) all.resize(capacity_);
+  return all;
 }
 
 std::string describe_action(const Board& board, const PlayerAction& a) {
