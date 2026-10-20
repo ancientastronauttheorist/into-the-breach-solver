@@ -1211,6 +1211,29 @@ def recent_activity(idle: float) -> list:
     return out
 
 
+def save_matches_screen(bridge=None) -> str | None:
+    """None when the game's own save files hold what is on screen: a
+    player turn no mech has acted in yet (the game writes saveData.lua at
+    each turn start), else why not. Anywhere else the put-back loses
+    progress: at a mission's end, a reward or the island map the save on
+    disk is still the last turn start, so putting it back replays that turn
+    (run 62: a block at the Perfect Island screen replayed the Blob boss's
+    last turn and offered the reward again)."""
+    bridge = bridge or lp.Bridge()
+    age = bridge.heartbeat_age()
+    st = bridge.raw_state()
+    if age is None or age > 5 or st is None:
+        return "the bridge is silent (island map, a reward or a menu: the save on disk is an older turn start)"
+    if st.get("phase") != "combat_player" or int(st.get("turn") or 0) < 1:
+        return f"not at a player turn (phase {st.get('phase')}, turn {st.get('turn')})"
+    acted = [lp.describe_unit(u) for u in lp.units(st)
+             if u.get("team") == 1 and u.get("mech") and (u.get("hp") or 0) > 0
+             and (u.get("moved") or u.get("active") is False)]
+    if acted:
+        return "mechs have acted this turn (" + ", ".join(acted) + "): the save on disk is this turn's start"
+    return None
+
+
 def check_safe(args) -> None:
     others = other_drivers()
     if others:
@@ -1221,6 +1244,9 @@ def check_safe(args) -> None:
             raise lp.Refused("the game was driven recently (--idle-seconds): " + "; ".join(busy))
     if not lp.game_running():
         raise lp.Refused("the game is not running (start it first; each sample then quits and relaunches it)")
+    why = save_matches_screen()
+    if why:
+        raise lp.Refused("start a live block only at the start of a player turn: " + why)
 
 
 # ------------------------------------------------------------------ live restore (quit, swap, relaunch, Continue twice)

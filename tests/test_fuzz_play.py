@@ -530,6 +530,26 @@ class FuzzTest(unittest.TestCase):
         self.assertFalse((lp.PROFILE / "saveData.lua").exists())
         self.assertEqual((lp.PROFILE / "undoSave.lua").read_text(), "-- the player's own undo")
 
+    def test_a_live_block_starts_only_where_the_save_matches_the_screen(self):
+        class FakeBridge:
+            def __init__(self, st, age=0.5):
+                self.st, self.age = st, age
+
+            def heartbeat_age(self):
+                return self.age
+
+            def raw_state(self):
+                return self.st
+
+        mech = {"uid": 0, "type": "PunchMech", "team": 1, "mech": True, "hp": 3, "x": 1, "y": 1}
+        turn = {"phase": "combat_player", "turn": 2, "units": [dict(mech, active=True, moved=False)]}
+        self.assertIsNone(fz.save_matches_screen(FakeBridge(turn)))
+        self.assertIn("silent", fz.save_matches_screen(FakeBridge(turn, age=60)))  # island map, reward screens
+        self.assertIn("silent", fz.save_matches_screen(FakeBridge(None, age=None)))
+        self.assertIn("not at a player turn", fz.save_matches_screen(FakeBridge(dict(turn, phase="combat_enemy"))))
+        moved = dict(turn, units=[dict(mech, active=True, moved=True)])
+        self.assertIn("mechs have acted", fz.save_matches_screen(FakeBridge(moved)))
+
     def test_put_back_cli_takes_a_backup_without_savedata(self):
         game = self.fake_game()
         session = self.tmp / "fuzz" / "old"
