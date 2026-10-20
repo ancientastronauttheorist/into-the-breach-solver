@@ -293,6 +293,14 @@ void simulate(Engine& engine, const Loaded& l, const std::vector<PlayerAction>& 
   auto note_result = [&](json& step, const ActionResult& r, const std::string& what) {
     step["status"] = to_string(r.status);
     step["chance_nodes"] = r.resolve.chances.size();
+    // The step's Grid Defense rolls (a shot or bump of the player's on a
+    // building; the plan takes the default: not resisted), as the enemy
+    // phase's "grid_defense" (loadout_eval's expected grid loss reads both).
+    json rolls = json::array();
+    for (const ChanceRecord& c : r.resolve.chances) {
+      if (c.kind == ChanceKind::GridDefense) rolls.push_back(json{{"point", point_json(c.point)}, {"amount", c.amount}});
+    }
+    step["grid_defense"] = std::move(rolls);
     step["timing_sensitive"] = r.resolve.timing_sensitive();
     step["lua_errors"] = r.lua_errors;
     step["unapplied_lua_writes"] = r.unapplied.size();
