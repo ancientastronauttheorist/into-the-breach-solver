@@ -172,6 +172,23 @@ def apply_candidate(items: lo.Items, ts: TurnStart, cand: Candidate) -> tuple[di
     return dict(data, bridge_state=state), info, state
 
 
+def owned_core_upgrades(turns: list) -> tuple[dict, str]:
+    """The mechs' own core upgrades in the newest turn start's save:
+    ({squad index: {"hp": bool, "move": bool}}, that turn's key). A run
+    buys each once (healthPower / movePower), so an hp:/move: candidate for
+    a mech that has it already is no option. ({}, "") without a save."""
+    for ts in reversed(turns):
+        if ts.save is None:
+            continue
+        try:
+            mechs = lo.squad(lo.parse_save(ts.save.read_text(errors="replace")))
+        except (lo.LoadoutError, ValueError, OSError):
+            continue
+        powered = lambda cells: bool(cells) and cells[0] != 0  # noqa: E731
+        return {m.index: {"hp": powered(m.health_power), "move": powered(m.move_power)} for m in mechs}, ts.key
+    return {}, ""
+
+
 def tier_vector(worst: dict, tiers: tuple = RANKED) -> tuple:
     out = []
     for t in tiers:
@@ -354,6 +371,15 @@ def main(argv=None, *, engine=None) -> int:
         turns = pick_turns(args)
         if not turns:
             raise lp.Refused("no playable turn starts of this squad to evaluate on")
+        owned, newest = owned_core_upgrades(turns)
+        for c in [c for c in cands if not c.control]:
+            have = [f"hp:{k}" for k in c.hp if owned.get(k, {}).get("hp")] + \
+                   [f"move:{k}" for k in c.move if owned.get(k, {}).get("move")]
+            if have:
+                lp.say(f"skipped {c.text}: the mech already has {', '.join(have)} (save of {newest})")
+                cands.remove(c)
+        if not any(not c.control for c in cands):
+            raise lp.Refused("no candidate left to evaluate")
         items = lo.Items(lo.game_scripts(args.game))
         out_dir = Path(args.out) if args.out else OUT_ROOT / time.strftime("%Y%m%d_%H%M%S")
         out_dir.mkdir(parents=True, exist_ok=True)

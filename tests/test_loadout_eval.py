@@ -43,8 +43,8 @@ def squad_state() -> dict:
 
 class ScoringEngine:
     """solve(): a worst case computed from the board: grid -1 unless mech 0
-    carries Prime_Lasermech_A, mech_hp = the mechs' HP, kills = mech 1's
-    move. Records every board it was asked."""
+    carries Prime_Lasermech_A, mech_hp = the mechs' HP, kills = mech 0's
+    move (the save's mechs 1 and 2 have their HP core, mech 1 its move core). Records every board it was asked."""
 
     def __init__(self, proven=True):
         self.boards = []
@@ -58,7 +58,7 @@ class ScoringEngine:
         grid = 0 if "Prime_Lasermech_A" in (mechs.get(0, {}).get("weapons_exact") or []) else -1
         worst = {"grid_survival": 1.0, "grid": grid, "building_hp": 0, "mechs": 0, "objectives_failed": 0,
                  "mech_hp": sum(u.get("hp") or 0 for u in mechs.values()), "objectives": 0,
-                 "kills": mechs.get(1, {}).get("move", 0), "next_turn": -5}
+                 "kills": mechs.get(0, {}).get("move", 0), "next_turn": -5}
         return {"ok": True, "worst_case": worst, "proven_optimal": self.proven, "plan": []}
 
     def close(self):
@@ -77,14 +77,14 @@ class LoadoutEvalTest(unittest.TestCase):
         lp.LIVE_ROOT, lp.CURRENT = self._roots
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def record(self, run="20261018_000000", mission=0, turn=1, state=None) -> Path:
+    def record(self, run="20261018_000000", mission=0, turn=1, state=None, save_text=None) -> Path:
         d = lp.LIVE_ROOT / run
         d.mkdir(parents=True, exist_ok=True)
         st = copy.deepcopy(state or squad_state())
         st["turn"] = turn
         p = d / f"m{mission:02d}_turn_{turn:02d}_solve_input.json"
         p.write_text(json.dumps({"run_id": run, "label": "solve_input", "data": {"bridge_state": st}}))
-        text = tl.SAVE.read_text()
+        text = save_text if save_text is not None else tl.SAVE.read_text()
         (d / f"m{mission:02d}_turn_{turn:02d}_saveData.lua").write_text(text)
         (d / f"m{mission:02d}_turn_{turn:02d}_undoSave.lua").write_text(text)
         lp.CURRENT.write_text(json.dumps({"run": str(d)}))
@@ -141,17 +141,17 @@ class LoadoutEvalTest(unittest.TestCase):
     def test_candidates_are_scored_against_each_turns_baseline_and_ranked(self):
         for t in (1, 2, 3):
             self.record(turn=t)
-        rc, report, out, eng = self.run_eval(["--candidate", "hp:1", "--candidate", "0:Prime_Lasermech_A,*",
-                                              "--candidate", "move:1", "--candidate", "0:Brute_Jetmech"])
+        rc, report, out, eng = self.run_eval(["--candidate", "hp:0", "--candidate", "0:Prime_Lasermech_A,*",
+                                              "--candidate", "move:0", "--candidate", "0:Brute_Jetmech"])
         self.assertEqual(rc, 0, out)
         res = {r["candidate"]: r for r in report["results"]}
         laser = res["0:Prime_Lasermech_A,*"]
         self.assertEqual((laser["turns"], laser["better"], laser["worse"]), (3, 3, 0))
         self.assertEqual(laser["sums"]["grid"], 3.0)
-        self.assertEqual(res["hp:1"]["sums"], {"mech_hp": 6.0})
+        self.assertEqual(res["hp:0"]["sums"], {"mech_hp": 6.0})
         self.assertEqual(laser["sums"], {"grid": 3.0})  # nothing else moved
-        self.assertEqual(res["move:1"]["sums"], {"kills": 3.0})
-        self.assertEqual(res["move:1"]["cores"], 1)
+        self.assertEqual(res["move:0"]["sums"], {"kills": 3.0})
+        self.assertEqual(res["move:0"]["cores"], 1)
         # Illegal on every turn (the squad holds that weapon already): skipped, not scored.
         self.assertEqual((res["0:Brute_Jetmech"]["turns"], res["0:Brute_Jetmech"]["skipped"]), (0, 3))
         # One baseline per turn, one solve per legal candidate and the control.
@@ -197,6 +197,23 @@ class LoadoutEvalTest(unittest.TestCase):
         grid = result("hp:2", [{"verdict": 1, "delta": {"grid": 1.0}, "proven": True, "cores": 1}])
         ranked = sorted([same, safer, grid], key=lambda r: r.rank_key(), reverse=True)
         self.assertEqual([r.cand.text for r in ranked], ["hp:2", "hp:0", "hp:1"])
+
+    def test_a_core_upgrade_the_mech_has_is_no_candidate(self):
+        """Run 60: Ice already had its +2 HP from an earlier shop and hp:1
+        was still offered. The newest save's healthPower / movePower rule it
+        out; other candidates still run."""
+        text = tl.SAVE.read_text().replace('["healthPower"] = {0, },', '["healthPower"] = {1, },', 1)
+        self.assertEqual([m.health_power for m in tl.lo.squad(tl.lo.parse_save(text))], [[1], [1], [1]])
+        owner = 0
+        self.record(turn=1)
+        self.record(turn=2, save_text=text)
+        rc, report, out, _ = self.run_eval(["--candidate", f"hp:{owner}", "--candidate", f"move:{owner}", "--no-control"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"skipped hp:{owner}: the mech already has hp:{owner}", out)
+        self.assertEqual([r["candidate"] for r in report["results"]], [f"move:{owner}"])
+        rc, _, out, _ = self.run_eval(["--candidate", f"hp:{owner}", "--no-control"])
+        self.assertEqual(rc, 2)
+        self.assertIn("no candidate left", out)
 
     def test_unproven_turns_are_counted_apart(self):
         self.record()
