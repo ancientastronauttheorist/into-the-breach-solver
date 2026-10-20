@@ -56,7 +56,23 @@ PILOT = re.compile(r"CreatePilot\s*\{[^}]*?\bId\s*=\s*\"([^\"]+)\"", re.S)
 # Pilot level-up skills by id (engine board.hpp LevelSkill).
 LEVEL_SKILLS = ("Health", "Move", "Grid", "Reactor", "Opener", "Closer", "Popular", "Thick", "Skilled",
                 "Invulnerable", "Adrenaline", "Pain", "Regen", "Conservative")
-KINDS = ("weapons", "fired", "pilots", "skills", "missions", "enemies", "mechs")
+KINDS = ("weapons", "fired", "pilots", "skills", "missions", "enemies", "allies", "mechs")
+# Defined in the game's scripts but never created in a normal run (checked
+# 2026-10-19 against the island mission and boss lists, the spawner and the
+# weapons and missions that create pawns): counted apart, not in the totals.
+NOT_IN_PLAY = {
+    "Mission_Battle": "commented out of the island list",
+    "Mission_Fence": "in no island list", "Mission_Laser": "in no island list",
+    "Mission_Piston": "in no island list", "Mission_Respawn": "in no island list",
+    "Mission_Sandstorm": "in no island list", "Mission_NanoStorm": "in no island list",
+    "Mission_SlugBoss": "in no boss list",
+    "LeaperBoss": "its boss mission is commented out", "DiggerBoss": "its boss mission is commented out",
+    "Slug1": "spawned by nothing", "Slug2": "spawned by nothing", "SlugEgg1": "spawned by nothing",
+    "SlugBoss": "its boss mission is in no list", "Garden1": "spawned by nothing",
+    "Hornet_Acid": "spawned by nothing", "Firefly_Acid": "spawned by nothing",
+    "Scorpion_Acid": "spawned by nothing", "MantisEgg": "spawned by nothing",
+    "Jelly_Necro1": "spawned by nothing", "Spiderling2": "only a tooltip preview; eggs hatch Spiderling1",
+}
 STEP_RE = re.compile(r"m\d+_turn_(\d+)_step(\d+)_\d+\.json$")
 
 
@@ -167,6 +183,10 @@ def count_starts(files: list, out: dict) -> None:
                         out["skills"][LEVEL_SKILLS[sid]] += 1
             elif u.get("team") == 6:
                 out["enemies"][u.get("type") or "?"] += 1
+            elif not u.get("mech"):
+                # Other teams' units: an enemy type can fight for the player
+                # (Bot Defense's mines); main() counts the enemy types.
+                out["allies"][u.get("type") or "?"] += 1
 
 
 def empty() -> dict:
@@ -235,7 +255,7 @@ def section(title: str, full: list, live: Counter, fuzz: Counter, unseen_only: b
     """One item kind: seen live, in fuzz sessions, in either; with
     `holdable`, the totals over what a run can hold, the rest listed apart."""
     either = lambda n: live.get(n) or fuzz.get(n)  # noqa: E731
-    pool = [n for n in full if holdable is None or n in holdable]
+    pool = [n for n in full if (holdable is None or n in holdable) and not (n in NOT_IN_PLAY and not either(n))]
     head = (f"{title}: {sum(1 for n in pool if live.get(n))}/{len(pool)} seen live, "
             f"{sum(1 for n in pool if fuzz.get(n))} in fuzz sessions, {sum(1 for n in pool if either(n))} in either")
     if holdable is not None:
@@ -250,9 +270,13 @@ def section(title: str, full: list, live: Counter, fuzz: Counter, unseen_only: b
     if missing:
         lines.append(f"  never seen ({len(missing)}): " + ", ".join(missing))
     if holdable is not None:
-        apart = [n for n in full if n not in holdable and not either(n)]
+        apart = [n for n in full if n not in holdable and n not in NOT_IN_PLAY and not either(n)]
         if apart:
             lines.append(f"  not holdable in a run, never seen ({len(apart)}): " + ", ".join(apart))
+    dead = [n for n in full if n in NOT_IN_PLAY and not either(n)]
+    if dead:
+        lines.append(f"  not in normal play, never seen ({len(dead)}): "
+                     + ", ".join(f"{n} ({NOT_IN_PLAY[n]})" for n in dead))
     other = sorted(n for n in set(live) | set(fuzz) if n not in set(full))
     if other and not unseen_only:
         lines.append("  seen, not in the game's list: " + ", ".join(other))
@@ -297,7 +321,8 @@ def main(argv=None) -> int:
     lines += section("missions", [m for m in missions if m not in parents or s["missions"].get(m)
                                   or f["missions"].get(m)], s["missions"], f["missions"], args.unseen) + [""]
     if enemies:
-        lines += section("enemy types", enemies, s["enemies"], f["enemies"], args.unseen)
+        on_side = lambda c: Counter({n: k for n, k in c["allies"].items() if n in enemies})  # noqa: E731
+        lines += section("enemy types", enemies, s["enemies"] + on_side(s), f["enemies"] + on_side(f), args.unseen)
     else:
         lines.append("enemy types: no engine build (engine/build/itb_inspect) to list them")
     print("\n".join(lines))
