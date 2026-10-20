@@ -51,7 +51,8 @@ tools::LiveSession* session() {
 bool is_state_file(const fs::path& p) {
   const std::string n = p.filename().string();
   if (p.extension() != ".json") return false;
-  for (const char* suffix : {"_prediction.json", "_solve.json", "manifest.json", "_last_prediction.json"}) {
+  for (const char* suffix : {"_prediction.json", "_prediction_resisted.json", "_solve.json", "manifest.json",
+                             "_last_prediction.json"}) {
     if (n.ends_with(suffix)) return false;
   }
   return true;
