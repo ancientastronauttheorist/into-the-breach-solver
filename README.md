@@ -24,6 +24,17 @@ play:
 | Against the old bot's plans | never worse wherever the search finished; strictly better on 362 of 469 boards |
 | Live, two missions incl. a boss | every player action matched the engine's prediction once the loadout was known |
 
+Since then (2026-10-20), playing whole runs on **Unfair** with Advanced
+Edition, shop and reward choices priced by the solver itself
+(`scripts/loadout_eval.py`):
+
+| | |
+|---|---|
+| Unfair runs | **22 wins in 54**; 5 of the last 6; runs 58 and 63 finished with the grid full (7/7) |
+| Coverage | every weapon, upgrade, passive, pilot and pilot skill a run can hold was played live or in live fuzz sessions; 58/58 reachable missions, 92/93 reachable enemy types |
+| Recorded whole turns replayed through the enemy phase | **99.6%** of 223 match the game exactly or with a labelled recording artefact |
+| Loss analysis (two-turn oracle, 86 loss turns) | 83% were already the best play over two turns; the rest led to the worst-then-sum next-turn estimate now live |
+
 ## How it works
 
 ```
