@@ -479,6 +479,13 @@ python3 scripts/loadout_eval.py --last 12 --candidate 'power:1' --candidate 'ski
   played the same kind (`--uniform`: none of this). A turn ends with no
   legal sub-action left, after `--max-steps` (12), or at random
   (`--stop-prob` 0.06 per step).
+- **Where a live block may start.** The put-back restores the game's own
+  save files, which the game writes at each turn start. A live block
+  therefore starts only at a player turn no mech has acted in
+  (`save_matches_screen`): a silent bridge (island map, rewards, menus),
+  another phase or a turn in progress is refused. Run 62's block, started
+  at a Perfect Island screen, put back the Blob boss's last turn start:
+  that turn was replayed and the reward offered again.
 - **Grid safety.** Only sequences the engine predicts keep `--min-grid`
   (2) grid and a living mech through every step and the enemy phase
   (worst case, no resist) are played (up to `--tries` 5, else the start is
@@ -625,7 +632,8 @@ python3 scripts/loadout_eval.py --last 12 --candidate 'power:1' --candidate 'ski
   current run (`--last N`, `--run`) is solved with the live ranking as
   recorded and once per candidate (a `loadout.py` spec written into that
   turn's checkpoint, weapons from storage allowed; `hp:<mech>` +2 Health,
-  `move:<mech>` +1 Move; `skills:<mech>=<A>,<B>[@<level>]` the pilot's
+  `move:<mech>` +1 Move, skipped when the newest recorded save shows that
+  mech has bought it; `skills:<mech>=<A>,<B>[@<level>]` the pilot's
   level-up skills; `def:<N>` +N% Grid Defense, `power:<N>` N Grid Power
   bought with the grid full, both as overpower bonus, capped at 25), and
   each candidate's change of the solver's worst case is summed tier by
@@ -653,7 +661,12 @@ python3 scripts/loadout_eval.py --last 12 --candidate 'power:1' --candidate 'ski
   game's scripts (`ITB_GAME_DIR`; enemies via `itb_inspect --pawns`):
   names only. Live runs and live fuzz sessions (`--fuzz`, default
   `recordings/fuzz`; dry runs left out) are separate columns; weapon totals
-  count what a run can hold, the rest listed apart.
+  count what a run can hold, the rest listed apart. Enemy types count on
+  either side (Bot Defense's Snowmine1 bots fight for the player).
+  Missions and enemy types a normal run never creates (in no island,
+  boss or spawn list, commented out, or a tooltip preview: `NOT_IN_PLAY`,
+  checked 2026-10-19) are listed with the reason and left out of the
+  totals.
 
 ## Python bindings
 
