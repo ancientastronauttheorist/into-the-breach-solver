@@ -352,7 +352,8 @@ python3 scripts/two_turn_oracle.py run --run <run> --tag lost --workers 2   # re
 
 `solve` returns the plan (`Plan::actions`), `steps` (one per move, weapon
 or repair, each with the predicted `board` after it, its status, chance
-nodes and timing flags; `weapon_index` is the slot in the unit's weapons),
+nodes, its `grid_defense` rolls (tile, grid at stake; not resisted) and
+timing flags; `weapon_index` is the slot in the unit's weapons),
 `start` / `after_player` / `after_enemy` boards, `enemy_phase` (events,
 `emerged_unknown`, `mission_ended`, exactness, `chance_nodes` and the
 `grid_defense` rolls with their tile and grid at stake), `worst_case` and
@@ -449,6 +450,7 @@ python3 scripts/fuzz_play.py --unfired --samples 10                  # inject th
 python3 scripts/fuzz_play.py --loadout '0:Prime_Lasermech_A,Passive_FlameImmune;pilot=Pilot_Rock' --samples 5
 python3 scripts/loadout.py --check                                   # the save model vs every recorded checkpoint, and rewrites of each
 python3 scripts/loadout_eval.py --last 15 --candidate '1:*,Brute_Bombrun' --candidate 'hp:0'   # what a purchase would have been worth
+python3 scripts/loadout_eval.py --last 12 --candidate 'power:1' --candidate 'skills:2=Grid,Move@1'  # Grid Defense: expected grid saved
 ```
 
 - **Turn starts** are the recorded `m<MM>_turn_<TT>_solve_input.json` of
@@ -623,9 +625,23 @@ python3 scripts/loadout_eval.py --last 15 --candidate '1:*,Brute_Bombrun' --cand
   current run (`--last N`, `--run`) is solved with the live ranking as
   recorded and once per candidate (a `loadout.py` spec written into that
   turn's checkpoint, weapons from storage allowed; `hp:<mech>` +2 Health,
-  `move:<mech>` +1 Move), and each candidate's change of the solver's
-  worst case is summed tier by tier (grid first), proven turns ranked
-  first. A turn's better/worse verdict follows the solver's own ranking
+  `move:<mech>` +1 Move; `skills:<mech>=<A>,<B>[@<level>]` the pilot's
+  level-up skills; `def:<N>` +N% Grid Defense, `power:<N>` N Grid Power
+  bought with the grid full, both as overpower bonus, capped at 25), and
+  each candidate's change of the solver's worst case is summed tier by
+  tier (grid first), proven turns ranked first. The worst case never
+  resists, so Grid Defense alone would show "no change": every solve is
+  also priced by its expected grid loss (the predicted plan's Grid Defense
+  rolls, the steps' and the enemy phase's, each resisted with the board's
+  chance, the grid floored at 0), and the candidates rank by their proven
+  certain gains (a line that surely keeps the grid, grid, buildings, mechs,
+  stars), then by the expected values (grid survival odds where every line
+  can lose the grid, expected grid saved), then by the solver's verdicts
+  and the rest; then the same over all turns. A Grid Defense item thus
+  never outranks a proven grid, building or mech gain, and beats "no
+  change". The candidate's Grid Defense is written where the loader reads
+  it (`grid_overflow`, the pilot record; `grid_defense` when a state gives
+  that). A turn's better/worse verdict follows the solver's own ranking
   (next-turn estimates included). A control re-solves each baseline with
   1.5x the budget: the solver is deterministic on a board, so that shows
   how far unproven answers move with search effort. One turn at a time on

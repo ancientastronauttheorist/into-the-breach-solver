@@ -65,6 +65,50 @@ class ScoringEngine:
         pass
 
 
+POPULAR, INVULNERABLE = tl.lo.LEVEL_SKILLS.index("Popular"), tl.lo.LEVEL_SKILLS.index("Invulnerable")
+
+
+def grid_state(overflow=0, difficulty=2, base=15) -> dict:
+    """squad_state with Grid Defense as the bridge exports it (overpower
+    bonus, base) and the save's pilots at level 1 with skills that do
+    nothing on a board (Popular, Invulnerable): Grid Defense 15 + overflow."""
+    st = squad_state()
+    st.update(grid_overflow=overflow, grid_defense_base=base, grid_base_difficulty=difficulty, difficulty=difficulty)
+    for u, pid in zip((u for u in st["units"] if u.get("mech")), ("Pilot_Miner", "Pilot_Detritus", "Pilot_Archive")):
+        u["pilot"] = {"id": pid, "level": 1, "skill1": POPULAR, "skill2": INVULNERABLE, "xp": 30}
+        u.update(pilot_id=pid, pilot_level=1, pilot_skills=[f"skill1={POPULAR}", f"skill2={INVULNERABLE}"])
+    return st
+
+
+class GridEngine:
+    """solve(): the enemy phase hits two populated buildings for 1 each
+    (two Grid Defense rolls; one with Prime_Lasermech_A on mech 0: its
+    worst case loses 1 grid, not 2), at the Grid Defense the engine reads
+    from the state (loadout_eval.grid_defense mirrors its loader). Proven."""
+
+    def __init__(self):
+        self.boards = []
+
+    def solve(self, path, time_limit, max_time=0, min_tiers=0, **ranking):
+        st = json.loads(Path(path).read_text())["data"]["bridge_state"]
+        self.boards.append(st)
+        mechs = {u["uid"]: u for u in st["units"] if u.get("mech") and u.get("team") == 1}
+        hits = 1 if "Prime_Lasermech_A" in (mechs.get(0, {}).get("weapons_exact") or []) else 2
+        pct = le.grid_defense(st)
+        g0 = st["grid_power"]
+        worst = {"grid_survival": 1.0, "grid": -hits, "building_hp": -hits, "mechs": 0, "objectives_failed": 0,
+                 "mech_hp": sum(u.get("hp") or 0 for u in mechs.values()), "objectives": 0, "kills": 0,
+                 "next_turn": -5}
+        return {"ok": True, "worst_case": worst, "proven_optimal": True, "plan": [],
+                "grid_defense": {"percent": 15 if pct is None else pct, "source": "state" if pct is not None else "default"},
+                "start": {"grid_power": g0}, "after_enemy": {"grid_power": g0 - hits},
+                "steps": [{"sub": "weapon", "grid_defense": []}],
+                "enemy_phase": {"grid_defense": [{"point": [2, 2], "amount": 1}] * hits}}
+
+    def close(self):
+        pass
+
+
 class LoadoutEvalTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="itb_loadout_eval_"))
@@ -222,6 +266,172 @@ class LoadoutEvalTest(unittest.TestCase):
         r = report["results"][0]
         self.assertEqual((r["better"], r["proven_turns"], r["proven_better"]), (1, 0, 0))
         self.assertIn("(unproven)", out)
+
+    # ------------------------------------------------------------ Grid Defense
+
+    def test_grid_defense_candidates_parse(self):
+        c = le.parse_candidate("skills:1=grid,Health@2+def:3+power:1")
+        self.assertEqual((c.skills, c.defense, c.power, c.mechs(), c.cores()),
+                         ([(1, 2, 0, 2)], 3, 1, {1}, 0))
+        self.assertEqual(le.parse_candidate("skills:0=Move,Grid").skills, [(0, 1, 2, None)])
+        for bad in ("def:0", "def:26", "power:0", "skills:1=Grid,Grid", "skills:1=Grid,Foo", "skills:3=Grid,Move",
+                    "skills:1=Grid,Move@3", "skills:1=Grid", "skills:1=Grid,Move+skills:1=Move,Health"):
+            with self.assertRaises(le.CandidateError, msg=bad):
+                le.parse_candidate(bad)
+
+    def test_grid_defense_as_the_engine_reads_it(self):
+        st = grid_state(overflow=4)
+        self.assertEqual(le.grid_defense(st), 19)  # base 15 + overflow 4, nobody has Grid learned
+        u = le.mech_unit(st, 1)
+        u["pilot"]["skill2"] = le.GRID_SKILL  # learned at level 2 only
+        self.assertEqual(le.grid_defense(st), 19)
+        u["pilot"]["level"] = 2
+        self.assertEqual(le.grid_defense(st), 22)
+        # The bridge's pilot record wins over pilot_skills, as in the engine's loader.
+        u["pilot_skills"] = []
+        self.assertEqual(le.grid_defense(st), 22)
+        del u["pilot"]
+        u.update(pilot_level=1, pilot_skills=[f"skill1={le.GRID_SKILL}"])
+        self.assertEqual(le.grid_defense(st), 22)
+        st.pop("grid_defense_base")
+        self.assertEqual(le.grid_defense(dict(st, difficulty=3)), 7)  # no base on Unfair
+        self.assertEqual(le.grid_defense(dict(st, grid_defense=40)), 40)  # given in percent
+        self.assertIsNone(le.grid_defense({"units": []}))
+
+    def test_overpower_bonus_purchases_and_limits(self):
+        self.assertEqual([le.overpower(0, n) for n in (1, 5, 6, 20, 30)], [2, 10, 11, 25, 25])
+        self.assertEqual(le.overpower(9, 1), 11)
+        c = le.parse_candidate("power:2")
+        le.resolve_defense(c, {"grid_overflow": 4, "difficulty": 2})
+        self.assertEqual(c.pp, 4)  # 4 -> 6 -> 8
+        le.resolve_defense(c, {"grid_overflow": 4, "difficulty": 3})
+        self.assertEqual(c.pp, 7)  # Unfair: 2 points a purchase, 4 -> 6 -> 8 -> 10 -> 11
+        with self.assertRaises(le.CandidateError):
+            le.resolve_defense(le.parse_candidate("power:1"), {"grid_overflow": 25, "difficulty": 2})
+        c = le.parse_candidate("def:3")
+        le.resolve_defense(c, {"grid_overflow": 22})
+        self.assertEqual(c.pp, 3)
+        with self.assertRaises(le.CandidateError):
+            le.resolve_defense(le.parse_candidate("def:4"), {"grid_overflow": 22})
+        with self.assertRaises(le.CandidateError):
+            le.resolve_defense(le.parse_candidate("def:1"), {})  # no overpower bonus known
+
+    def test_grid_defense_candidates_patch_the_board(self):
+        self.record(state=grid_state(overflow=4))
+        ts = le.find_turn_starts(lp.LIVE_ROOT, need_save=True)[0]
+        items = tl.lo.Items(self.game / "scripts")
+        before = le.read_state(ts.path)[0]
+        _, info, st = le.apply_candidate(items, ts, le.parse_candidate("skills:0=Grid,Health@2"))
+        u, b = le.mech_unit(st, 0), le.mech_unit(before, 0)
+        self.assertEqual((u["pilot"]["level"], u["pilot"]["skill1"], u["pilot"]["skill2"], u["pilot"]["id"]),
+                         (2, le.GRID_SKILL, 0, "Pilot_Miner"))
+        self.assertEqual((u["pilot_level"], u["pilot_skills"]), (2, [f"skill1={le.GRID_SKILL}"]))
+        self.assertEqual((u["hp"], u["max_hp"]), (b["hp"] + 2, b["max_hp"] + 2))  # Health learned
+        self.assertEqual(info["gd"], [19, 22])
+        self.assertEqual(st["grid_overflow"], 4)  # the engine adds the pilot itself
+        cand = le.parse_candidate("def:3")
+        le.resolve_defense(cand, before)
+        _, info, st = le.apply_candidate(items, ts, cand)
+        self.assertEqual((st["grid_overflow"], info["gd"]), (7, [19, 22]))
+        # A state that gives the chance in percent: it changes instead.
+        given = dict(grid_state(overflow=4), grid_defense=30)
+        ts.path.write_text(json.dumps({"data": {"bridge_state": given}}))
+        _, info, st = le.apply_candidate(items, ts, le.parse_candidate("skills:2=Grid,Move"))
+        self.assertEqual((st["grid_defense"], info["gd"]), (33, [30, 33]))
+        # A skill the pilot's Blacklist forbids.
+        zoltan = grid_state()
+        le.mech_unit(zoltan, 2)["pilot"]["id"] = "Pilot_Zoltan"
+        ts.path.write_text(json.dumps({"data": {"bridge_state": zoltan}}))
+        with self.assertRaises(le.CandidateError):
+            le.apply_candidate(items, ts, le.parse_candidate("skills:2=Grid,Health"))
+
+    def test_the_overpower_bonus_comes_from_the_save_when_the_state_lacks_it(self):
+        st = squad_state()
+        save = self.tmp / "saveData.lua"
+        save.write_text('GameData = {["network"] = 7, ["overflow"] = 6, }\n')
+        ts = le.TurnStart("r", 0, 1, self.tmp / "x.json", save)
+        self.assertTrue(le.fill_grid_overflow(st, ts))
+        self.assertEqual(st["grid_overflow"], 6)
+        self.assertFalse(le.fill_grid_overflow(st, ts))  # it has one now
+
+    def test_expected_grid_loss(self):
+        # Grid 3, two rolls of 2 (the second would take only the last 1), 14%.
+        self.assertAlmostEqual(le.expected_lost(3, [2, 2], 3, 0.14), 3 * 0.86 ** 2 + 2 * 2 * 0.14 * 0.86)
+        # A loss without a roll stays.
+        self.assertAlmostEqual(le.expected_lost(5, [1], 3, 0.25), 2 + 0.75)
+        self.assertEqual(le.expected_lost(4, [], 0, 0.5), 0)
+        reply = {"start": {"grid_power": 4}, "after_enemy": {"grid_power": 1},
+                 "steps": [{"grid_defense": [{"amount": 1}]}, {}], "enemy_phase": {"grid_defense": [{"amount": 2}]},
+                 "grid_defense": {"percent": 20}}
+        e = le.expected_grid(reply, {})
+        self.assertEqual((e["gd"], e["lost"], e["rolls"]), (20, 3, [1, 2]))
+        self.assertAlmostEqual(e["expected"], 3 * 0.8)
+        self.assertIsNone(le.expected_grid({"start": {"grid_power": 4}}, {}))  # the engine refused the plan
+
+    def test_grid_defense_is_priced_by_expected_grid_and_ranked_below_proven_gains(self):
+        for t in (1, 2):
+            self.record(turn=t, state=grid_state(overflow=4))
+        rc, report, out, eng = self.run_eval(
+            ["--no-control", "--candidate", "move:0", "--candidate", "skills:1=Grid,Invulnerable",
+             "--candidate", "skills:2=Grid,Invulnerable@0", "--candidate", "def:5",
+             "--candidate", "0:Prime_Lasermech_A,*"], engine=GridEngine())
+        self.assertEqual(rc, 0, out)
+        res = {r["candidate"]: r for r in report["results"]}
+        grid_pilot, defense, laser = res["skills:1=Grid,Invulnerable"], res["def:5"], res["0:Prime_Lasermech_A,*"]
+        # The worst case cannot see it: no tier moved, the solver ranks it the same.
+        self.assertEqual((grid_pilot["sums"], grid_pilot["better"], grid_pilot["worse"]), ({}, 0, 0))
+        # Two resistible hits a turn at 19% -> 22%: 2 x 0.03 grid a turn saved.
+        self.assertEqual(grid_pilot["gd"], [19, 22])
+        self.assertAlmostEqual(grid_pilot["proven_expected"]["grid_saved"], 0.12)
+        self.assertAlmostEqual(defense["proven_expected"]["grid_saved"], 0.2)
+        self.assertEqual(defense["gd"], [19, 24])
+        # Grid not learned yet (level 0): nothing, as "no change".
+        self.assertEqual(res["skills:2=Grid,Invulnerable@0"]["expected"]["grid_saved"], 0)
+        self.assertEqual(res["move:0"]["expected"]["grid_saved"], 0)
+        # One hit fewer: the proven grid gain, and its expected value alike (0.81 a turn).
+        self.assertEqual(laser["proven_sums"]["grid"], 2.0)
+        self.assertAlmostEqual(laser["proven_expected"]["grid_saved"], 1.62)
+        lines = out.splitlines()
+        head = next(i for i, l in enumerate(lines) if l.startswith("candidate "))
+        table = [l.split()[0] for l in lines[head + 1:] if l.strip()]
+        self.assertIn("def:5: overpower bonus 4 -> 9 (+5% Grid Defense)", out)
+        self.assertEqual(table[:3], ["0:Prime_Lasermech_A,*", "def:5", "skills:1=Grid,Invulnerable"])
+        self.assertEqual(set(table[3:]), {"move:0", "skills:2=Grid,Invulnerable@0"})  # no change: a tie
+        self.assertIn("19->22%", out)
+
+    def test_a_grid_defense_purchase_past_the_cap_is_no_candidate(self):
+        self.record(turn=1, state=grid_state(overflow=10))
+        self.record(turn=2, state=grid_state(overflow=24))
+        rc, report, out, _ = self.run_eval(["--no-control", "--candidate", "def:2", "--candidate", "power:1",
+                                            "--candidate", "def:1"], engine=GridEngine())
+        self.assertEqual(rc, 0, out)
+        self.assertIn("skipped def:2: the overpower bonus caps at 25: 24 now, so def: at most 1", out)
+        res = {r["candidate"]: r for r in report["results"]}
+        self.assertEqual(set(res), {"power:1", "def:1"})
+        self.assertEqual(res["power:1"]["gd"], [39, 40])  # 24 -> 25: one point left
+        self.assertEqual(res["def:1"]["rows"][0]["gd"], [25, 26])  # the same +1 on the older turn
+
+    def test_expected_values_rank_between_proven_gains_and_the_verdict(self):
+        """A pure Grid Defense item (expected grid only) ranks below a proven
+        grid gain and above a safer next turn alone and "no change"; a
+        grid survival change counts as certain only when one side surely
+        keeps the grid."""
+        def result(text, rows):
+            r = le.Result(le.parse_candidate(text))
+            r.rows = rows
+            return r
+        row = dict(verdict=0, delta={}, proven=True, cores=0)
+        gd = result("def:3", [dict(row, exp_saved=0.09)] * 4)
+        grid = result("hp:2", [dict(row, verdict=1, delta={"grid": 1.0}, exp_saved=0.85)])
+        safer = result("hp:0", [dict(row, verdict=1, delta={"mech_hp": -2.0})] * 6)
+        same = result("hp:1", [dict(row)] * 6)
+        odds = result("move:1", [dict(row, verdict=1, delta={"grid_survival": 0.04}, sure=0, odds=0.04)])
+        sure = result("move:2", [dict(row, verdict=1, delta={"grid_survival": 0.74}, sure=1, odds=0.0)])
+        ranked = sorted([same, safer, gd, grid, odds, sure], key=lambda r: r.rank_key(), reverse=True)
+        self.assertEqual([r.cand.text for r in ranked], ["move:2", "hp:2", "move:1", "def:3", "hp:0", "hp:1"])
+        self.assertEqual(le.survival_split({"grid_survival": 0.26}, {"grid_survival": 0.3}), (0, 0.04))
+        self.assertEqual(le.survival_split({"grid_survival": 0.26}, {"grid_survival": 1.0}), (1, 0.0))
+        self.assertEqual(le.survival_split({"grid_survival": 1.0}, {}), (0, 0.0))
 
     def test_refusals(self):
         rc, report, out, _ = self.run_eval(["--candidate", "hp:0"])  # no run recorded
